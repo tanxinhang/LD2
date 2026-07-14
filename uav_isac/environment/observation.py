@@ -345,6 +345,14 @@ class ObservationBuilder:
         """Return observation dimension."""
         return self.obs_dim
 
+    def get_single_frame_dim(self) -> int:
+        """Return single-frame observation dim (without history stacking).
+
+        Used by StructuredActorNetwork._parse_obs to split stacked frames.
+        This replaces the hardcoded single_dim=227.
+        """
+        return self.obs_dim
+
     def get_global_state_dim(self) -> int:
         """Return global state dimension."""
         per_uav = 3 + 3 + 1 + 1  # pos + vel + battery + role

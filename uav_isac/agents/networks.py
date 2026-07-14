@@ -110,11 +110,16 @@ class StructuredActorNetwork(nn.Module):
     """
 
     def __init__(self, obs_dim: int, K: int = 8, Q: int = 8,
-                 entity_dim: int = 128, max_dp: float = 2.5):
+                 entity_dim: int = 128, max_dp: float = 2.5,
+                 single_frame_dim: int = 0):
         super().__init__()
         self.K, self.Q = K, Q
         self.max_dp = max_dp
         D = entity_dim
+        # Single-frame observation dimension (without history stacking).
+        # 0 = auto-detect from obs_dim / K / Q; explicitly provided by
+        # ObservationBuilder for multi-config safety (avoids hardcoded 227).
+        self.single_frame_dim = single_frame_dim
 
         # ── Entity encoders ──
         self.self_enc = nn.Sequential(
@@ -157,11 +162,34 @@ class StructuredActorNetwork(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=g)
                 nn.init.constant_(m.bias, 0.0)
 
+    def zero_init_new_layers(self, known_keys: set):
+        """Zero-initialize layers NOT present in an old checkpoint.
+
+        When loading a DAgger checkpoint that predates pd_hist_proj (or any
+        future layer addition), new layers get random orthogonal weights from
+        __init__ → _init_weights. That random init changes the policy, so the
+        "DAgger baseline" is no longer the true DAgger policy.
+
+        Call this AFTER load_state_dict(..., strict=False) to zero out any
+        parameter whose name is NOT in known_keys. For Linear layers, both
+        weight and bias are zeroed, making them identity-through-zero:
+        e_{kq} = e_{kq}^{base} + 0 = e_{kq}^{base}.
+
+        Args:
+            known_keys: set of parameter names present in the old checkpoint.
+        """
+        with torch.no_grad():
+            for n, p in self.named_parameters():
+                if n not in known_keys:
+                    p.zero_()
+                    print(f'  [zero_init] {n} ← zeros (not in old checkpoint)')
+
     def _parse_obs(self, obs: torch.Tensor):
         """Parse flat obs. Returns entity tensors as sequences (B, N, W, D)."""
         B = obs.shape[0]
         obs_dim = obs.shape[1]
-        single_dim = 227  # decentralized base dim
+        # Use configured single-frame dim; fall back to auto-detection
+        single_dim = self.single_frame_dim if self.single_frame_dim > 0 else obs_dim
 
         # Detect 2-frame stacking → split and stack as sequences
         if obs_dim > single_dim + 20:

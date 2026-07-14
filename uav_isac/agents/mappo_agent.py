@@ -37,6 +37,7 @@ class MAPPOAgent(BaseAgent):
         centralized_critic: bool = True,
         num_targets: int = 4,
         gru_hidden_dim: int = 0,
+        single_frame_dim: int = 0,
     ):
         """
         Args:
@@ -73,6 +74,7 @@ class MAPPOAgent(BaseAgent):
             self.actor = StructuredActorNetwork(
                 obs_dim=obs_dim, K=num_agents, Q=num_targets,
                 entity_dim=entity_dim, max_dp=action_space.max_dp,
+                single_frame_dim=single_frame_dim,
             ).to(self.device)
         else:
             self.actor = ActorNetwork(

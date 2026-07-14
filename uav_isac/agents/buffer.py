@@ -135,7 +135,8 @@ class RolloutBuffer:
         self.global_states[self.ptr] = global_state
         self.ptr += 1
 
-    def compute_gae(self, next_values: np.ndarray) -> None:
+    def compute_gae(self, next_values: np.ndarray,
+                    next_per_target_values: np.ndarray = None) -> None:
         """Compute GAE advantages and returns.
 
         δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
@@ -149,6 +150,9 @@ class RolloutBuffer:
 
         Args:
             next_values: (K,) for single env, or (N*K,) for N parallel envs
+            next_per_target_values: (N*K, Q) per-target bootstrap values.
+                Only terminal episodes (mask=0) get zero bootstrap;
+                buffer-truncated rollouts use the critic's V_q(s_{t+1}).
         """
         actual_size = self.ptr
         self.advantages = np.zeros((actual_size, self.num_agents), dtype=np.float64)
@@ -199,10 +203,13 @@ class RolloutBuffer:
                         self.returns[t, k] = gae + self.values[t, k]
 
         # ── Per-target GAE (S3c: target-wise critic) ──
-        # Compute per-target advantages using per-target values and rewards.
-        # This is done after scalar GAE; per-target advantages are shaped (T, K, Q).
+        # P1 FIX: use next_per_target_values for proper bootstrap.
+        # Previously hardcoded V_q=0 for the last step even when the
+        # rollout was truncated (not terminal) — that biased A_{t,q} low.
         self.per_target_advantages = np.zeros_like(self.per_target_rewards)
         self.per_target_returns = np.zeros_like(self.per_target_rewards)
+
+        _have_pt_next = next_per_target_values is not None
 
         if num_envs == 1:
             for k in range(self.num_agents):
@@ -210,7 +217,11 @@ class RolloutBuffer:
                     gae = 0.0
                     for t in reversed(range(actual_size)):
                         if t == actual_size - 1:
-                            next_v_pt = 0.0  # terminal value = 0
+                            # Use critic bootstrap, masked by done flag
+                            if _have_pt_next and k < len(next_per_target_values):
+                                next_v_pt = next_per_target_values[k, q]
+                            else:
+                                next_v_pt = 0.0
                         else:
                             next_v_pt = self.per_target_values[t + 1, k, q]
 
@@ -231,7 +242,10 @@ class RolloutBuffer:
                         for s in reversed(range(T)):
                             t = n + s * num_envs
                             if s == T - 1:
-                                next_v_pt = 0.0
+                                if _have_pt_next:
+                                    next_v_pt = next_per_target_values[n * self.num_agents + k, q]
+                                else:
+                                    next_v_pt = 0.0
                             else:
                                 next_t = n + (s + 1) * num_envs
                                 next_v_pt = self.per_target_values[next_t, k, q]

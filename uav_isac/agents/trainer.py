@@ -130,6 +130,11 @@ class MAPPTrainer:
             if hasattr(agents[0], 'actor') and hasattr(agents[0].actor, 'neighbor_gru'):
                 _gru_dim = agents[0].actor.neighbor_gru.hidden_size
 
+        # P1 FIX: auto-detect single_frame_dim from ObservationBuilder if not
+        # explicitly set. Replaces hardcoded single_dim=227 in networks.py.
+        if hasattr(agents[0].actor, 'single_frame_dim') and agents[0].actor.single_frame_dim == 0:
+            agents[0].actor.single_frame_dim = env.core.obs_builder.get_single_frame_dim()
+
         # ── STARTUP DIAGNOSTIC: confirm config/code actually loaded ──
         # (entropy=0 in logs would be impossible if sigma-floor were really 0.37,
         #  so print the EFFECTIVE values to catch stale-cache / non-loaded changes.)
@@ -410,7 +415,8 @@ class MAPPTrainer:
                 if tau_cvar > 0:
                     pd_frame = np.array(macro_pd[-1]) if macro_pd else np.zeros(self.Q)
                     deficits = np.maximum(0.0, tau_cvar - pd_frame)  # (Q,)
-                    cvar_k = 2  # top-25% of 8 targets ≈ 2 worst
+                    # P1 FIX: top-k driven by Q, not hardcoded 2
+                    cvar_k = max(1, int(np.ceil(0.25 * self.Q)))
                     sorted_def = np.sort(deficits)[::-1]
                     cvar_deficit = float(np.mean(sorted_def[:cvar_k]))
                     self._rollout_cvar_deficits.append(cvar_deficit)
@@ -494,32 +500,57 @@ class MAPPTrainer:
         self._current_obs = all_obs
 
         # ── Compute GAE: final values for each env ──
+        # P1 FIX: use final observations from all_obs (NOT stale _obs_gpu),
+        # final GRU hidden states from envs, and compute per-target bootstrap.
         with torch.inference_mode():
             agent_ids = torch.arange(K, device=self.device).repeat(N)
             agent_oh = torch.nn.functional.one_hot(agent_ids, K).float()
-            # Forward actor on final obs to get comm for critic (cheap, no grad)
-            _, _, _, final_comm, _, _ = self.agents[0].actor(self._obs_gpu[:N*K])
-            final_comm_agg = final_comm.reshape(N, K, -1).mean(dim=1).repeat_interleave(K, dim=0)  # (N*K, 16)
+
+            # Build final obs batch from actual final observations
+            final_obs_batch = np.concatenate(
+                [np.stack([all_obs[n][str(k)] for k in range(K)]) for n in range(N)])
+            self._obs_gpu[:N*K].copy_(torch.as_tensor(final_obs_batch, dtype=torch.float32))
+
+            # Build final GRU hidden state batch from envs
+            final_h_prev_list = []
+            for n in range(N):
+                for k in range(K):
+                    for kk in range(K):
+                        if kk == k: continue
+                        key = (k, kk)
+                        h = self.envs[n].core._gru_hidden.get(key)
+                        if h is None:
+                            h = np.zeros(self.buffer.gru_hidden_dim if self.buffer._has_gru else 64, dtype=np.float32)
+                        final_h_prev_list.append(h)
+            final_h_batch = None
+            if final_h_prev_list:
+                final_h_batch = torch.as_tensor(
+                    np.stack(final_h_prev_list), dtype=torch.float32, device=self.device
+                ).unsqueeze(0)  # (1, N*K*(K-1), D)
+
+            # Forward actor on final obs WITH final GRU state
+            _, _, _, final_comm, _, _ = self.agents[0].actor(
+                self._obs_gpu[:N*K], final_h_batch)
+            final_comm_agg = final_comm.reshape(N, K, -1).mean(dim=1).repeat_interleave(K, dim=0)
+
             if self.centralized_critic:
                 final_gs_batch = np.stack([e.core.get_global_state() for e in self.envs])
                 self._gs_gpu[:N].copy_(torch.as_tensor(final_gs_batch, dtype=torch.float32))
                 base = self._gs_gpu[:N].repeat_interleave(K, dim=0)
             else:
-                # IPPO: final local obs per agent
-                final_obs = np.concatenate(
-                    [np.stack([all_obs[n][str(k)] for k in range(K)]) for n in range(N)])
-                base = torch.as_tensor(final_obs, dtype=torch.float32, device=self.device)
+                base = self._obs_gpu[:N*K]  # already has final obs
             gs_with_id = torch.cat([base, agent_oh, final_comm_agg], dim=-1)
+
+            # Scalar and per-target next values
             next_values = self.agents[0].critic(gs_with_id).detach().cpu().numpy()
+            _, next_target_values_t = self.agents[0].critic.forward_with_targets(gs_with_id)
+            next_pt_values = (next_target_values_t.detach().cpu().numpy()
+                              if next_target_values_t is not None else None)
 
         # Effective gamma between macro transitions
         gamma_eff = self.gamma_micro ** self.macro_interval
         self.buffer.gamma = gamma_eff
-        # GAE needs per-env per-agent next_values
-        # Buffer stores: [env0_step0, env1_step0, ..., envN-1_step0,
-        #                 env0_step1, env1_step1, ...]
-        # GAE is computed per-agent in sequence; done flags handle boundaries.
-        self.buffer.compute_gae(next_values)
+        self.buffer.compute_gae(next_values, next_pt_values)
 
         return episode_ended
 
@@ -842,11 +873,17 @@ class MAPPTrainer:
             obs, _ = eval_env.reset(seed=int(ep_seed))
             pd_hist = []   # list of mean P_D_q per frame
             pd_per_target = []  # list of (Q,) per frame
+            # P0 FIX: maintain streaming GRU hidden state during eval.
+            # Previously eval called actor(obs) without h_prev → h=0 every frame,
+            # inconsistent with rollout (which uses cumulative GRU state).
+            eval_h_prev = None  # None → zero-init on first frame
             while True:
                 ob = np.stack([obs[str(k)] for k in range(K)])
                 with torch.inference_mode():
-                    dp_mean, dp_log_std, role_logits, _, _, _ = actor(
-                        torch.as_tensor(ob, dtype=torch.float32, device=self.device))
+                    ob_t = torch.as_tensor(ob, dtype=torch.float32, device=self.device)
+                    dp_mean, dp_log_std, role_logits, _, _, h_new = actor(ob_t, eval_h_prev)
+                    # Save h_new for next frame (detach already in inference_mode)
+                    eval_h_prev = h_new
                 dpm = dp_mean.detach().cpu().numpy()
                 dps = dp_log_std.detach().cpu().numpy()
                 rl = role_logits.detach().cpu().numpy()

@@ -1,10 +1,14 @@
 #!/usr/bin/env python
-"""Validate P0 fixes: PPO ratio consistency + DAgger→1-PPO-update weak3 test.
+"""Strict paired validation of P0 fixes: GRU/PPO ratio + attention freeze.
 
-Key questions:
-  Q1: Does the old-log-prob consistency assertion pass? (ratio problem fixed?)
-  Q2: Does Full PPO 1 update still destroy weak3? (if YES → ratio was the cause)
-  Q3: How do EH, Encoder-only, Heads-only compare?
+Design (P0-1 fix, 2026-07-14 v2):
+  - Fresh env / agents / trainer per case (no state leakage).
+  - Same DAgger checkpoint → zero-init new layers → SAME baseline for all.
+  - Full snapshot (actor, critic, optimizer) saved before any update;
+    each case restores from this snapshot → identical initial conditions.
+  - Same rollout seed and same test bank for all cases.
+  - Streaming GRU hidden state maintained during evaluation.
+  - Ratio assertion runs independently for each case.
 """
 import sys, os, copy
 import numpy as np
@@ -19,26 +23,36 @@ from uav_isac.agents.networks import StructuredActorNetwork, split_param_groups
 from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.trainer import MAPPTrainer
 
-# ── Config ──
 cfg = load_config('config/exp_800_k8_q8.yaml')
 K, Q = cfg.scenario.K, cfg.scenario.Q
 max_dp = cfg.uav.v_max * cfg.scenario.dt
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Device: {device}, K={K}, Q={Q}")
-print(f"Config: {cfg.marl.ppo_epochs} ppo_epochs, lr={cfg.marl.lr}, clip={cfg.marl.ppo_clip}")
 
-# ── Eval helper ──
-def evaluate(actor, aspace, env_seeds=[20001,20002,20003,20004,20005], steady_window=20):
-    """Run deterministic eval on fixed seeds. Returns {steady, worst, weak3, per_target}."""
-    results = {'steady': [], 'worst': [], 'weak3': [], 'per_target': []}
-    for seed in env_seeds:
+# ── Fixed seeds for reproducibility ──
+SNAPSHOT_SEED = 42
+ROLLOUT_SEED = 123
+EVAL_SEEDS = [20001, 20002, 20003, 20004, 20005]
+STEADY_WINDOW = 20
+
+# ═══════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════
+
+def evaluate_streaming(actor, aspace, seeds=EVAL_SEEDS):
+    """Evaluate with streaming GRU hidden state (matches rollout behavior)."""
+    results = {'steady': [], 'worst': [], 'weak3': []}
+    for seed in seeds:
         env = UAVISACEnv(config=cfg, seed=seed)
         obs, _ = env.reset(seed=seed)
         pd_per_target = []
+        eval_h_prev = None  # zero-init each episode
         while True:
             ob = np.stack([obs[str(k)] for k in range(K)])
             with torch.no_grad():
-                dpm, _, rl, _, _, _ = actor(torch.as_tensor(ob, dtype=torch.float32, device=device))
+                ob_t = torch.as_tensor(ob, dtype=torch.float32, device=device)
+                dpm, _, rl, _, _, h_new = actor(ob_t, eval_h_prev)
+                eval_h_prev = h_new
             dpm_np = dpm.cpu().numpy()
             rl_np = rl.cpu().numpy()
             acts = {}
@@ -50,22 +64,79 @@ def evaluate(actor, aspace, env_seeds=[20001,20002,20003,20004,20005], steady_wi
             if t.get('__all__') or tr.get('__all__'):
                 break
         env.close()
-        w = min(steady_window, len(pd_per_target))
-        steady = np.array(pd_per_target[-w:])  # (w, Q)
-        pt_mean = steady.mean(axis=0)          # (Q,)
-        results['steady'].append(float(pt_mean.mean()))
-        results['worst'].append(float(pt_mean.min()))
-        sorted_q = np.sort(pt_mean)
-        results['weak3'].append(float(np.mean(sorted_q[:3])))
-        results['per_target'].append(pt_mean)
+        w = min(STEADY_WINDOW, len(pd_per_target))
+        pt = np.array(pd_per_target[-w:]).mean(axis=0)
+        results['steady'].append(float(pt.mean()))
+        results['worst'].append(float(pt.min()))
+        results['weak3'].append(float(np.mean(np.sort(pt)[:3])))
     return {k: (float(np.mean(v)), float(np.std(v))) for k, v in results.items()}
 
 
+def build_fresh_case(aspace, dag_ckpt, dag_keys):
+    """Build a fresh env + agents + trainer, load DAgger, return (env, agents, trainer)."""
+    torch.manual_seed(SNAPSHOT_SEED)
+    np.random.seed(SNAPSHOT_SEED)
+    env = UAVISACEnv(config=cfg, seed=SNAPSHOT_SEED)
+    od = env.core.obs_builder.get_obs_dim()
+    gd = env.core.obs_builder.get_global_state_dim()
+    single_fd = env.core.obs_builder.get_single_frame_dim()
+
+    agents = [
+        MAPPOAgent(agent_id=k, obs_dim=od, global_state_dim=gd,
+                   action_space=aspace, num_agents=K, num_targets=Q,
+                   hidden_layers=cfg.marl.hidden_layers,
+                   lr=cfg.marl.lr, critic_lr_mult=cfg.marl.critic_lr_mult,
+                   max_grad_norm=cfg.marl.max_grad_norm, device=device)
+        for k in range(K)
+    ]
+    for k in range(1, K):
+        agents[k].actor = agents[0].actor
+        agents[k].critic = agents[0].critic
+
+    # Set single_frame_dim on actor
+    if hasattr(agents[0].actor, 'single_frame_dim'):
+        agents[0].actor.single_frame_dim = single_fd
+
+    # Load DAgger with zero-init for new layers
+    agents[0].actor.load_state_dict(dag_ckpt, strict=False)
+    agents[0].actor.zero_init_new_layers(dag_keys)
+
+    trainer = MAPPTrainer(env=env, agents=agents, config=cfg, device=device)
+    trainer._bc_actor = None
+    return env, agents, trainer
+
+
+def save_snapshot(agents):
+    """Save actor, critic, and optimizer states for restoration."""
+    return {
+        'actor': {k: v.clone() for k, v in agents[0].actor.state_dict().items()},
+        'critic': {k: v.clone() for k, v in agents[0].critic.state_dict().items()},
+        'actor_opt': {k: v for k, v in agents[0].actor_optimizer.state_dict().items()},
+        'critic_opt': {k: v for k, v in agents[0].critic_optimizer.state_dict().items()},
+    }
+
+
+def restore_snapshot(agents, snap):
+    """Restore actor, critic, and optimizer states."""
+    agents[0].actor.load_state_dict(snap['actor'])
+    agents[0].critic.load_state_dict(snap['critic'])
+    # Rebuild optimizer to ensure param references are correct, then load state
+    agents[0].actor_optimizer = torch.optim.Adam(
+        agents[0].actor.parameters(), lr=cfg.marl.lr)
+    agents[0].critic_optimizer = torch.optim.Adam(
+        agents[0].critic.parameters(), lr=cfg.marl.lr * cfg.marl.critic_lr_mult)
+    try:
+        agents[0].actor_optimizer.load_state_dict(snap['actor_opt'])
+        agents[0].critic_optimizer.load_state_dict(snap['critic_opt'])
+    except ValueError:
+        pass  # optimizer structure changed (e.g. frozen params), skip restore
+
+
 # ═══════════════════════════════════════════════════════════════════
-# STEP 1: Load DAgger warmstart, eval baseline
+# STEP 1: Build DAgger baseline actor, get known keys, evaluate
 # ═══════════════════════════════════════════════════════════════════
-print("\n" + "=" * 70)
-print("STEP 1: DAgger baseline evaluation")
+print("=" * 70)
+print("STEP 1: DAgger baseline (streaming GRU eval)")
 print("=" * 70)
 
 aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt)
@@ -75,134 +146,184 @@ aspace.structured_entity_dim = 64
 
 dag_path = 'results/warmstart_gru_dagger.pt'
 dag_ckpt = torch.load(dag_path, map_location=device, weights_only=False)
+dag_keys = set(dag_ckpt.keys())
 
-# Build actor with NEW architecture (has pd_hist_proj, which old ckpt lacks)
-obs_dim = 454  # K=8, Q=8 with 2-frame stacking
-actor = StructuredActorNetwork(obs_dim=obs_dim, K=K, Q=Q, entity_dim=64, max_dp=max_dp).to(device)
-missing, unexpected = actor.load_state_dict(dag_ckpt, strict=False)
-print(f"DAgger checkpoint loaded: {len(missing)} new keys (pd_hist_proj etc), {len(unexpected)} unexpected")
-actor.eval()
+# Build a standalone actor for baseline eval
+od_ref = 227  # K=8,Q=8 single-frame without P0
+env_ref = UAVISACEnv(config=cfg, seed=0)
+od_ref = env_ref.core.obs_builder.get_obs_dim()
+single_fd = env_ref.core.obs_builder.get_single_frame_dim()
+env_ref.close()
 
-dag_baseline = evaluate(actor, aspace)
-print(f"DAgger baseline: steady={dag_baseline['steady'][0]:.4f}±{dag_baseline['steady'][1]:.4f}, "
+baseline_actor = StructuredActorNetwork(
+    obs_dim=od_ref, K=K, Q=Q, entity_dim=64, max_dp=max_dp,
+    single_frame_dim=single_fd,
+).to(device)
+baseline_actor.load_state_dict(dag_ckpt, strict=False)
+baseline_actor.zero_init_new_layers(dag_keys)
+baseline_actor.eval()
+
+dag_baseline = evaluate_streaming(baseline_actor, aspace)
+print(f"DAgger (streaming GRU): steady={dag_baseline['steady'][0]:.4f}±{dag_baseline['steady'][1]:.4f}, "
       f"weak3={dag_baseline['weak3'][0]:.4f}±{dag_baseline['weak3'][1]:.4f}, "
       f"worst={dag_baseline['worst'][0]:.4f}±{dag_baseline['worst'][1]:.4f}")
 
 # ═══════════════════════════════════════════════════════════════════
-# STEP 2: Set up trainer with frozen DAgger actor, run 1 PPO update
+# STEP 2: Build fresh case, save snapshot
 # ═══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
-print("STEP 2: 1 PPO update (Full) — testing PPO ratio consistency")
+print("STEP 2: Build fresh Full-PPO case, save snapshot")
 print("=" * 70)
 
-env = UAVISACEnv(config=cfg, seed=42)
-od = env.core.obs_builder.get_obs_dim()
-gd = env.core.obs_builder.get_global_state_dim()
-print(f"Actual obs_dim={od}, global_dim={gd}")
+env_full, agents_full, trainer_full = build_fresh_case(aspace, dag_ckpt, dag_keys)
+snapshot = save_snapshot(agents_full)
 
-agents = [
-    MAPPOAgent(
-        agent_id=k, obs_dim=od, global_state_dim=gd,
-        action_space=aspace, num_agents=K,
-        num_targets=Q,
-        hidden_layers=cfg.marl.hidden_layers,
-        lr=cfg.marl.lr,
-        critic_lr_mult=cfg.marl.critic_lr_mult,
-        max_grad_norm=cfg.marl.max_grad_norm,
-        device=device,
-    )
-    for k in range(K)
-]
-for k in range(1, K):
-    agents[k].actor = agents[0].actor
-    agents[k].critic = agents[0].critic
-
-# Load DAgger weights
-agents[0].actor.load_state_dict(dag_ckpt, strict=False)
-
-# Create fresh trainer (this triggers the consistency assertion on first update)
-trainer = MAPPTrainer(env=env, agents=agents, config=cfg, device=device)
-trainer._bc_actor = None  # disable BC anchor for clean test
-
-# Run 1 PPO update — the consistency assertion fires here
-print("\n--- Running 1 PPO update (Full) ---")
-trainer.train_episode()
-
-# Save post-PPO actor
-post_ppo_state = {k: v.clone() for k, v in agents[0].actor.state_dict().items()}
+# Verify baseline from the trainer actor also matches
+agents_full[0].actor.eval()
+trainer_baseline = evaluate_streaming(agents_full[0].actor, aspace)
+print(f"Trainer actor (streaming): steady={trainer_baseline['steady'][0]:.4f}±{trainer_baseline['steady'][1]:.4f}, "
+      f"weak3={trainer_baseline['weak3'][0]:.4f}±{trainer_baseline['weak3'][1]:.4f}, "
+      f"worst={trainer_baseline['worst'][0]:.4f}±{trainer_baseline['worst'][1]:.4f}")
 
 # ═══════════════════════════════════════════════════════════════════
-# STEP 3: Eval post-1-update
+# STEP 3: Full PPO 1 update
 # ═══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
-print("STEP 3: Post-1-PPO-update evaluation (Full)")
+print("STEP 3: Full PPO 1 update")
 print("=" * 70)
 
-agents[0].actor.eval()
-post_ppo = evaluate(agents[0].actor, aspace)
-d_steady = post_ppo['steady'][0] - dag_baseline['steady'][0]
-d_weak3 = post_ppo['weak3'][0] - dag_baseline['weak3'][0]
-d_worst = post_ppo['worst'][0] - dag_baseline['worst'][0]
-print(f"Post-PPO (Full):  steady={post_ppo['steady'][0]:.4f}±{post_ppo['steady'][1]:.4f}  Δ={d_steady:+.4f}")
-print(f"                   weak3={post_ppo['weak3'][0]:.4f}±{post_ppo['weak3'][1]:.4f}  Δ={d_weak3:+.4f}")
-print(f"                   worst={post_ppo['worst'][0]:.4f}±{post_ppo['worst'][1]:.4f}  Δ={d_worst:+.4f}")
+agents_full[0].actor.train()
+agents_full[0].critic.train()
+trainer_full.train_episode()
+agents_full[0].actor.eval()
+full_result = evaluate_streaming(agents_full[0].actor, aspace)
+
+d_steady = full_result['steady'][0] - dag_baseline['steady'][0]
+d_weak3 = full_result['weak3'][0] - dag_baseline['weak3'][0]
+d_worst = full_result['worst'][0] - dag_baseline['worst'][0]
+print(f"Full PPO (streaming): steady={full_result['steady'][0]:.4f}  Δ={d_steady:+.4f}")
+print(f"                       weak3={full_result['weak3'][0]:.4f}  Δ={d_weak3:+.4f}")
+print(f"                       worst={full_result['worst'][0]:.4f}  Δ={d_worst:+.4f}")
 
 # ═══════════════════════════════════════════════════════════════════
-# STEP 4: EH-only update (freeze attention, test selective plasticity)
+# STEP 4: EH (Attention frozen) — fresh case from snapshot
 # ═══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
-print("STEP 4: EH-only 1 PPO update (Attention frozen)")
+print("STEP 4: EH PPO 1 update (fresh case from snapshot)")
 print("=" * 70)
 
-# Reload DAgger
-agents[0].actor.load_state_dict(dag_ckpt, strict=False)
-agents[0].actor.train()  # must be in train mode for GRU backward
+env_eh, agents_eh, trainer_eh = build_fresh_case(aspace, dag_ckpt, dag_keys)
+restore_snapshot(agents_eh, snapshot)
 
-# Freeze attention (with the FIXED condition that includes attn_norm)
-enc_params, head_params, attn_params = split_param_groups(agents[0].actor.named_parameters())
-for p in attn_params:
+# Freeze attention (with fixed condition: attn.* + attn_norm.*)
+enc_p, head_p, attn_p = split_param_groups(agents_eh[0].actor.named_parameters())
+for p in attn_p:
     p.requires_grad_(False)
-print(f"Frozen {len(attn_params)} attention params (incl. attn_norm): "
-      f"{[n for n, p in agents[0].actor.named_parameters() if not p.requires_grad]}")
+frozen_names = [n for n, p in agents_eh[0].actor.named_parameters() if not p.requires_grad]
+print(f"EH frozen: {frozen_names}")
 
 # Rebuild optimizer with only trainable params
-trainable = [p for p in agents[0].actor.parameters() if p.requires_grad]
-agents[0].actor_optimizer = torch.optim.Adam(trainable, lr=cfg.marl.lr)
+trainable = [p for p in agents_eh[0].actor.parameters() if p.requires_grad]
+agents_eh[0].actor_optimizer = torch.optim.Adam(trainable, lr=cfg.marl.lr)
 
-# Run 1 PPO update
-print("\n--- Running 1 PPO update (EH: Attention frozen) ---")
-trainer.train_episode()
+agents_eh[0].actor.train()
+agents_eh[0].critic.train()
+trainer_eh.train_episode()
+agents_eh[0].actor.eval()
+eh_result = evaluate_streaming(agents_eh[0].actor, aspace)
 
-# Eval
-agents[0].actor.eval()
-post_eh = evaluate(agents[0].actor, aspace)
-d_steady_eh = post_eh['steady'][0] - dag_baseline['steady'][0]
-d_weak3_eh = post_eh['weak3'][0] - dag_baseline['weak3'][0]
-print(f"Post-PPO (EH):    steady={post_eh['steady'][0]:.4f}±{post_eh['steady'][1]:.4f}  Δ={d_steady_eh:+.4f}")
-print(f"                   weak3={post_eh['weak3'][0]:.4f}±{post_eh['weak3'][1]:.4f}  Δ={d_weak3_eh:+.4f}")
-print(f"                   worst={post_eh['worst'][0]:.4f}±{post_eh['worst'][1]:.4f}  Δ={post_eh['worst'][0]-dag_baseline['worst'][0]:+.4f}")
+d_steady_eh = eh_result['steady'][0] - dag_baseline['steady'][0]
+d_weak3_eh = eh_result['weak3'][0] - dag_baseline['weak3'][0]
+d_worst_eh = eh_result['worst'][0] - dag_baseline['worst'][0]
+print(f"EH PPO (streaming):  steady={eh_result['steady'][0]:.4f}  Δ={d_steady_eh:+.4f}")
+print(f"                      weak3={eh_result['weak3'][0]:.4f}  Δ={d_weak3_eh:+.4f}")
+print(f"                      worst={eh_result['worst'][0]:.4f}  Δ={d_worst_eh:+.4f}")
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 5: E-only (Encoder only) — fresh case from snapshot
+# ═══════════════════════════════════════════════════════════════════
+print("\n" + "=" * 70)
+print("STEP 5: E-only PPO 1 update (fresh case from snapshot)")
+print("=" * 70)
+
+env_e, agents_e, trainer_e = build_fresh_case(aspace, dag_ckpt, dag_keys)
+restore_snapshot(agents_e, snapshot)
+
+# Freeze Attention + Heads
+enc_p, head_p, attn_p = split_param_groups(agents_e[0].actor.named_parameters())
+for p in attn_p + head_p:
+    p.requires_grad_(False)
+n_frozen = sum(1 for p in agents_e[0].actor.parameters() if not p.requires_grad)
+print(f"E-only: {n_frozen} params frozen (attn + heads)")
+
+trainable = [p for p in agents_e[0].actor.parameters() if p.requires_grad]
+agents_e[0].actor_optimizer = torch.optim.Adam(trainable, lr=cfg.marl.lr)
+
+agents_e[0].actor.train()
+agents_e[0].critic.train()
+trainer_e.train_episode()
+agents_e[0].actor.eval()
+e_result = evaluate_streaming(agents_e[0].actor, aspace)
+
+d_steady_e = e_result['steady'][0] - dag_baseline['steady'][0]
+d_weak3_e = e_result['weak3'][0] - dag_baseline['weak3'][0]
+print(f"E-only PPO (streaming): steady={e_result['steady'][0]:.4f}  Δ={d_steady_e:+.4f}")
+print(f"                          weak3={e_result['weak3'][0]:.4f}  Δ={d_weak3_e:+.4f}")
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 6: H-only (Heads only) — fresh case from snapshot
+# ═══════════════════════════════════════════════════════════════════
+print("\n" + "=" * 70)
+print("STEP 6: H-only PPO 1 update (fresh case from snapshot)")
+print("=" * 70)
+
+env_h, agents_h, trainer_h = build_fresh_case(aspace, dag_ckpt, dag_keys)
+restore_snapshot(agents_h, snapshot)
+
+# Freeze Encoder + Attention
+enc_p, head_p, attn_p = split_param_groups(agents_h[0].actor.named_parameters())
+for p in enc_p + attn_p:
+    p.requires_grad_(False)
+n_frozen = sum(1 for p in agents_h[0].actor.parameters() if not p.requires_grad)
+print(f"H-only: {n_frozen} params frozen (encoder + attn)")
+
+trainable = [p for p in agents_h[0].actor.parameters() if p.requires_grad]
+agents_h[0].actor_optimizer = torch.optim.Adam(trainable, lr=cfg.marl.lr)
+
+agents_h[0].actor.train()
+agents_h[0].critic.train()
+trainer_h.train_episode()
+agents_h[0].actor.eval()
+h_result = evaluate_streaming(agents_h[0].actor, aspace)
+
+d_steady_h = h_result['steady'][0] - dag_baseline['steady'][0]
+d_weak3_h = h_result['weak3'][0] - dag_baseline['weak3'][0]
+print(f"H-only PPO (streaming): steady={h_result['steady'][0]:.4f}  Δ={d_steady_h:+.4f}")
+print(f"                          weak3={h_result['weak3'][0]:.4f}  Δ={d_weak3_h:+.4f}")
 
 # ═══════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
-print("SUMMARY")
+print("SUMMARY (streaming GRU eval, strict paired)")
 print("=" * 70)
-print(f"{'':<20} {'steady_P_D':>12} {'weak3':>12} {'worst':>12}")
-print(f"{'DAgger baseline':<20} {dag_baseline['steady'][0]:12.4f} {dag_baseline['weak3'][0]:12.4f} {dag_baseline['worst'][0]:12.4f}")
-print(f"{'Full PPO 1 upd':<20} {post_ppo['steady'][0]:12.4f} {post_ppo['weak3'][0]:12.4f} {post_ppo['worst'][0]:12.4f}")
-print(f"{'EH PPO 1 upd':<20} {post_eh['steady'][0]:12.4f} {post_eh['weak3'][0]:12.4f} {post_eh['worst'][0]:12.4f}")
-print(f"\n{'Δ Full - DAgger':<20} {d_steady:+12.4f} {d_weak3:+12.4f} {d_worst:+12.4f}")
-print(f"{'Δ EH - DAgger':<20} {d_steady_eh:+12.4f} {d_weak3_eh:+12.4f} {d_worst_eh:+12.4f}")
+print(f"{'Case':<20} {'steady_P_D':>12} {'Δsteady':>10} {'weak3':>12} {'Δweak3':>10} {'worst':>12}")
+print(f"{'DAgger baseline':<20} {dag_baseline['steady'][0]:12.4f} {'—':>10} {dag_baseline['weak3'][0]:12.4f} {'—':>10} {dag_baseline['worst'][0]:12.4f}")
+for name, res, ds, dw in [
+    ('Full PPO', full_result, d_steady, d_weak3),
+    ('EH (frozen Attn)', eh_result, d_steady_eh, d_weak3_eh),
+    ('E-only', e_result, d_steady_e, d_weak3_e),
+    ('H-only', h_result, d_steady_h, d_weak3_h),
+]:
+    print(f"{name:<20} {res['steady'][0]:12.4f} {ds:+10.4f} {res['weak3'][0]:12.4f} {dw:+10.4f} {res['worst'][0]:12.4f}")
 
-if abs(d_weak3) < 0.03:
-    print("\n✓ Full PPO weak3 change < 0.03 — PPO ratio fix RESOLVED the instant-destruction problem.")
-    print("  Previous 'PPO systematically fails' conclusion should be downgraded to:")
-    print("  'Old recurrent-state handling caused PPO update invalidity.'")
-elif d_weak3 < -0.05:
-    print(f"\n✗ Full PPO still destroys weak3 (Δ={d_weak3:+.4f}) despite ratio fix.")
-    print("  → Problem is NOT only GRU/PPO state consistency. Investigate further.")
+# Judgment
+if abs(d_weak3) < 0.02 and abs(d_weak3_eh) < 0.02:
+    print("\n✓ All Δweak3 < 0.02 — PPO ratio fix CONFIRMED with strict pairing + streaming eval.")
+    print("  Full PPO does NOT immediately destroy DAgger.")
+elif abs(d_weak3) < 0.05:
+    print(f"\n~ Full PPO Δweak3={d_weak3:+.4f} — moderate. Run more seeds and >1 update.")
 else:
-    print(f"\n~ Full PPO weak3 change Δ={d_weak3:+.4f} — moderate. Run more seeds for significance.")
+    print(f"\n✗ Full PPO Δweak3={d_weak3:+.4f} still large. Investigate further.")
 
 print("\nDone.")
