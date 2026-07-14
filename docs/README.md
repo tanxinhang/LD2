@@ -70,10 +70,10 @@ python scripts/run_baselines.py
 # PPO ratio 修复验证 (DAgger → 1 PPO update → 对比)
 python scripts/test_ppo_ratio_fix.py
 
-# DAgger 变体训练 (D0/D1/D2 local-PD 对照)
+# Recurrent DAgger 变体训练 (D0/D1 local-PD 对照)
 python scripts/train_dagger_variants.py --mode all
 # 单独训练某一变体:
-python scripts/train_dagger_variants.py --mode D0 --dagger-iters 5
+python scripts/train_dagger_variants.py --mode D1 --dagger-iters 5
 
 # 正式多 seed 主实验(MAPPO vs IPPO + 基线),推荐用有 headroom 的场景:
 python scripts/run_experiments.py --config config/exp_800_q4.yaml --seeds 5

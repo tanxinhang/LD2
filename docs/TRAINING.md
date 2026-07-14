@@ -178,26 +178,34 @@ P0Solution(
 
 ---
 
-## 7. DAgger 变体训练 (D0/D1/D2, 2026-07-14)
+## 7. Recurrent DAgger 变体训练 (D0/D1, 2026-07-14 v2)
 
-三个 local-PD 输入模式的 DAgger 对照训练：
+两个 local-PD 输入模式的 recurrent DAgger 对照：
 
 ```bash
 python scripts/train_dagger_variants.py --mode all \
     --config config/exp_800_q4.yaml \
     --dagger-iters 5 --teacher-eps 60 --student-eps 40 \
-    --test-episodes 100 --out-dir results/dagger_variants
+    --val-episodes 20 --test-episodes 100 \
+    --out-dir results/dagger_variants
 ```
 
 | Mode | PD_hist | Comm | 用途 |
 |------|:---:|:---:|------|
 | D0 | zeros | zeros | 无检测历史基线 |
-| D1 | RX-only local | zeros | local confidence 独立价值 |
-| D2 | RX-only local | enabled | 邻居通信传播覆盖状态 |
+| D1 | RX-only local | zeros | local confidence（通信推迟到 PPO） |
 
-所有变体使用相同的 StructuredActorNetwork（含 pd_hist_proj），唯一差异是训练和评估时观测中 PD_hist 和 comm 部分的掩码。Checkpoint 通过 validation bank 上的 best steady_P_D 选择。
+**协议要点**：
+- Student rollout 使用 streaming GRU（h_prev 跨帧传递，episode 边界清零）
+- 监督训练存储 per-frame h_prev，forward 时传入 actor
+- Validation (20 eps) 按 max weak3 (steady ≥ base-0.01) 选择 checkpoint
+- Test (100 eps, 独立 bank) 在 checkpoint 冻结后运行一次
+- ep_fail 主门限 τ=0.3（辅以 τ=0.05）
+- D2 已移除：通信训练推迟到 PPO 阶段（PPO Trainer 已含 comm write-back + intent loss）
 
-**K=4,Q=4 结果**：三组差异在评估噪声范围内（Δ<0.005）。local-PD 对 nearest-target teacher 无可测量增益。价值应在 PPO fine-tuning 阶段重新评估。
+**限制**：单一 training seed；per-frame stored h_prev（非 chunk BPTT）。
+
+**建议**：选 D1 作为 PPO 初始化——符合分布式信息结构，`pd_hist_proj` 从 DAgger 阶段参与训练。
 
 ---
 
