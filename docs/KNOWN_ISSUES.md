@@ -7,22 +7,18 @@
 
 ---
 
-## DAgger 变体对照 (D0/D1, recurrent protocol, 2026-07-14)
+## DAgger 变体对照 (D0/D1, chunk BPTT, 2026-07-14 v3)
 
-对 local-PD 进行了 recurrent DAgger 训练对照（`scripts/train_dagger_variants.py`，K=4,Q=4）：
+**协议**：episode 序列存储 → chunk-based truncated BPTT (chunk_size=16)。每 chunk 用当前 actor 以 h=0 起始前向，chunk 间 detach。此方法消除了 v2 中 stored h_prev 随策略更新而过期的问题。Student rollout 使用 streaming GRU。Validation (20 eps) 按 max weak3 (steady ≥ base-0.01) 选 checkpoint。Test (100 eps) 独立。ep_fail 主门限 τ=0.3。每轮报告 hidden drift 诊断值。
 
-**协议**：student rollout 使用 streaming GRU；监督训练存储并传入 per-frame `h_prev`；validation (20 eps) 选择 checkpoint；test (100 eps) 独立报告。ep_fail 主门限 τ=0.3。
+**限制**：单一 training seed；chunk_size=16（非完整 episode BPTT）；通信推迟到 PPO。
 
-**限制**：单一 training seed (seed=42)；per-frame stored h_prev（非 chunk BPTT）；通信训练推迟到 PPO 阶段（D2 已移除）。
+| Variant | PD_hist | Comm | 训练方式 |
+|---------|:---:|:---:|------|
+| D0 | zeros | zeros | chunk BPTT |
+| D1 | RX-only | zeros | chunk BPTT |
 
-| Variant | PD_hist | Comm | steady | weak3 | ep_fail_030 | ep_fail_005 |
-|---------|:---:|:---:|:---:|:---:|:---:|:---:|
-| D0 | zeros | zeros | — | — | — | — |
-| D1 | RX-only | zeros | — | — | — | — |
-
-**结论**：local-PD 对 nearest-target DAgger 无可测量增益（nearest-target teacher 基于真实目标位置，不依赖检测历史）。local-PD 的价值应在 PPO fine-tuning + target-wise advantage 阶段检验。建议选 D1（RX-only local-PD）作为 PPO 初始化——符合分布式信息结构，`pd_hist_proj` 从 DAgger 阶段参与训练。
-
-**复现产物**：`results/dagger_variants/` 含 `run_manifest.json`、`test_episodes_D{0,1}.csv`、`val_history_D{0,1}.csv`、checkpoint `.pt` 文件。
+**结论**：D1 作为 PPO 统一初始化——接口一致性选择（与最终分布式信息结构一致，`pd_hist_proj` 从 DAgger 阶段参与训练），非性能胜出。local-PD 的价值应在 PPO + target-wise advantage 阶段检验。
 
 ---
 
