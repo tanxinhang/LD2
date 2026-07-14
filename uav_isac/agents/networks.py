@@ -103,10 +103,11 @@ class StructuredActorNetwork(nn.Module):
     projected and added to the target entity encoding, so the Actor can
     directly condition on which targets had low/high detection.
 
-    NOTE: PD_hist in the local observation is assumed to be the UAV's own
-    LOCAL detection confidence, not global fused P_D. If this becomes a
-    fused-centre broadcast, the communication cost (delay, bits, AoI) must
-    be accounted for in the protocol.
+    NOTE: PD_hist in the local observation IS the UAV's own LOCAL detection
+    confidence — P_D computed from deflection of bistatic pairs where THIS UAV
+    is tx or rx (not global fused P_D). Each UAV sees different PD_hist values.
+    This respects the decentralized information boundary: no free global
+    fusion-centre broadcast. See env_core.py prev_P_D_local (2026-07-14 fix).
     """
 
     def __init__(self, obs_dim: int, K: int = 8, Q: int = 8,

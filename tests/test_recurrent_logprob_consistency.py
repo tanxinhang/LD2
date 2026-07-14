@@ -1,0 +1,85 @@
+"""P0 regression: verify that old_log_prob can be recomputed exactly.
+
+This test must pass before any PPO training. If it fails, the PPO ratio
+is invalid and all training results are contaminated.
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+import torch
+import pytest
+
+from config.params import load_config
+from uav_isac.environment.action import ActionSpace
+from uav_isac.agents.networks import StructuredActorNetwork
+
+
+@pytest.mark.parametrize("k,q", [(4, 4), (8, 8)])
+def test_logprob_recomputation_matches_rollout(k, q):
+    """Recomputing log-prob with same h_prev must match rollout log-prob."""
+    cfg = load_config('config/exp_800_k8_q8.yaml' if k == 8 else 'config/exp_800_q4.yaml')
+    max_dp = cfg.uav.v_max * cfg.scenario.dt
+    device = 'cpu'
+
+    aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt)
+    aspace.num_targets = q
+    aspace.structured_actor = True
+    aspace.structured_entity_dim = 64
+
+    # Single-frame obs dim: self(8) + physics(3) + targets(q*17) + neighbors((k-1)*8) + global(2) + P_D(q) + comm(16)
+    # Without P0: 8+3+17q+8(k-1)+2+q+16 = 29 + 18q + 8(k-1)
+    obs_dim = 29 + 18*q + 8*(k-1)
+    actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64, max_dp=max_dp).to(device)
+
+    # Create a rollout-like scenario with non-zero h_prev
+    B = 4
+    obs = torch.randn(B, obs_dim)
+    h_prev = torch.randn(1, B*(k-1), 64) * 0.1  # small random GRU state
+
+    # First pass (simulating rollout): get actions + log_probs
+    with torch.no_grad():
+        dp_mean, dp_log_std, role_logits, _, _, _ = actor(obs, h_prev)
+
+    # Simulate an action
+    dp_norm = torch.tanh(dp_mean) * 0.5  # some action within range
+    dp_raw = torch.atanh(torch.clamp(dp_norm, -0.999, 0.999))
+    dp_std_pos = torch.exp(torch.clamp(dp_log_std, -20, 2))
+    var = dp_std_pos ** 2
+    rollout_log_prob = -0.5 * (
+        ((dp_raw - dp_mean) ** 2) / (var + 1e-6) + torch.log(2*np.pi*var + 1e-6)
+    ).sum(dim=-1)
+    rollout_log_prob -= torch.log(1.0 - dp_norm**2 + 1e-6).sum(dim=-1)
+
+    # Second pass (simulating update recomputation): same obs, same h_prev
+    dp_mean2, dp_log_std2, _, _, _, _ = actor(obs, h_prev)
+
+    dp_std_pos2 = torch.exp(torch.clamp(dp_log_std2, -20, 2))
+    var2 = dp_std_pos2 ** 2
+    recomputed_log_prob = -0.5 * (
+        ((dp_raw - dp_mean2) ** 2) / (var2 + 1e-6) + torch.log(2*np.pi*var2 + 1e-6)
+    ).sum(dim=-1)
+    recomputed_log_prob -= torch.log(1.0 - dp_norm**2 + 1e-6).sum(dim=-1)
+
+    max_diff = (rollout_log_prob - recomputed_log_prob).abs().max().item()
+    assert max_diff < 1e-4, (
+        f"K={k},Q={q}: max|rollout_lp - recomputed_lp| = {max_diff:.2e} >= 1e-4. "
+        f"PPO ratio is INVALID."
+    )
+
+
+def test_h_prev_none_vs_zero_are_equivalent():
+    """h_prev=None (zero-init) and h_prev=zeros should give same output."""
+    k, q = 4, 4
+    obs_dim = 29 + 18*q + 8*(k-1)
+    actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
+    obs = torch.randn(2, obs_dim)
+
+    with torch.no_grad():
+        out_none = actor(obs, None)
+        h_zero = torch.zeros(1, 2*(k-1), 64)
+        out_zero = actor(obs, h_zero)
+
+    # dp_mean should be identical
+    max_diff = (out_none[0] - out_zero[0]).abs().max().item()
+    assert max_diff < 1e-5, f"h_prev=None vs zeros: dp_mean diff={max_diff:.2e}"

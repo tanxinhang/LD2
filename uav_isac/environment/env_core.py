@@ -163,6 +163,12 @@ class EnvironmentCore:
         self.fc_position: Optional[np.ndarray] = None
         self.t: int = 0
         self.prev_P_D: Optional[np.ndarray] = None
+        # P1 FIX (2026-07-14): per-UAV LOCAL detection confidence.
+        # Previously prev_P_D was the global fused P_D_q broadcast to all UAVs
+        # for free — violating decentralized execution. Now each UAV sees only
+        # its own local P_D contribution: P_D computed from deflection of pairs
+        # where THIS UAV is tx or rx.
+        self.prev_P_D_local: Dict[int, np.ndarray] = {}
         # Assignment hold: cache P0 solution to reduce reward non-stationarity
         self._cached_p0_solution = None
         self._last_solve_frame = -1
@@ -497,6 +503,25 @@ class EnvironmentCore:
         # Store previous P_D for next observation
         self.prev_P_D = P_D_q.copy()
 
+        # P1 FIX: compute per-UAV LOCAL detection confidence.
+        # Each UAV k sees only P_D computed from deflection of pairs where
+        # k is either tx or rx. This respects the decentralized information
+        # boundary (no free global fusion-centre broadcast).
+        self.prev_P_D_local = {}
+        for k in range(self.K):
+            D_k = np.zeros(self.Q, dtype=np.float64)
+            for (i, j, q) in p0_solution.selected_set:
+                if i == k or j == k:
+                    for e in deflection_entries:
+                        if e.i == i and e.j == j and e.q == q:
+                            D_k[q] += e.d_eff
+                            break
+            # Compute local P_D from local deflection using the same formula
+            from uav_isac.physical.detection import compute_P_D
+            P_D_local_k = np.array([compute_P_D(D_k[q], self.cfg.detection.P_FA)
+                                    for q in range(self.Q)])
+            self.prev_P_D_local[k] = P_D_local_k
+
         # Build step info
         uav_states = [u.get_state() for u in self.uavs]
         target_states = [t.get_state_as_target_state() for t in self.targets]
@@ -585,8 +610,13 @@ class EnvironmentCore:
         if not hasattr(self, '_prev_obs_deque'):
             self._prev_obs_deque: dict = {}  # {agent_id: deque of prev frames}
         for k in range(self.K):
+            # P1 FIX: use per-UAV LOCAL detection confidence, not global fused P_D.
+            # Falls back to global prev_P_D if prev_P_D_local is empty (backward compat).
+            local_pd = self.prev_P_D_local.get(k, self.prev_P_D)
+            if local_pd is None:
+                local_pd = self.prev_P_D
             cur = self.obs_builder.build_local_obs(
-                k, uav_states, beliefs, self.prev_P_D,
+                k, uav_states, beliefs, local_pd,
                 oracle_targets=oracle_targets,
                 selected_set=getattr(self, '_last_selected_set', []),
                 deflection_entries=getattr(self, '_last_deflection_entries', None),
@@ -642,6 +672,7 @@ class EnvironmentCore:
         return {
             't': self.t,
             'prev_P_D': None if self.prev_P_D is None else self.prev_P_D.copy(),
+            'prev_P_D_local': {k: v.copy() for k, v in self.prev_P_D_local.items()},
             'fc_position': None if self.fc_position is None else self.fc_position.copy(),
             'uavs': copy.deepcopy(self.uavs),
             'targets': copy.deepcopy(self.targets),
@@ -662,6 +693,7 @@ class EnvironmentCore:
         """
         self.t = state['t']
         self.prev_P_D = None if state['prev_P_D'] is None else state['prev_P_D'].copy()
+        self.prev_P_D_local = {k: v.copy() for k, v in state.get('prev_P_D_local', {}).items()}
         self.fc_position = None if state['fc_position'] is None else state['fc_position'].copy()
         self.uavs = copy.deepcopy(state['uavs'])
         self.targets = copy.deepcopy(state['targets'])

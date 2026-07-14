@@ -23,19 +23,18 @@
 
 当前 StructuredActorNetwork (Self/Target/Neighbor Encoders + Cross-Attention + Gate + Heads) 与提案一致。DAgger 0.71-0.74 steady 证明架构容量足够。
 
-### 1.2 Attention 冻结 🔴 需改
+### 1.2 Attention 冻结 ✅ 已完成 (S1, 2026-07-14)
 
-**当前**：全模块同步更新 (E+A+H 一起梯度下降)。
-
-**提案**：训练时 `attn.in_proj_*`, `attn.out_proj.*`, `attn_norm.*` 的 `requires_grad=False`。
-
-**改动位置**：`trainer.py` 或 `mappo_agent.py` 中在创建 optimizer 前设置。
+**当前**：通过 `split_param_groups()` 显式分组，`ATTENTION_PARAM_PREFIXES = ('attn.', 'attn_norm.')`。
 
 ```python
-for n, p in actor.named_parameters():
-    if n.startswith('attn.'):
-        p.requires_grad_(False)
+enc_params, head_params, attn_params = split_param_groups(actor.named_parameters())
+for p in attn_params:
+    p.requires_grad_(False)
+# → 6 params frozen: attn.in_proj_*, attn.out_proj.*, attn_norm.*
 ```
+
+**改动位置**：`networks.py`（split_param_groups）, `trainer.py`（freeze 逻辑）。
 
 ### 1.3 Encoder LR 🔴 需降
 
@@ -47,35 +46,33 @@ for n, p in actor.named_parameters():
 
 ## 二、Critic
 
-### 2.1 单标量 → Per-target 向量 🔴 需重构
+### 2.1 单标量 → Per-target 向量 ✅ 已完成 (S3, 2026-07-14)
 
 **当前** (`networks.py:CriticNetwork`)：
 ```python
-self.net = mlp(state_dim + num_agents + comm_dim, hidden_layers, 1)
-# Output: (B, 1)
+self.value_head = nn.Linear(last_dim, 1)           # scalar V(s)
+self.target_heads = nn.ModuleList([                # per-target V_q(s)
+    nn.Linear(last_dim, 1) for _ in range(Q)
+])
+# forward_with_targets() → (scalar_v, per_target_v)
 ```
 
-**提案**：
-```python
-self.target_value_head = mlp(hidden_dim, [256,256], Q)      # (B, 8)
-self.comm_value_head = mlp(hidden_dim, [256,256], 1)         # (B, 1)
-# Output: (B, 9) → [V_1,...,V_8, V_comm]
-```
-
-### 2.2 GAE 单标量 → Per-target GAE 🔴 需重构
+### 2.2 GAE 单标量 → Per-target GAE ✅ 已完成 (S3c, 2026-07-14)
 
 **当前** (`buffer.py:compute_gae`)：
 ```python
+# Scalar GAE (unchanged)
 delta = rewards[t,k] + gamma * next_v * masks[t,k] - values[t,k]
+
+# Per-target GAE (NEW)
+delta_q = per_target_rewards[t,k,q] + gamma * next_v_pt * mask - per_target_values[t,k,q]
+A_q = delta_q + gamma * lambda * mask * A_next_q
+# Returns per_target_advantages (T, K, Q) and per_target_returns (T, K, Q)
 ```
 
-**提案**：
+**遗留**: Actor loss 仍使用 scalar advantage。S4 需要将 `per_target_advantages` 加权聚合为 per-agent advantage 并接入 actor loss。
 ```python
-# Per-target TD error
-delta_q = r_q + gamma * V_q(s') - V_q(s)  # (Q,)
-# Per-target GAE
-A_q = delta_q + gamma * lambda * A_next_q
-# UAV-target credit-weighted advantage
+# S4 (待实施):
 A_k = sum_q w_q * alpha_{kq} * A_q - lambda_comm * A_comm
 ```
 

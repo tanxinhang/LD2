@@ -24,10 +24,11 @@ from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.trainer import MAPPTrainer
 
 cfg = load_config('config/exp_800_k8_q8.yaml')
+cfg.marl.num_envs = 1  # single env for speed + strict reproducibility
 K, Q = cfg.scenario.K, cfg.scenario.Q
 max_dp = cfg.uav.v_max * cfg.scenario.dt
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f"Device: {device}, K={K}, Q={Q}")
+print(f"Device: {device}, K={K}, Q={Q}, num_envs={cfg.marl.num_envs}")
 
 # ── Fixed seeds for reproducibility ──
 SNAPSHOT_SEED = 42
@@ -117,19 +118,20 @@ def save_snapshot(agents):
 
 
 def restore_snapshot(agents, snap):
-    """Restore actor, critic, and optimizer states."""
+    """Restore actor, critic, and optimizer states.
+
+    CRITICAL: call this BEFORE any param freezing. Optimizer state
+    structure must match the saved snapshot.
+    """
     agents[0].actor.load_state_dict(snap['actor'])
     agents[0].critic.load_state_dict(snap['critic'])
-    # Rebuild optimizer to ensure param references are correct, then load state
+    # Rebuild optimizers over ALL params (must match snapshot), then load state
     agents[0].actor_optimizer = torch.optim.Adam(
         agents[0].actor.parameters(), lr=cfg.marl.lr)
     agents[0].critic_optimizer = torch.optim.Adam(
         agents[0].critic.parameters(), lr=cfg.marl.lr * cfg.marl.critic_lr_mult)
-    try:
-        agents[0].actor_optimizer.load_state_dict(snap['actor_opt'])
-        agents[0].critic_optimizer.load_state_dict(snap['critic_opt'])
-    except ValueError:
-        pass  # optimizer structure changed (e.g. frozen params), skip restore
+    agents[0].actor_optimizer.load_state_dict(snap['actor_opt'])
+    agents[0].critic_optimizer.load_state_dict(snap['critic_opt'])
 
 
 # ═══════════════════════════════════════════════════════════════════
