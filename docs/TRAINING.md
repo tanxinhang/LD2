@@ -197,3 +197,17 @@ P0Solution(
 ```bash
 python scripts/test_ppo_ratio_fix.py  # DAgger → 1 PPO update → 对比
 ```
+
+### 严格配对实验要求 (2026-07-14)
+
+任何比较 "PPO 是否破坏 DAgger" 的实验必须满足：
+
+1. **Checkpoint 兼容**：加载旧 DAgger 后调用 `zero_init_new_layers()`，保证新增层权重为 0（不改变策略）。
+2. **独立 trainer**：每个 case（Full/EH/E-only/H-only）使用全新 env + agents + trainer，不从其他 case 复用。
+3. **同一快照**：所有 case 从相同的 actor + critic + optimizer state 恢复。
+4. **Streaming GRU 评估**：`_evaluate()` 维护跨帧 GRU hidden state，与 rollout 的 recurrent 路径一致。
+5. **Ratio 断言**：每个 case 的首次 PPO update 自动运行 `verify_old_log_prob_consistency()`，输出 `[PPO RATIO OK]` 或 `[PPO RATIO ERROR]`。
+6. **同一 rollout seed**：所有 case 使用相同的环境种子，消除 rollout 方差。
+7. **同一 test bank**：所有 case 在相同的 eval seeds 上评估。
+
+违反以上任何一条，比较结果不可信。

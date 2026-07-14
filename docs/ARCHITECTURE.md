@@ -196,3 +196,41 @@ StructuredActorNetwork.forward:
 Note: PD_hist in local obs is assumed to be the UAV's LOCAL detection
 confidence. If changed to global fused P_D from fusion centre, the
 communication cost (delay, bits, AoI) MUST be accounted for.
+
+### 4.8 Checkpoint 兼容性：zero_init_new_layers (P0 fix, 2026-07-14)
+
+加载旧 DAgger checkpoint 时，新增层（如 pd_hist_proj）不在 checkpoint 中，
+`load_state_dict(..., strict=False)` 让它们保持 `_init_weights()` 的随机正交初始化。
+这会改变策略，使 "DAgger baseline" 不再等于真正的 DAgger。
+
+```python
+actor.load_state_dict(old_ckpt, strict=False)
+actor.zero_init_new_layers(known_keys=set(old_ckpt.keys()))
+# → pd_hist_proj.weight ← 0, pd_hist_proj.bias ← 0
+# → e_{kq} = e_{kq}^{base} + 0 = e_{kq}^{base}  (严格复现)
+```
+
+### 4.9 Streaming GRU 评估路径 (P0 fix, 2026-07-14)
+
+```
+_evaluate() per episode:
+  eval_h_prev = None  ← zero-init each episode
+  for each frame:
+    actor(obs, eval_h_prev) → dp_mean, ..., h_new
+    eval_h_prev = h_new  ← maintain across frames
+```
+
+此前评估调用 `actor(obs)` 每帧从零初始化 GRU（与 rollout 不一致）。
+现在评估的 recurrent 路径与 rollout 完全一致。
+
+### 4.10 single_frame_dim 动态检测 (P1 fix, 2026-07-14)
+
+`StructuredActorNetwork._parse_obs()` 不再硬编码 `single_dim=227`。
+改为从 `self.single_frame_dim` 读取（0 = 自动检测为 obs_dim）。
+
+设置优先级：
+1. 构造时显式传入 `single_frame_dim`（MAPPOAgent → StructuredActorNetwork）
+2. Trainer 自动从 `env.core.obs_builder.get_single_frame_dim()` 检测
+3. 兜底：`obs_dim` 本身（单帧场景）
+
+这使得多帧 stacking 解析自动适配 K=4/8、Q=4/8、P0 有无等不同配置。

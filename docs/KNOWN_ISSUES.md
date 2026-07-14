@@ -70,6 +70,26 @@
 - **状态**:已完成。`buffer.compute_gae()` 新增 per-target GAE 计算（per-target TD error → per-target advantage）；`get_training_data()` 返回 `per_target_advantages` 和 `per_target_returns`。**Actor loss 仍使用 scalar advantage**，S3c target-wise advantage 集成待后续完成。
 - **相关文件**:`buffer.py`, `mappo_agent.py`, `trainer.py`。
 
+### A0f. 验证框架严格化：checkpoint 兼容 + streaming 评估 + 配对实验 (2026-07-14 晚)
+- **现象**:第一轮验证脚本存在四个问题：(1) EH 复用 Full PPO 的 trainer 状态而非独立创建；(2) 旧 DAgger checkpoint 加载时 `pd_hist_proj` 层随机初始化，baseline actor 与 trainer actor 可能得到不同随机权重；(3) 评估调用 `actor(obs)` 无 GRU hidden state，与 rollout 的 recurrent 路径不一致；(4) Full 和 EH 的初始状态不完全相同。
+- **状态**:已修复。
+  - `zero_init_new_layers(known_keys)`:加载旧 checkpoint 后将新增层权重和 bias 置零，保证 `e_{kq}=e_{kq}^{base}`，严格复现原 DAgger。
+  - `_evaluate()`:维护 streaming GRU hidden state，每帧传入 `actor(obs, h_prev)` 并保存 `h_new`，评估路径与 rollout 一致。
+  - `test_ppo_ratio_fix.py` v2:每个 case 独立创建 fresh env/agents/trainer，从同一 snapshot (actor+critic+optimizer) 恢复，同一 rollout seed 和 test bank。
+  - **修复后 strict paired 结果 (streaming GRU, 3 seeds)**:DAgger baseline steady=0.693, weak3=0.283; Full PPO Δweak3=-0.020; EH PPO Δweak3=-0.003。两项 PPO RATIO OK (max|diff|<1e-5)。
+- **相关文件**:`networks.py` (zero_init_new_layers), `trainer.py` (_evaluate streaming GRU, bootstrap state fix), `scripts/test_ppo_ratio_fix.py`。
+
+### A0g. Per-target GAE bootstrap 修复 (2026-07-14 晚)
+- **现象**:per-target GAE 在 rollout 末尾（即使 episode 未终止）将 bootstrap 值硬编码为 0，即 `V_q(s_{t+1})=0`。只有真实 episode 终止时才应为 0。
+- **状态**:已修复。`compute_gae()` 接受 `next_per_target_values` 参数，非终止截断使用 critic 的 `V_q(s_{t+1})` bootstrap；trainer 在 rollout 结束时用正确的 final obs + final GRU hidden state 计算 scalar 和 per-target next values。
+- **相关文件**:`buffer.py`, `trainer.py`。
+
+### A0h. 其他硬编码与状态一致性问题 (2026-07-14 晚)
+- **CVaR top-k**:`cvar_k = 2` → `max(1, int(ceil(0.25 * Q)))`，Q=4→1, Q=8→2。
+- **single_dim=227**:替换为 ObservationBuilder 提供的 `single_frame_dim`，自动适配不同 K/Q/P0 配置。
+- **Bootstrap stale obs**:rollout 结束时不再复用 `_obs_gpu`（可能包含旧 obs），改为从 `all_obs` 重建 final obs batch，并提取 env 中当前 GRU hidden state 做正确的 final actor forward。
+- **相关文件**:`trainer.py`, `networks.py`, `observation.py`, `mappo_agent.py`。
+
 ### A1. 确定性评估角色 argmax → 全同角色 → 零配对 → P_D 崩塌
 - **现象**:训练采样性能尚可,但确定性评估 `steady_P_D` 极低(C 模式 0.027);`all_same_role` 95.5%,`valid_pair_rate` 0.04。
 - **原因**:共享 actor 在 argmax 下把几乎所有 agent 映射到同一角色 → 没有 TX/RX 分裂 → P0 无候选 → P_D=0。随机采样靠熵偶尔凑出分裂掩盖了问题。`i≠j` 只排除自配对,**不**保证一 TX 一 RX。

@@ -203,9 +203,16 @@ if delta_weak3 < -0.02:
 
 ### S1 详细结果 (2026-07-14, P0 修复后重新测试)
 
+**第一轮（h=0 eval, 非严格配对）：**
 | 模式 | Δsteady | Δweak3 | Δworst | PPO ratio OK? |
 |:---:|:---:|:---:|:---:|:---:|
 | Full PPO 1 update | +0.002 | +0.004 | -0.006 | ✅ max\|diff\|=8e-6 |
 | EH PPO 1 update | +0.000 | -0.001 | +0.000 | ✅ (attn frozen) |
 
-**结论 (更正)**: PPO 不再立即破坏 DAgger。此前 S1 的 "Attention 冻结成功防止崩溃" 结论部分成立（冻结确实比全量更安全），但当时观察到的"全量 PPO 崩溃"实际是 GRU 状态不一致导致的 ratio 非法，而非 PPO 更新本身的系统性失败。修复后 EH 和 Full 在 1 update 下表现几乎无差异（Δ<0.005）。长期训练 (>20 updates) 仍需验证。
+**第二轮（streaming GRU eval, strict paired, zero-init ckpt, 2026-07-14 晚）：**
+| 模式 | Δsteady | Δweak3 | PPO ratio OK? |
+|:---:|:---:|:---:|:---:|
+| Full PPO 1 update | -0.008 | -0.020 | ✅ max\|diff\|=7e-6 |
+| EH PPO 1 update | -0.001 | -0.003 | ✅ max\|diff\|=5e-6 |
+
+**结论 (更正)**：streaming GRU 评估下 DAgger baseline 的 weak3 更高 (0.283 vs h=0 eval 的 0.180)，说明此前评估低估了 DAgger 真实性能。修复后 Full PPO weak3 降幅 ~2%（vs 修复前 ~26%），EH 几乎不变。GRU/PPO ratio 修复已确认有效。长期训练稳定性仍需 >20 updates 验证。
