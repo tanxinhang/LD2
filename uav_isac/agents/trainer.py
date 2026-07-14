@@ -17,6 +17,10 @@ import time
 
 from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.buffer import RolloutBuffer
+from uav_isac.agents.networks import (
+    split_param_groups, ATTENTION_PARAM_PREFIXES,
+    ENCODER_PARAM_PREFIXES, HEAD_PARAM_PREFIXES,
+)
 from uav_isac.environment.env_wrapper import UAVISACEnv
 from uav_isac.utils.seeding import set_seed
 from uav_isac.utils.types import Action
@@ -113,6 +117,19 @@ class MAPPTrainer:
         obs_dim = obs_test['0'].shape[0]  # actual dim (includes history stacking)
         global_dim = env.core.obs_builder.get_global_state_dim() + 16  # +16 for comm aggregation
 
+        # GRU hidden dim for recurrent buffer storage.
+        # StructuredActorNetwork uses entity_dim as GRU hidden size;
+        # flat-MLP actor has no GRU → gru_hidden_dim=0.
+        _gru_dim = 0
+        if getattr(config.marl, 'structured_actor', False):
+            # Match the entity_dim used in StructuredActorNetwork.__init__
+            _gru_dim = getattr(config.marl, 'hidden_layers', [256, 256])[-1]
+            # Actually, the GRU hidden dim is the entity_dim, not the hidden layer dim.
+            # The default entity_dim is 128 for StructuredActorNetwork, but let's
+            # use the action_space attribute if available, else default 64.
+            if hasattr(agents[0], 'actor') and hasattr(agents[0].actor, 'neighbor_gru'):
+                _gru_dim = agents[0].actor.neighbor_gru.hidden_size
+
         # ── STARTUP DIAGNOSTIC: confirm config/code actually loaded ──
         # (entropy=0 in logs would be impossible if sigma-floor were really 0.37,
         #  so print the EFFECTIVE values to catch stale-cache / non-loaded changes.)
@@ -131,6 +148,8 @@ class MAPPTrainer:
             global_state_dim=global_dim,
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
+            num_targets=self.Q,
+            gru_hidden_dim=_gru_dim,
         )
 
         # Pre-allocate pinned tensors for GPU transfers (reused each step)
@@ -150,22 +169,21 @@ class MAPPTrainer:
 
         # S1: Selective plasticity — freeze Attention, per-module LR
         if getattr(ma, 'freeze_attention', False):
-            for n, p in agents[0].actor.named_parameters():
-                if n.startswith('attn.'):
-                    p.requires_grad_(False)
-            # Per-module LR: Encoder 1e-5, Heads 5e-5
-            enc_params = [p for n, p in agents[0].actor.named_parameters()
-                         if p.requires_grad and not n.startswith('dp_head')
-                         and not n.startswith('comm_head') and not n.startswith('role_head')
-                         and not n.startswith('comm_proj') and not n.startswith('gate')]
-            head_params = [p for n, p in agents[0].actor.named_parameters()
-                          if p.requires_grad and (n.startswith('dp_head') or n.startswith('comm_head')
-                          or n.startswith('role_head') or n.startswith('comm_proj') or n.startswith('gate'))]
+            # P0 FIX: freeze both attn.* AND attn_norm.* (LayerNorm after attention).
+            # Previously attn_norm was missed because its name doesn't start with 'attn.'
+            enc_params, head_params, attn_params = split_param_groups(
+                agents[0].actor.named_parameters()
+            )
+            for p in attn_params:
+                p.requires_grad_(False)
             agents[0].actor_optimizer = torch.optim.Adam([
                 {'params': enc_params, 'lr': 1e-5},
                 {'params': head_params, 'lr': 5e-5},
             ])
-            print(f'[S1] Attention frozen. Encoder LR=1e-5 ({len(enc_params)} params), Heads LR=5e-5 ({len(head_params)} params)')
+            print(f'[S1] Attention frozen (incl. attn_norm). '
+                  f'Encoder LR=1e-5 ({len(enc_params)} params), '
+                  f'Heads LR=5e-5 ({len(head_params)} params), '
+                  f'Frozen attn={len(attn_params)} params')
 
         # CVaR target-tail-risk constraint
         self._cvar_tau = getattr(ma, 'cvar_tau', 0.0)     # 0=disabled
@@ -274,6 +292,13 @@ class MAPPTrainer:
 
             dp_mean, dp_log_std, role_logits, comm_msgs, _pd_pred, h_new = self.agents[0].actor(
                 self._obs_gpu[:N*K], h_prev_batch)
+
+            # P0 FIX: save h_prev numpy per env for buffer storage.
+            # h_prev_list is ordered: env0_k0_nbr0, env0_k0_nbr1, ..., env0_k1_nbr0, ...
+            # Reshape to (N, K, K-1, D) then index per env.
+            h_prev_arr = None
+            if h_prev_list:
+                h_prev_arr = np.stack(h_prev_list).reshape(N, K, K-1, -1)
 
             # Store comm + GRU hidden state per-neighbor for next frame
             comm_np = comm_msgs.detach().cpu().numpy()  # (N*K, 16)
@@ -414,6 +439,8 @@ class MAPPTrainer:
                 pt_rewards = np.tile(np.mean(macro_pd, axis=0) if macro_pd else np.zeros(Q), (K, 1))
                 # Per-target values from critic
                 pt_values = target_v_np[idx0:idx1] if target_v_np is not None else None
+                # P0 FIX: extract h_prev for this env
+                env_h_prev = h_prev_arr[n] if h_prev_arr is not None else None
                 self.buffer.store(
                     obs=obs_int,
                     global_state=gs_with_comm,
@@ -426,6 +453,7 @@ class MAPPTrainer:
                     oracle_mask=oracle_mask,
                     per_target_rewards=pt_rewards,
                     per_target_values=pt_values,
+                    h_prev=env_h_prev,
                 )
                 self.total_frames += self.macro_interval
 
@@ -530,6 +558,39 @@ class MAPPTrainer:
 
         agent = self.agents[0]  # shared networks
 
+        # ═══════════════════════════════════════════════════════════════
+        # P0 ASSERTION: old-log-prob consistency check.
+        # Verifies that recomputing log-probs with stored h_prev reproduces
+        # the old log-probs from rollout. If this fails, the PPO ratio is
+        # invalid BEFORE any optimizer step — all training results are suspect.
+        # ═══════════════════════════════════════════════════════════════
+        if not hasattr(self, '_consistency_checked'):
+            self._consistency_checked = True
+            _check_n = min(512, total_size)
+            _check_idx = np.arange(_check_n)
+            _check_obs = obs[_check_idx]
+            _check_dp = actions_dp[_check_idx]
+            _check_role = actions_role[_check_idx]
+            _check_old_lp = old_log_probs[_check_idx]
+            _check_h = None
+            if 'h_prev' in data:
+                _check_h_full = data['h_prev'][_check_idx]
+                _check_h = _check_h_full.reshape(1, -1, _check_h_full.shape[-1]).to(self.device)
+
+            passed, max_diff = agent.verify_old_log_prob_consistency(
+                _check_obs, _check_dp, _check_role, _check_old_lp,
+                h_prev=_check_h,
+            )
+            if not passed:
+                print(f'[PPO RATIO ERROR] old_log_prob != recomputed_log_prob: '
+                      f'max|diff|={max_diff:.6f} > tolerance=1e-4')
+                print(f'  → PPO ratio r_t ≠ 1 before any optimizer step. '
+                      f'Training results are CONTAMINATED.')
+                print(f'  → Likely cause: GRU h_prev mismatch between rollout and update, '
+                      f'or dp_scale mismatch between ActionSpace.decode and evaluate_actions.')
+            else:
+                print(f'[PPO RATIO OK] old_log_prob matches recomputed: max|diff|={max_diff:.6f} < 1e-4')
+
         kl_stop = False
         for epoch in range(self.ppo_epochs):
             if kl_stop:
@@ -561,9 +622,18 @@ class MAPPTrainer:
                 mb_returns = returns[mb_idx]
                 mb_old_values = old_values[mb_idx]
 
+                # P0 FIX: pass stored GRU hidden states so PPO ratio compares
+                # distributions conditioned on the SAME h_prev as rollout.
+                mb_h_prev = None
+                if 'h_prev' in data:
+                    mb_h_prev_full = data['h_prev'][mb_idx]  # (mb, K-1, D)
+                    # Reshape to (1, mb*(K-1), D) for GRU forward
+                    mb_h_prev = mb_h_prev_full.reshape(1, -1, mb_h_prev_full.shape[-1])
+
                 # Evaluate actions
                 new_log_probs, values, entropies, dp_means, _, comm_batch = agent.evaluate_actions(
-                    mb_obs, mb_gs, mb_actions_dp, mb_actions_role
+                    mb_obs, mb_gs, mb_actions_dp, mb_actions_role,
+                    h_prev=mb_h_prev,
                 )
 
                 # PPO-clip loss

@@ -53,6 +53,7 @@ def main():
         MAPPOAgent(
             agent_id=k, obs_dim=obs_dim, global_state_dim=global_dim,
             action_space=action_space, num_agents=K,
+            num_targets=config.scenario.Q,
             hidden_layers=config.marl.hidden_layers, lr=config.marl.lr,
             max_grad_norm=config.marl.max_grad_norm, device=device,
             centralized_critic=False,   # IPPO: local-obs critic

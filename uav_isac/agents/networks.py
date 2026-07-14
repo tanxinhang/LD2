@@ -2,7 +2,7 @@
 
 Actor: shared MLP [256, 256] → heads: dp_mean(2), dp_log_std(2), role_logits(3)
   (shared = obs → 256 → 256, then head: 256 → output)
-Critic: MLP [256, 256] → scalar value
+Critic: MLP [256, 256] → scalar value + per-target value heads
 """
 
 import torch
@@ -98,6 +98,15 @@ class StructuredActorNetwork(nn.Module):
       - eliminates permutation sensitivity (targets/neighbors are sets)
       - lets attention automatically ignore distant/irrelevant entities
       - protects the BC-learned physical policy from comm noise via a gate
+
+    P1 FIX: PD_hist (previous-frame per-target detection probability) is now
+    projected and added to the target entity encoding, so the Actor can
+    directly condition on which targets had low/high detection.
+
+    NOTE: PD_hist in the local observation is assumed to be the UAV's own
+    LOCAL detection confidence, not global fused P_D. If this becomes a
+    fused-centre broadcast, the communication cost (delay, bits, AoI) must
+    be accounted for in the protocol.
     """
 
     def __init__(self, obs_dim: int, K: int = 8, Q: int = 8,
@@ -114,6 +123,11 @@ class StructuredActorNetwork(nn.Module):
         self.target_enc = nn.Sequential(
             nn.Linear(18, D), nn.ReLU(), nn.Linear(D, D), nn.ReLU(), nn.Linear(D, D),
         )
+        # PD_hist projector: maps scalar P_D (per target) → entity-dim signal
+        # that modulates the target encoding, so Actor knows which targets
+        # had low detection in the previous frame.
+        self.pd_hist_proj = nn.Linear(1, D)
+
         # GRU for neighbor temporal encoding (handles window=1 gracefully)
         self.neighbor_gru = nn.GRU(input_size=9, hidden_size=D, batch_first=True)
         self.neighbor_proj = nn.Linear(D, D)  # project GRU output
@@ -154,22 +168,27 @@ class StructuredActorNetwork(nn.Module):
             w = obs_dim // single_dim  # number of stacked frames (2)
             frames = []
             for i in range(w):
-                s, t, n, g, c = self._parse_one(obs[:, i*single_dim:(i+1)*single_dim], B)
-                frames.append((s, t, n, g, c))
+                s, t, n, g, c, pd = self._parse_one(obs[:, i*single_dim:(i+1)*single_dim], B)
+                frames.append((s, t, n, g, c, pd))
             # Stack along LAST sequence dim
             s_seq = torch.stack([f[0] for f in frames], dim=-1)  # (B, 11, W)
             t_seq = torch.stack([f[1] for f in frames], dim=-1)  # (B, Q, D_t, W)
             n_seq = torch.stack([f[2] for f in frames], dim=-1)  # (B, K-1, D_n, W)
             g_seq = torch.stack([f[3] for f in frames], dim=-1)  # (B, 2, W)
-            return s_seq, t_seq, n_seq, g_seq, frames[-1][4], w
+            pd_seq = torch.stack([f[5] for f in frames], dim=-1)  # (B, Q, W)
+            return s_seq, t_seq, n_seq, g_seq, frames[-1][4], w, pd_seq
         else:
-            s, t, n, g, c = self._parse_one(obs, B)
+            s, t, n, g, c, pd = self._parse_one(obs, B)
             # Add seq dim of 1 at the end
             return (s.unsqueeze(-1), t.unsqueeze(-1), n.unsqueeze(-1),
-                    g.unsqueeze(-1), c, 1)
+                    g.unsqueeze(-1), c, 1, pd.unsqueeze(-1))
 
     def _parse_one(self, obs, B):
-        """Parse single frame (227 dims) into entity tensors."""
+        """Parse single frame (227 dims) into entity tensors.
+
+        Returns:
+            self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
+        """
         K, Q = self.K, self.Q
         obs_dim_real = obs.shape[1]
 
@@ -200,7 +219,6 @@ class StructuredActorNetwork(nn.Module):
         physics_feat = obs[:, ptr:ptr+3]; ptr += 3
 
         # Coverage(Q) + pairing(K-1) — may be absent in non-P0 configs
-        # Detect presence: if remaining dims > what's expected without P0, they're present
         remaining = obs_dim_real - ptr
         without_p0 = (K-1)*9 + 2 + Q + 16  # neighbors + global + P_D + comm
         has_p0 = (remaining > without_p0 + 2)  # heuristic: P0 adds Q+(K-1) dims
@@ -224,7 +242,12 @@ class StructuredActorNetwork(nn.Module):
             global_feat = obs[:, ptr:ptr+2]; ptr += 2  # 2
         else:
             global_feat = torch.zeros(B, 2, device=obs.device)  # no global coord
-        _pd_hist = obs[:, ptr:ptr+Q]; ptr += Q  # P_D history
+
+        # P1 FIX: PD_hist is now KEPT and returned (was previously read and discarded).
+        # This is the per-target detection probability from the previous frame,
+        # critical for Actor to know which targets are being missed.
+        pd_hist = obs[:, ptr:ptr+Q]; ptr += Q  # P_D history (B, Q)
+
         comm_agg = obs[:, ptr:ptr+16]  # 16
 
         # Append physics to self_state for encoder
@@ -243,12 +266,23 @@ class StructuredActorNetwork(nn.Module):
             pad = torch.zeros(B, Q, 18 - target_stack.shape[-1], device=target_stack.device)
             target_stack = torch.cat([target_stack, pad], dim=-1)
 
-        return self_state, target_stack, neighbor_stack, global_feat, comm_agg
+        return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
 
     def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None):
-        """Forward with optional streaming GRU hidden state."""
+        """Forward with optional streaming GRU hidden state.
+
+        Args:
+            obs: (B, obs_dim) observation batch
+            h_prev: (1, B*(K-1), D) GRU hidden states from rollout, or None
+                    for zero-init (used when no temporal context is available).
+                    CRITICAL: h_prev MUST be passed consistently between rollout
+                    and update to keep the PPO ratio valid.
+
+        Returns:
+            dp_mean, log_std, role_logits, comm_msg, pd_pred, h_new
+        """
         result = self._parse_obs(obs)
-        self_s, targets, neighbors, global_f, comm_agg, n_frames = result
+        self_s, targets, neighbors, global_f, comm_agg, n_frames, pd_hist = result
         B = obs.shape[0]
         D = self.self_enc[0].out_features
         LOG_STD_MIN, LOG_STD_MAX = -1.0, 1.0
@@ -260,8 +294,16 @@ class StructuredActorNetwork(nn.Module):
 
         # Encode entities: use last timestep (dim=-1 is seq)
         se = self.self_enc(self_s[..., -1]).unsqueeze(1)          # (B, 1, D)
-        te = self.target_enc(targets[..., -1])                     # (B, Q, D)
+        te_base = self.target_enc(targets[..., -1])                # (B, Q, D)
         ge = self.global_enc(global_f[..., -1]).unsqueeze(1)      # (B, 1, D)
+
+        # P1 FIX: Project PD_hist into target entity encoding.
+        # This gives Actor direct knowledge of which targets had low detection
+        # in the previous frame — the most direct signal of target failure.
+        # PD_hist shape: (B, Q, W) → use last timestep
+        pd_last = pd_hist[..., -1]  # (B, Q)
+        pd_feat = self.pd_hist_proj(pd_last.unsqueeze(-1))  # (B, Q, D)
+        te = te_base + pd_feat  # residual modulation by detection history
 
         # Streaming GRU for neighbors: (B*Nn, 1, 9) with per-neighbor state
         Nn = neighbors.shape[1]
@@ -289,6 +331,43 @@ class StructuredActorNetwork(nn.Module):
         return dp_mean, log_std, role_logits, comm_msg, torch.sigmoid(torch.zeros_like(dp_mean[:, :1])), h_new
 
 
+# ── Parameter group names for selective plasticity (S1) ──
+# These are the canonical module prefixes. Use explicit inclusion (not
+# string-exclusion) to avoid silently missing heads like intent_head, dp_log_std.
+ENCODER_PARAM_PREFIXES = (
+    'self_enc.', 'target_enc.', 'pd_hist_proj.',
+    'neighbor_gru.', 'neighbor_proj.', 'global_enc.',
+)
+HEAD_PARAM_PREFIXES = (
+    'dp_head.', 'comm_head.', 'intent_head.',
+    'role_head.', 'comm_proj.', 'gate.',
+    'dp_log_std',  # nn.Parameter, no trailing dot
+)
+ATTENTION_PARAM_PREFIXES = (
+    'attn.', 'attn_norm.',
+)
+
+
+def split_param_groups(named_params):
+    """Split parameters into encoder, head, and attention groups.
+
+    Returns:
+        enc_params, head_params, attn_params
+    """
+    enc, head, attn = [], [], []
+    for n, p in named_params:
+        if n.startswith(ATTENTION_PARAM_PREFIXES):
+            attn.append(p)
+        elif n.startswith(HEAD_PARAM_PREFIXES):
+            head.append(p)
+        elif n.startswith(ENCODER_PARAM_PREFIXES):
+            enc.append(p)
+        else:
+            # Unknown params default to encoder (conservative, low LR)
+            enc.append(p)
+    return enc, head, attn
+
+
 class CriticNetwork(nn.Module):
     """MAPPO centralized critic network.
 
@@ -308,7 +387,7 @@ class CriticNetwork(nn.Module):
         last_dim = hidden_layers[-1]
         # Scalar value head
         self.value_head = nn.Linear(last_dim, 1)
-        # Per-target value heads (S3: diagnostic)
+        # Per-target value heads (S3: target-wise critic)
         self.target_heads = None
         if num_targets > 0:
             self.target_heads = nn.ModuleList([

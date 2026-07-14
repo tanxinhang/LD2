@@ -46,7 +46,7 @@ class ActionSpace:
         self.num_roles = num_roles
         self.rng = rng if rng is not None else np.random.default_rng()
         self.structured_actor = True  # flag for MAPPOAgent
-        self.num_targets = 8  # passed by run script
+        self.num_targets = 0  # overridden by run script / MAPPOAgent config
 
     @property
     def dp_dim(self) -> int:

@@ -35,6 +35,8 @@ class MAPPOAgent(BaseAgent):
         max_grad_norm: float = 0.5,
         device: str = "cpu",
         centralized_critic: bool = True,
+        num_targets: int = 4,
+        gru_hidden_dim: int = 0,
     ):
         """
         Args:
@@ -46,6 +48,8 @@ class MAPPOAgent(BaseAgent):
             lr: Adam learning rate
             max_grad_norm: Gradient clipping max norm
             device: "cpu" or "cuda"
+            num_targets: Number of targets (Q) — from config, NOT hardcoded
+            gru_hidden_dim: GRU hidden dimension (0 = flat-MLP actor, no GRU)
         """
         super().__init__(agent_id)
 
@@ -56,13 +60,14 @@ class MAPPOAgent(BaseAgent):
         self.action_space = action_space
         self.max_grad_norm = max_grad_norm
         self.critic_lr_mult = critic_lr_mult
+        self.num_targets = num_targets
+        self.gru_hidden_dim = gru_hidden_dim
         # centralized critic (MAPPO/CTDE, input=global state) vs
         # decentralized critic (IPPO, input=local obs). de Witt et al. 2020.
         self.centralized_critic = centralized_critic
         critic_state_dim = global_state_dim if centralized_critic else obs_dim
 
         # Networks
-        num_targets = getattr(action_space, 'num_targets', 8)
         if getattr(action_space, 'structured_actor', False):
             entity_dim = getattr(action_space, 'structured_entity_dim', 64)
             self.actor = StructuredActorNetwork(
@@ -81,7 +86,7 @@ class MAPPOAgent(BaseAgent):
             hidden_layers=[h*2 for h in hidden_layers] + [hidden_layers[-1]*2],  # 512×3
             num_agents=num_agents,
             comm_dim=16,
-            num_targets=getattr(action_space, 'num_targets', 0),
+            num_targets=num_targets,
         ).to(self.device)
 
         # Optimizers
@@ -163,19 +168,27 @@ class MAPPOAgent(BaseAgent):
         global_state: torch.Tensor,      # (batch, global_state_dim)
         actions_dp: torch.Tensor,        # (batch, 2)
         actions_role: torch.Tensor,      # (batch,)
+        h_prev: torch.Tensor = None,     # (1, batch*(K-1), D) GRU hidden states
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO update (computational graph enabled).
+
+        P0 FIX: Accepts and passes h_prev (GRU hidden states) to the actor,
+        ensuring the PPO ratio compares distributions conditioned on the SAME
+        hidden state as during rollout. Without this, the ratio r_t can deviate
+        from 1 even before the first optimizer step.
 
         Args:
             obs: Batch of local observations
             global_state: Batch of global states
             actions_dp: Taken delta_p actions
             actions_role: Taken role actions
+            h_prev: (1, batch*(K-1), D) GRU hidden states from rollout buffer,
+                    or None for flat-MLP actor (no GRU).
 
         Returns:
             (new_log_probs, values, entropies, dp_means)
         """
-        dp_mean, dp_log_std, role_logits, comm_msgs, pd_pred, _h = self.actor(obs)  # no h_prev in update
+        dp_mean, dp_log_std, role_logits, comm_msgs, pd_pred, _h = self.actor(obs, h_prev)
         values = self.critic(global_state)
 
         # Compute log probs and entropy
@@ -224,6 +237,62 @@ class MAPPOAgent(BaseAgent):
         entropies = entropy_dp + entropy_role
 
         return new_log_probs, values, entropies, dp_mean, pd_pred, comm_msgs
+
+    def verify_old_log_prob_consistency(
+        self,
+        obs: torch.Tensor,
+        actions_dp: torch.Tensor,
+        actions_role: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        h_prev: torch.Tensor = None,
+        tolerance: float = 1e-4,
+    ) -> Tuple[bool, float]:
+        """P0 ASSERTION: verify that recomputed log-probs match stored old log-probs.
+
+        This MUST be run before any optimizer step. If max|old - recomputed| >
+        tolerance, the PPO ratio is invalid from the start and training results
+        are contaminated.
+
+        Args:
+            obs: Batch observations (same as used in rollout)
+            actions_dp: Taken dp actions
+            actions_role: Taken role actions
+            old_log_probs: Stored log-probs from rollout
+            h_prev: GRU hidden states from rollout (must match)
+            tolerance: Maximum allowed absolute difference
+
+        Returns:
+            (passed, max_abs_diff)
+        """
+        with torch.no_grad():
+            # Use the same code path as evaluate_actions but with no_grad
+            dp_mean, dp_log_std, role_logits, _, _, _ = self.actor(obs, h_prev)
+
+            N = obs.shape[0]
+            new_log_probs = torch.zeros(N, device=self.device)
+
+            dp_norm = actions_dp / self.action_space.dp_scale
+            dp_norm = torch.clamp(dp_norm, -0.999, 0.999)
+            dp_raw = torch.atanh(dp_norm)
+            dp_std_pos = torch.exp(torch.clamp(dp_log_std, -20, 2))
+            var = dp_std_pos ** 2
+            log_prob_dp = -0.5 * (
+                ((dp_raw - dp_mean) ** 2) / (var + 1e-6)
+                + torch.log(2 * np.pi * var + 1e-6)
+            ).sum(dim=-1)
+            log_prob_dp -= torch.log(1.0 - dp_norm ** 2 + 1e-6).sum(dim=-1)
+
+            if getattr(self.action_space, 'learn_roles', True):
+                log_probs_role = torch.log_softmax(role_logits, dim=-1)
+                log_prob_role = log_probs_role.gather(1, actions_role.unsqueeze(-1)).squeeze(-1)
+                new_log_probs = log_prob_dp + log_prob_role
+            else:
+                new_log_probs = log_prob_dp
+
+        diff = (old_log_probs - new_log_probs).abs()
+        max_diff = diff.max().item()
+        passed = max_diff < tolerance
+        return passed, max_diff
 
     def update(self, rollout_data: Dict) -> Dict[str, float]:
         """Single PPO update is handled by the trainer.

@@ -1,7 +1,7 @@
 """Rollout buffer with Generalized Advantage Estimation (GAE).
 
 Stores trajectories from multiple agents and computes GAE advantages
-for PPO training.
+for PPO training. Supports recurrent policies via stored GRU hidden states.
 """
 
 import numpy as np
@@ -12,13 +12,15 @@ from typing import Dict, List, Tuple, Optional
 class RolloutBuffer:
     """Stores rollout data for MAPPO/PPO training.
 
-    Stores per-agent: obs, actions (dp, role), log_probs, values, rewards, dones.
+    Stores per-agent: obs, actions (dp, role), log_probs, values, rewards, dones,
+    and GRU hidden states for recurrent policy consistency.
     Computes GAE advantages and returns after a rollout completes.
     """
 
     def __init__(self, buffer_size: int, num_agents: int,
                  obs_dim: int, global_state_dim: int,
-                 gamma: float = 0.99, gae_lambda: float = 0.95):
+                 gamma: float = 0.99, gae_lambda: float = 0.95,
+                 num_targets: int = 4, gru_hidden_dim: int = 0):
         """
         Args:
             buffer_size: Maximum steps in buffer (e.g., 4096)
@@ -27,6 +29,8 @@ class RolloutBuffer:
             global_state_dim: Global state dimension (for critic)
             gamma: Discount factor
             gae_lambda: GAE λ parameter
+            num_targets: Number of targets (Q) — from config, NOT hardcoded
+            gru_hidden_dim: GRU hidden dimension (0 = no recurrent storage)
         """
         self.buffer_size = buffer_size
         self.num_agents = num_agents
@@ -34,6 +38,9 @@ class RolloutBuffer:
         self.gae_lambda = gae_lambda
         self.ptr = 0
         self.full = False
+        self.num_targets = num_targets
+        self.gru_hidden_dim = gru_hidden_dim
+        self._has_gru = gru_hidden_dim > 0
 
         # Per-agent storage
         self.obs = np.zeros((buffer_size, num_agents, obs_dim), dtype=np.float64)
@@ -46,15 +53,27 @@ class RolloutBuffer:
         self.dones = np.zeros((buffer_size, num_agents), dtype=np.float64)
         self.masks = np.ones((buffer_size, num_agents), dtype=np.float64)
         self.oracle_masks = np.ones((buffer_size, num_agents), dtype=np.float64)
+
+        # GRU hidden states: (T, K, K-1, D) for per-neighbor GRU states
+        if self._has_gru:
+            self.h_prev = np.zeros(
+                (buffer_size, num_agents, num_agents - 1, gru_hidden_dim),
+                dtype=np.float32,
+            )
+
         # Per-target storage (S3b: diagnostics)
-        self.num_targets = 8
-        self.per_target_rewards = np.zeros((buffer_size, num_agents, 8), dtype=np.float64)
-        self.per_target_values = np.zeros((buffer_size, num_agents, 8), dtype=np.float64)
+        self.per_target_rewards = np.zeros(
+            (buffer_size, num_agents, num_targets), dtype=np.float64,
+        )
+        self.per_target_values = np.zeros(
+            (buffer_size, num_agents, num_targets), dtype=np.float64,
+        )
 
         # GAE results (computed after rollout)
         self.advantages = None
         self.returns = None
         self.per_target_advantages = None
+        self.per_target_returns = None
 
     def store(
         self,
@@ -69,6 +88,7 @@ class RolloutBuffer:
         oracle_mask: np.ndarray = None,  # (K,) 1=actor, 0=oracle
         per_target_rewards: np.ndarray = None,  # (K, Q) per-target P_D
         per_target_values: np.ndarray = None,   # (K, Q) per-target V_q(s)
+        h_prev: np.ndarray = None,  # (K, K-1, D) GRU hidden states
     ) -> None:
         """Store one transition for all agents.
 
@@ -81,6 +101,10 @@ class RolloutBuffer:
             values: (K,) critic values
             rewards: Dict mapping agent_id → reward
             dones: Dict mapping agent_id → done flag
+            oracle_mask: (K,) 1=actor, 0=oracle
+            per_target_rewards: (K, Q) per-target P_D
+            per_target_values: (K, Q) per-target V_q(s)
+            h_prev: (K, K-1, D) GRU hidden states used in this forward pass
         """
         if self.ptr >= self.buffer_size:
             self.full = True
@@ -98,9 +122,15 @@ class RolloutBuffer:
             self.masks[self.ptr, k] = 1.0 - float(dones.get(k, False))
             self.oracle_masks[self.ptr, k] = float(oracle_mask[k]) if oracle_mask is not None else 1.0
             if per_target_rewards is not None:
-                self.per_target_rewards[self.ptr, k] = per_target_rewards[k]
+                Q_actual = per_target_rewards.shape[1]
+                self.per_target_rewards[self.ptr, k, :Q_actual] = per_target_rewards[k]
             if per_target_values is not None:
-                self.per_target_values[self.ptr, k] = per_target_values[k]
+                Q_actual = per_target_values.shape[1]
+                self.per_target_values[self.ptr, k, :Q_actual] = per_target_values[k]
+
+        # Store GRU hidden states
+        if self._has_gru and h_prev is not None:
+            self.h_prev[self.ptr] = h_prev  # (K, K-1, D)
 
         self.global_states[self.ptr] = global_state
         self.ptr += 1
@@ -114,7 +144,8 @@ class RolloutBuffer:
 
         Supports both single-env (next_values shape: (K,)) and
         multi-env interleaved (next_values shape: (num_envs*K,)) layouts.
-        In multi-env mode, each env's trajectory is at indices n, n+N, n+2N, ...
+
+        Also computes per-target GAE when per_target_values are stored.
 
         Args:
             next_values: (K,) for single env, or (N*K,) for N parallel envs
@@ -123,7 +154,7 @@ class RolloutBuffer:
         self.advantages = np.zeros((actual_size, self.num_agents), dtype=np.float64)
         self.returns = np.zeros((actual_size, self.num_agents), dtype=np.float64)
 
-        # Detect multi-env layout: if next_values has more entries than agents
+        # Detect multi-env layout
         num_envs = len(next_values) // self.num_agents
 
         if num_envs == 1:
@@ -146,15 +177,12 @@ class RolloutBuffer:
                     self.returns[t, k] = gae + self.values[t, k]
         else:
             # ── Multi-env interleaved GAE ──
-            # Each env n's trajectory: indices n, n+N, n+2N, ..., n+(T-1)*N
-            # Next-values are ordered: [env0_k0, env0_k1, ..., env0_kK-1,
-            #                          env1_k0, env1_k1, ..., env1_kK-1, ...]
             T = actual_size // num_envs
             for k in range(self.num_agents):
                 for n in range(num_envs):
                     gae = 0.0
                     for s in reversed(range(T)):
-                        t = n + s * num_envs  # buffer index for env n, step s
+                        t = n + s * num_envs
                         if s == T - 1:
                             next_v = next_values[n * self.num_agents + k]
                         else:
@@ -170,12 +198,60 @@ class RolloutBuffer:
                         self.advantages[t, k] = gae
                         self.returns[t, k] = gae + self.values[t, k]
 
+        # ── Per-target GAE (S3c: target-wise critic) ──
+        # Compute per-target advantages using per-target values and rewards.
+        # This is done after scalar GAE; per-target advantages are shaped (T, K, Q).
+        self.per_target_advantages = np.zeros_like(self.per_target_rewards)
+        self.per_target_returns = np.zeros_like(self.per_target_rewards)
+
+        if num_envs == 1:
+            for k in range(self.num_agents):
+                for q in range(self.num_targets):
+                    gae = 0.0
+                    for t in reversed(range(actual_size)):
+                        if t == actual_size - 1:
+                            next_v_pt = 0.0  # terminal value = 0
+                        else:
+                            next_v_pt = self.per_target_values[t + 1, k, q]
+
+                        delta_pt = (
+                            self.per_target_rewards[t, k, q]
+                            + self.gamma * next_v_pt * self.masks[t, k]
+                            - self.per_target_values[t, k, q]
+                        )
+                        gae = delta_pt + self.gamma * self.gae_lambda * self.masks[t, k] * gae
+                        self.per_target_advantages[t, k, q] = gae
+                        self.per_target_returns[t, k, q] = gae + self.per_target_values[t, k, q]
+        else:
+            T = actual_size // num_envs
+            for k in range(self.num_agents):
+                for q in range(self.num_targets):
+                    for n in range(num_envs):
+                        gae = 0.0
+                        for s in reversed(range(T)):
+                            t = n + s * num_envs
+                            if s == T - 1:
+                                next_v_pt = 0.0
+                            else:
+                                next_t = n + (s + 1) * num_envs
+                                next_v_pt = self.per_target_values[next_t, k, q]
+
+                            delta_pt = (
+                                self.per_target_rewards[t, k, q]
+                                + self.gamma * next_v_pt * self.masks[t, k]
+                                - self.per_target_values[t, k, q]
+                            )
+                            gae = delta_pt + self.gamma * self.gae_lambda * self.masks[t, k] * gae
+                            self.per_target_advantages[t, k, q] = gae
+                            self.per_target_returns[t, k, q] = gae + self.per_target_values[t, k, q]
+
     def get_training_data(self) -> Dict[str, torch.Tensor]:
         """Get all buffer data as torch tensors for PPO update.
 
         Returns:
             Dict of tensors: obs, global_states, actions_dp, actions_role,
-            old_log_probs, advantages, returns, old_values
+            old_log_probs, advantages, returns, old_values, and optionally
+            h_prev, per_target_advantages, per_target_returns.
         """
         actual_size = self.ptr
         if self.advantages is None or self.returns is None:
@@ -197,14 +273,14 @@ class RolloutBuffer:
         # Zero out advantages for oracle-guided transitions
         oracle_mask_flat = self.oracle_masks[:actual_size].reshape(-1)
         adv_flat = adv_flat * oracle_mask_flat
-        ret_flat = ret_flat * oracle_mask_flat  # also mask returns for consistency
+        ret_flat = ret_flat * oracle_mask_flat
 
         # Normalize advantages (in-place on local, doesn't modify stored advantages)
         adv_mean = adv_flat[adv_flat != 0].mean() if (adv_flat != 0).any() else 0.0
         adv_std = adv_flat[adv_flat != 0].std() + 1e-8
         adv_flat_norm = np.where(adv_flat != 0, (adv_flat - adv_mean) / adv_std, 0.0)
 
-        return {
+        result = {
             'obs': torch.as_tensor(obs_flat, dtype=torch.float32),
             'global_states': torch.as_tensor(gs_flat, dtype=torch.float32),
             'actions_dp': torch.as_tensor(dp_flat, dtype=torch.float32),
@@ -215,12 +291,29 @@ class RolloutBuffer:
             'old_values': torch.as_tensor(val_flat, dtype=torch.float32),
         }
 
+        # GRU hidden states: (T, K, K-1, D) → (T*K, K-1, D)
+        if self._has_gru:
+            h_flat = self.h_prev[:actual_size].reshape(-1, self.num_agents - 1,
+                                                       self.gru_hidden_dim)
+            result['h_prev'] = torch.as_tensor(h_flat, dtype=torch.float32)
+
+        # Per-target advantages and returns
+        if self.per_target_advantages is not None:
+            pta_flat = self.per_target_advantages[:actual_size].reshape(-1, self.num_targets)
+            ptr_flat = self.per_target_returns[:actual_size].reshape(-1, self.num_targets)
+            result['per_target_advantages'] = torch.as_tensor(pta_flat, dtype=torch.float32)
+            result['per_target_returns'] = torch.as_tensor(ptr_flat, dtype=torch.float32)
+
+        return result
+
     def clear(self) -> None:
         """Reset buffer for next rollout."""
         self.ptr = 0
         self.full = False
         self.advantages = None
         self.returns = None
+        self.per_target_advantages = None
+        self.per_target_returns = None
 
     def is_ready(self) -> bool:
         """Check if buffer has enough data for an update."""

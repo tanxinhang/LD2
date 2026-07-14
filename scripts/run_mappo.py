@@ -71,6 +71,7 @@ def main():
             global_state_dim=global_dim,
             action_space=action_space,
             num_agents=K,
+            num_targets=config.scenario.Q,
             hidden_layers=config.marl.hidden_layers,
             lr=train_lr,
             critic_lr_mult=config.marl.critic_lr_mult,

@@ -51,6 +51,7 @@ def train_one(cfg, seed, centralized: bool) -> float:
     agents = [
         MAPPOAgent(agent_id=k, obs_dim=obs_dim, global_state_dim=global_dim,
                    action_space=aspace, num_agents=K,
+                   num_targets=cfg.scenario.Q,
                    hidden_layers=cfg.marl.hidden_layers, lr=cfg.marl.lr,
                    max_grad_norm=cfg.marl.max_grad_norm, device=device,
                    centralized_critic=centralized)
