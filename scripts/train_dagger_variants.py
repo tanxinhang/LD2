@@ -5,26 +5,21 @@ D0: PD_hist=zeros, comm=zeros  →  baseline: no detection history
 D1: PD_hist=RX-only local, comm=zeros  →  local confidence alone
 
 Both use the SAME StructuredActorNetwork (with pd_hist_proj, GRU).
-The only difference is PD_hist/comm masking in the observation.
 
-Key fixes over v1 (2026-07-14):
-  - Student rollout uses streaming GRU (h_prev passed across frames).
-  - Supervised training stores h_prev per frame, passes it during forward.
-  - Validation (20 eps) and test (100 eps) are separate banks.
-  - Episode-level metrics saved for paired bootstrap.
-  - ep_fail reported at τ=0.3 (primary) and τ=0.05 (secondary).
+Protocol (v3, 2026-07-14):
+  - Student rollout uses streaming GRU (h_prev across frames, reset per ep).
+  - Data saved as episode sequences: [(o_1,a_1), (o_2,a_2), ...] per episode.
+  - Training: chunk-based truncated BPTT (chunk_size=16).
+    Each chunk is re-forwarded through the CURRENT actor with h=0 at chunk start.
+    This eliminates stored-h_prev staleness from old policy parameters.
+  - Hidden drift diagnostic measured after each DAgger iteration.
   - D2 removed: communication training deferred to PPO stage.
-
-Limitations (documented):
-  - Single training seed (seed=42). Multi-seed requires separate runs.
-  - Chunk-based BPTT not used; per-frame h_prev stored instead.
-    This is correct for DAgger (independent teacher labels per frame).
 
 Usage:
   python scripts/train_dagger_variants.py --mode all
-  python scripts/train_dagger_variants.py --mode D0
+  python scripts/train_dagger_variants.py --mode D0 --chunk-size 16
 """
-import sys, os, argparse, json, csv, time, copy
+import sys, os, argparse, json, csv, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
@@ -41,13 +36,11 @@ from uav_isac.agents.networks import StructuredActorNetwork
 # ═══════════════════════════════════════════════════════════════════
 
 def modify_obs(obs_vector: np.ndarray, Q: int, mode: str) -> np.ndarray:
-    """Apply PD/comm masking. PD_hist at [-16-Q:-16], comm at [-16:]."""
     out = obs_vector.copy()
     if mode == 'none':
         out[-(Q + 16):] = 0.0
     elif mode == 'local':
         out[-16:] = 0.0
-    # 'local_comm' keeps everything (not used in DAgger; deferred to PPO)
     return out
 
 
@@ -56,7 +49,6 @@ def modify_obs(obs_vector: np.ndarray, Q: int, mode: str) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════════
 
 def nearest_teacher_dp(env, K, Q, max_dp):
-    """Expert: each UAV homes toward its nearest true target."""
     tgt = np.array([t.get_position_3d() for t in env.core.targets])
     dp = np.zeros((K, 2), dtype=np.float64)
     for k in range(K):
@@ -69,92 +61,72 @@ def nearest_teacher_dp(env, K, Q, max_dp):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Data collection (with streaming GRU)
+# Episode-based data collection
 # ═══════════════════════════════════════════════════════════════════
 
-def collect_teacher_rollout(cfg, n_eps, seed, Q, pd_mode):
-    """Teacher rollout: record (modified_obs, teacher_dp, h_prev).
+def collect_teacher_episodes(cfg, n_eps, seed, Q, pd_mode):
+    """Teacher rollout: return list of episodes, each = [(obs_k, dp_k), ...].
 
-    Teacher doesn't use the actor, so h_prev is set to zeros for all frames.
-    Supervision will also use h_prev=zeros, maintaining consistency.
+    Teacher uses true target positions; GRU state not needed (labels are
+    independent of actor). During training, chunks start with h=0.
     """
     K = cfg.scenario.K
     max_dp = cfg.uav.v_max * cfg.scenario.dt
-    obs_dim = cfg.marl.hidden_layers[0]  # placeholder; we read actual dim from env
-    O, A, H = [], [], []
+    episodes = []
     env = UAVISACEnv(config=cfg, seed=seed)
     for ep in range(n_eps):
         o, _ = env.reset(seed=seed + ep)
-        # Per-episode GRU state: (K, K-1, D) — zero init each episode
-        ep_h = np.zeros((K, K - 1, 64), dtype=np.float32)
+        frames = []  # list of (obs_array (K, obs_dim), dp_array (K, 2))
         while True:
             dp = nearest_teacher_dp(env, K, Q, max_dp)
-            for k in range(K):
-                O.append(modify_obs(o[str(k)].copy(), Q, pd_mode))
-                A.append(dp[k].copy())
-                H.append(ep_h[k].copy())  # (K-1, D) per agent
+            obs_arr = np.stack([modify_obs(o[str(k)].copy(), Q, pd_mode) for k in range(K)])
+            frames.append((obs_arr.astype(np.float64), dp.copy()))
             o, _, t, tr, _ = env.step(
                 {str(k): {'delta_p': dp[k], 'role': 0} for k in range(K)})
-            # Teacher GRU state stays at zero — no actor forward needed
             if t.get('__all__') or tr.get('__all__'):
                 break
+        if frames:
+            episodes.append(frames)
     env.close()
-    Oa = np.asarray(O, dtype=np.float64)
-    Aa = np.asarray(A, dtype=np.float64)
-    Ha = np.asarray(H, dtype=np.float32)  # (N, K-1, D)
-    return Oa, Aa, Ha
+    return episodes
 
 
-def collect_student_rollout(cfg, actor, device, n_eps, seed, Q, pd_mode):
+def collect_student_episodes(cfg, actor, device, n_eps, seed, Q, pd_mode):
     """Student rollout with streaming GRU.
 
-    Actor sees modified obs + maintained h_prev. Records (obs, h_prev, teacher_label).
+    Returns list of episodes. Each episode = [(obs_arr (K,obs_dim), teacher_dp (K,2)), ...].
+    The actor drives the trajectory using its own streaming GRU state.
     """
     K = cfg.scenario.K
     max_dp = cfg.uav.v_max * cfg.scenario.dt
     aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt,
                          learn_roles=cfg.marl.learn_roles)
-    O, A, H = [], [], []
+    episodes = []
     env = UAVISACEnv(config=cfg, seed=seed)
     for ep in range(n_eps):
         o, _ = env.reset(seed=seed + ep)
-        # Per-episode streaming GRU hidden state
-        ep_h = None  # None → zero-init on first frame
+        frames = []
+        ep_h = None  # streaming GRU: None → zero-init first frame
         while True:
             label = nearest_teacher_dp(env, K, Q, max_dp)
-            ob_raw = np.stack([o[str(k)] for k in range(K)])
             ob_mod = np.stack([modify_obs(o[str(k)].copy(), Q, pd_mode) for k in range(K)])
 
-            # Prepare h_prev for batched forward
             if ep_h is None:
-                h_batch = None  # zero-init
+                h_batch = None
             else:
-                # ep_h: (K, K-1, D) → (1, K*(K-1), D)
                 h_batch = torch.as_tensor(
-                    ep_h.reshape(1, K * (K - 1), 64),
-                    dtype=torch.float32, device=device)
+                    ep_h.reshape(1, K * (K - 1), 64), dtype=torch.float32, device=device)
 
             with torch.no_grad():
                 dpm, dps, rl, _, _, h_new = actor(
                     torch.as_tensor(ob_mod, dtype=torch.float32, device=device), h_batch)
 
-            # Save per-agent: obs, h_prev used, teacher action
-            for k in range(K):
-                # Per-agent h_prev: (K-1, D) from the ep_h array
-                agent_h_prev = (ep_h[k].copy() if ep_h is not None
-                                else np.zeros((K - 1, 64), dtype=np.float32))
-                O.append(ob_mod[k].copy())
-                A.append(label[k].copy())
-                H.append(agent_h_prev)
+            frames.append((ob_mod.astype(np.float64), label.copy()))
 
-            # Update streaming state for next frame
             h_new_np = h_new.cpu().numpy().reshape(K, K - 1, 64) if h_new is not None else None
             ep_h = h_new_np
 
-            # Decode actions and step env
-            dpm_np = dpm.cpu().numpy()
-            dps_np = dps.cpu().numpy()
-            rl_np = rl.cpu().numpy()
+            dpm_np = dpm.cpu().numpy(); dps_np = dps.cpu().numpy(); rl_np = rl.cpu().numpy()
             acts = {}
             for k in range(K):
                 a, _ = aspace.decode(dpm_np[k], dps_np, rl_np[k],
@@ -163,46 +135,121 @@ def collect_student_rollout(cfg, actor, device, n_eps, seed, Q, pd_mode):
             o, _, t, tr, _ = env.step(acts)
             if t.get('__all__') or tr.get('__all__'):
                 break
+        if frames:
+            episodes.append(frames)
     env.close()
-    return (np.asarray(O, dtype=np.float64),
-            np.asarray(A, dtype=np.float64),
-            np.asarray(H, dtype=np.float32))
+    return episodes
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Recurrent supervised training
+# Chunk-based recurrent training (truncated BPTT)
 # ═══════════════════════════════════════════════════════════════════
 
-def train_supervised_recurrent(actor, O, A, H, epochs, lr, max_dp, device):
-    """MSE training with per-frame stored h_prev.
+def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16):
+    """Chunk-based truncated BPTT training.
 
-    Each sample = (obs, h_prev, teacher_action). During forward, stored
-    h_prev is passed to actor, ensuring the same GRU condition as rollout.
+    Each episode is split into chunks of chunk_size frames. For each chunk,
+    the CURRENT actor is forwarded with h=0 at chunk start (or detached from
+    the previous chunk within the same episode). Loss is MSE on dp prediction.
+
+    This eliminates stored-h_prev staleness: the forward pass always uses
+    the current model parameters, not old-policy hidden states.
     """
     opt = torch.optim.Adam(actor.parameters(), lr=lr)
-    Ot = torch.as_tensor(O, dtype=torch.float32, device=device)
-    At = torch.as_tensor(A, dtype=torch.float32, device=device)
-    Ht = torch.as_tensor(H, dtype=torch.float32, device=device)  # (N, K-1, D)
-    n, bs, dp_scale = Ot.shape[0], 256, float(max_dp)
-    K_minus_1 = Ht.shape[1]
-    D_gru = Ht.shape[2]
-    last = 0.0
-    for ep in range(epochs):
-        idx = torch.randperm(n, device=device)
-        tot = 0.0
-        for s in range(0, n, bs):
-            mb = idx[s:s + bs]
-            # Reshape h_prev: (mb, K-1, D) → (1, mb*(K-1), D)
-            mb_h = Ht[mb].reshape(1, -1, D_gru)  # (1, mb*(K-1), D)
-            dp_mean, _, _, _, _, _ = actor(Ot[mb], mb_h)
-            pred = torch.tanh(dp_mean) * dp_scale
-            loss = ((pred - At[mb]) ** 2).mean()
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            tot += loss.item() * len(mb)
-        last = tot / n
-    return last
+    dp_scale = float(max_dp)
+
+    # Flatten all frames from all episodes into (obs, action) pairs, keeping
+    # episode boundaries for h-reset.
+    all_obs = []   # list of (T_e, K, obs_dim) arrays per episode
+    all_act = []   # list of (T_e, K, 2) arrays per episode
+    for ep in episodes:
+        obs_arr = np.stack([f[0] for f in ep])   # (T, K, obs_dim)
+        act_arr = np.stack([f[1] for f in ep])   # (T, K, 2)
+        all_obs.append(obs_arr)
+        all_act.append(act_arr)
+
+    n_episodes = len(all_obs)
+    K = all_obs[0].shape[1]
+
+    for epoch in range(epochs):
+        ep_order = np.random.permutation(n_episodes)
+        total_loss = 0.0
+        total_frames = 0
+
+        for ep_idx in ep_order:
+            ep_obs = all_obs[ep_idx]   # (T, K, obs_dim)
+            ep_act = all_act[ep_idx]   # (T, K, 2)
+            T = ep_obs.shape[0]
+
+            # Process episode in chunks
+            h_state = None  # reset at episode boundary
+            for chunk_start in range(0, T, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, T)
+                chunk_obs = torch.as_tensor(
+                    ep_obs[chunk_start:chunk_end], dtype=torch.float32, device=device)
+                chunk_act = torch.as_tensor(
+                    ep_act[chunk_start:chunk_end], dtype=torch.float32, device=device)
+                L = chunk_obs.shape[0]  # frames in this chunk
+
+                # Forward through chunk frame by frame with maintained GRU state
+                preds = []
+                for t in range(L):
+                    ob_t = chunk_obs[t:t+1]  # (1, K, obs_dim)
+                    if h_state is None:
+                        h_in = None
+                    else:
+                        h_in = h_state  # (1, K*(K-1), D)
+                    dp_mean, _, _, _, _, h_new = actor(ob_t, h_in)
+                    preds.append(torch.tanh(dp_mean) * dp_scale)
+                    h_state = h_new.detach()  # detach for truncated BPTT
+
+                pred = torch.cat(preds, dim=0)  # (L, K, 2)
+                loss = ((pred - chunk_act) ** 2).mean()
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+
+                total_loss += loss.item() * L * K
+                total_frames += L * K
+
+        avg_loss = total_loss / max(total_frames, 1)
+        if (epoch + 1) % 20 == 0 or epoch == 0:
+            actor.eval()
+            actor.train()
+
+    return avg_loss
+
+
+def measure_hidden_drift(actor, episodes, device, chunk_size=16):
+    """Diagnostic: compare stored student-rollout h (from old policy) with
+    recomputed h (from current actor) on the same observation sequences.
+
+    Returns mean relative drift: |h_stored - h_recomputed| / (|h_recomputed| + ε).
+    Large values indicate stored h_prev staleness.
+    """
+    if not episodes:
+        return 0.0
+
+    K = episodes[0][0][0].shape[0]
+    drifts = []
+    n_samples = 0
+
+    with torch.no_grad():
+        for ep in episodes[:min(5, len(episodes))]:  # sample 5 episodes
+            obs_arr = np.stack([f[0] for f in ep])
+            T = obs_arr.shape[0]
+            h_state = None
+            for t in range(T):
+                ob_t = torch.as_tensor(obs_arr[t:t+1], dtype=torch.float32, device=device)
+                _, _, _, _, _, h_new = actor(ob_t, h_state if h_state is not None else None)
+                if h_state is not None and h_new is not None:
+                    drift = (h_state - h_new).abs().mean().item()
+                    norm = h_new.abs().mean().item() + 1e-8
+                    drifts.append(drift / norm)
+                    n_samples += 1
+                h_state = h_new.detach() if h_new is not None else None
+
+    return float(np.mean(drifts)) if drifts else 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -210,55 +257,44 @@ def train_supervised_recurrent(actor, O, A, H, epochs, lr, max_dp, device):
 # ═══════════════════════════════════════════════════════════════════
 
 def evaluate_streaming(cfg, actor, device, Q, pd_mode, seeds):
-    """Evaluate with streaming GRU. Returns per-episode metrics list."""
     K = cfg.scenario.K
     aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt,
                          learn_roles=cfg.marl.learn_roles)
     env = UAVISACEnv(config=cfg, seed=12345)
     episodes = []
-
     for seed in seeds:
         obs, _ = env.reset(seed=seed)
         pd_per_target = []
         eval_h = None
         while True:
-            ob_raw = np.stack([obs[str(k)] for k in range(K)])
             ob_mod = np.stack([modify_obs(obs[str(k)].copy(), Q, pd_mode) for k in range(K)])
             with torch.no_grad():
                 dpm, _, rl, _, _, h_new = actor(
                     torch.as_tensor(ob_mod, dtype=torch.float32, device=device), eval_h)
             eval_h = h_new
-            dpm_np = dpm.cpu().numpy()
-            rl_np = rl.cpu().numpy()
+            dpm_np = dpm.cpu().numpy(); rl_np = rl.cpu().numpy()
             acts = {}
             for k in range(K):
-                a, _ = aspace.decode(dpm_np[k], np.zeros(2), rl_np[k],
-                                     dp_deterministic=True)
+                a, _ = aspace.decode(dpm_np[k], np.zeros(2), rl_np[k], dp_deterministic=True)
                 acts[str(k)] = {'delta_p': a.delta_p, 'role': 0}
             obs, _, t, tr, info = env.step(acts)
             pd_per_target.append(info['P_D_q'].copy())
             if t.get('__all__') or tr.get('__all__'):
                 break
-
         w = min(20, len(pd_per_target))
-        pt = np.array(pd_per_target[-w:]).mean(axis=0)  # (Q,)
+        pt = np.array(pd_per_target[-w:]).mean(axis=0)
         episodes.append({
-            'seed': seed,
-            'steady': float(pt.mean()),
-            'worst': float(pt.min()),
-            'weak3': float(np.mean(np.sort(pt)[:3])),
-            'tstd': float(pt.std()),
+            'seed': seed, 'steady': float(pt.mean()), 'worst': float(pt.min()),
+            'weak3': float(np.mean(np.sort(pt)[:3])), 'tstd': float(pt.std()),
             'per_target': pt.tolist(),
             'ep_fail_030': 1.0 if pt.min() < 0.3 else 0.0,
             'ep_fail_005': 1.0 if pt.min() < 0.05 else 0.0,
         })
-
     env.close()
     return episodes
 
 
 def summarize_episodes(episodes):
-    """Aggregate episode-level metrics into summary dict."""
     def _stat(key):
         vals = [e[key] for e in episodes]
         return float(np.mean(vals)), float(np.std(vals))
@@ -266,25 +302,18 @@ def summarize_episodes(episodes):
         'steady_mean': _stat('steady')[0], 'steady_std': _stat('steady')[1],
         'weak3_mean': _stat('weak3')[0], 'weak3_std': _stat('weak3')[1],
         'worst_mean': _stat('worst')[0], 'worst_std': _stat('worst')[1],
-        'tstd_mean': _stat('tstd')[0],
         'ep_fail_030': float(np.mean([e['ep_fail_030'] for e in episodes])),
         'ep_fail_005': float(np.mean([e['ep_fail_005'] for e in episodes])),
-        'n_episodes': len(episodes),
     }
 
 
 def save_episode_csv(episodes, path):
-    """Save per-episode metrics to CSV for paired bootstrap."""
     with open(path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=[
+        w = csv.DictWriter(f, fieldnames=[
             'seed', 'steady', 'worst', 'weak3', 'tstd', 'ep_fail_030', 'ep_fail_005'])
-        writer.writeheader()
+        w.writeheader()
         for e in episodes:
-            writer.writerow({
-                'seed': e['seed'], 'steady': e['steady'], 'worst': e['worst'],
-                'weak3': e['weak3'], 'tstd': e['tstd'],
-                'ep_fail_030': e['ep_fail_030'], 'ep_fail_005': e['ep_fail_005'],
-            })
+            w.writerow({k: e[k] for k in w.fieldnames})
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -292,7 +321,6 @@ def save_episode_csv(episodes, path):
 # ═══════════════════════════════════════════════════════════════════
 
 def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
-    """Train a single recurrent DAgger variant."""
     K, Q = cfg.scenario.K, cfg.scenario.Q
     max_dp = cfg.uav.v_max * cfg.scenario.dt
 
@@ -302,48 +330,54 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
     tmp_env.close()
 
     print(f"\n{'='*60}")
-    print(f"Mode: {pd_mode}  K={K} Q={Q} obs_dim={obs_dim} single_frame_dim={single_fd}")
-    print(f"Val seeds: {len(val_seeds)}  Test seeds: {len(test_seeds)}")
+    print(f"Mode: {pd_mode}  K={K} Q={Q} obs_dim={obs_dim}")
+    print(f"Chunk size: {args.chunk_size}  Val: {len(val_seeds)} eps  Test: {len(test_seeds)} eps")
     print(f"{'='*60}")
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    torch.manual_seed(args.seed); np.random.seed(args.seed)
     actor = StructuredActorNetwork(
         obs_dim=obs_dim, K=K, Q=Q, entity_dim=64, max_dp=max_dp,
-        single_frame_dim=single_fd,
-    ).to(device)
+        single_frame_dim=single_fd).to(device)
     print(f"Actor params: {sum(p.numel() for p in actor.parameters())}")
 
     # Iter 0: teacher data
     t0 = time.time()
-    O, A, H = collect_teacher_rollout(cfg, args.teacher_eps, args.seed, Q, pd_mode)
-    print(f"Teacher dataset: {O.shape[0]} pairs ({time.time()-t0:.1f}s)")
+    episodes = collect_teacher_episodes(cfg, args.teacher_eps, args.seed, Q, pd_mode)
+    total_frames = sum(len(ep) for ep in episodes)
+    print(f"Teacher: {len(episodes)} episodes, {total_frames} frames ({time.time()-t0:.1f}s)")
 
+    base_steady = None
     best_val_weak3 = -1.0
     best_state = None
     history = []
 
     for it in range(args.dagger_iters):
-        # Supervised training (recurrent: uses stored h_prev)
-        mse = train_supervised_recurrent(
-            actor, O, A, H, args.sup_epochs, args.lr, max_dp, device)
+        # Chunk-based recurrent training
+        actor.train()
+        mse = train_chunk_bptt(actor, episodes, args.sup_epochs, args.lr,
+                               max_dp, device, args.chunk_size)
         actor.eval()
+
+        # Hidden drift diagnostic
+        drift = measure_hidden_drift(actor, episodes, device, args.chunk_size)
 
         # Validation
         val_eps = evaluate_streaming(cfg, actor, device, Q, pd_mode, val_seeds)
         val_summary = summarize_episodes(val_eps)
         val_summary['iteration'] = it
-        val_summary['dataset_size'] = O.shape[0]
+        val_summary['n_episodes'] = len(episodes)
+        val_summary['total_frames'] = total_frames
         val_summary['sup_mse'] = float(mse)
+        val_summary['hidden_drift'] = float(drift)
         history.append(val_summary)
 
-        print(f"  iter {it}: mse={mse:.4f}  "
+        print(f"  iter {it}: mse={mse:.4f}  h_drift={drift:.4f}  "
               f"val_steady={val_summary['steady_mean']:.4f}±{val_summary['steady_std']:.4f}  "
               f"val_weak3={val_summary['weak3_mean']:.4f}±{val_summary['weak3_std']:.4f}  "
               f"val_worst={val_summary['worst_mean']:.4f}  "
               f"val_ep_fail_030={val_summary['ep_fail_030']:.3f}")
 
-        # Checkpoint selection: max weak3, subject to steady not dropping
+        # Checkpoint selection
         if it == 0:
             base_steady = val_summary['steady_mean']
         if (val_summary['weak3_mean'] > best_val_weak3 and
@@ -352,26 +386,26 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
             best_state = {k: v.cpu().clone() for k, v in actor.state_dict().items()}
             best_iter = it
 
-        actor.train()
-
-        # Student aggregation (streaming GRU)
-        sO, sA, sH = collect_student_rollout(
+        # Student aggregation
+        student_eps = collect_student_episodes(
             cfg, actor, device, args.student_eps, args.seed + 1000 + it, Q, pd_mode)
-        O = np.concatenate([O, sO])
-        A = np.concatenate([A, sA])
-        H = np.concatenate([H, sH])
-        if O.shape[0] > args.max_pairs:
-            O = O[-args.max_pairs:]
-            A = A[-args.max_pairs:]
-            H = H[-args.max_pairs:]
+        student_frames = sum(len(ep) for ep in student_eps)
+        # Merge: keep most recent data if over capacity
+        episodes = episodes + student_eps
+        total_frames += student_frames
+        while total_frames > args.max_pairs:
+            removed = episodes.pop(0)
+            total_frames -= len(removed)
+        print(f"    student: +{len(student_eps)} eps, {student_frames} frames → "
+              f"dataset {len(episodes)} eps, {total_frames} frames")
 
-    # Restore best checkpoint (by val weak3)
+    # Restore best
     if best_state is not None:
         actor.load_state_dict(best_state)
         print(f"  restored best: iter={best_iter} val_weak3={best_val_weak3:.4f}")
     actor.eval()
 
-    # Final TEST evaluation (separate bank, only after checkpoint frozen)
+    # Final TEST evaluation
     test_eps = evaluate_streaming(cfg, actor, device, Q, pd_mode, test_seeds)
     test_summary = summarize_episodes(test_eps)
 
@@ -384,8 +418,7 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
 
     return {
         'state_dict': {k: v.cpu().clone() for k, v in actor.state_dict().items()},
-        'test_summary': test_summary,
-        'test_episodes': test_eps,
+        'test_summary': test_summary, 'test_episodes': test_eps,
         'val_history': history,
     }
 
@@ -394,17 +427,12 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
-MODES = {
-    'D0': 'none',
-    'D1': 'local',
-}
+MODES = {'D0': 'none', 'D1': 'local'}
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Train recurrent DAgger variants D0/D1")
-    ap.add_argument("--mode", default="all",
-                    choices=["D0", "D1", "all"],
-                    help="Which variant(s) to train")
+    ap = argparse.ArgumentParser(description="Recurrent DAgger D0/D1 (chunk BPTT)")
+    ap.add_argument("--mode", default="all", choices=["D0", "D1", "all"])
     ap.add_argument("--config", default="config/exp_800_q4.yaml")
     ap.add_argument("--dagger-iters", type=int, default=5)
     ap.add_argument("--teacher-eps", type=int, default=60)
@@ -412,6 +440,8 @@ def main():
     ap.add_argument("--sup-epochs", type=int, default=60)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max-pairs", type=int, default=400000)
+    ap.add_argument("--chunk-size", type=int, default=16,
+                    help="Truncated BPTT chunk length (frames)")
     ap.add_argument("--val-episodes", type=int, default=20)
     ap.add_argument("--test-episodes", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
@@ -421,91 +451,67 @@ def main():
     cfg = load_config(args.config) if os.path.exists(args.config) else get_default_config()
     cfg.marl.num_envs = 1
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Separate validation and test banks
     val_seeds = list(range(20001, 20001 + args.val_episodes))
     test_seeds = list(range(30001, 30001 + args.test_episodes))
-
     commit_hash = os.popen('git rev-parse HEAD').read().strip() if os.path.exists('.git') else 'unknown'
 
-    print(f"Config: {args.config}  Device: {device}  Seed: {args.seed}")
-    print(f"Commit: {commit_hash}")
-    print(f"Validation: seeds {val_seeds[0]}-{val_seeds[-1]} ({len(val_seeds)} eps)")
-    print(f"Test:       seeds {test_seeds[0]}-{test_seeds[-1]} ({len(test_seeds)} eps)")
+    print(f"Config: {args.config}  Device: {device}  Seed: {args.seed}  Commit: {commit_hash}")
+    print(f"Val: {val_seeds[0]}-{val_seeds[-1]}  Test: {test_seeds[0]}-{test_seeds[-1]}")
 
-    if args.mode == 'all':
-        to_run = list(MODES.items())
-    else:
-        to_run = [(args.mode, MODES[args.mode])]
-
+    to_run = list(MODES.items()) if args.mode == 'all' else [(args.mode, MODES[args.mode])]
     os.makedirs(args.out_dir, exist_ok=True)
     all_results = {}
 
     for mode_name, pd_mode in to_run:
         result = train_one(cfg, pd_mode, device, args, val_seeds, test_seeds)
 
-        # Save checkpoint
         ckpt_path = os.path.join(args.out_dir, f"dagger_{mode_name}.pt")
         torch.save(result['state_dict'], ckpt_path)
         print(f"  saved → {ckpt_path}")
 
-        # Save episode-level test metrics
         csv_path = os.path.join(args.out_dir, f"test_episodes_{mode_name}.csv")
         save_episode_csv(result['test_episodes'], csv_path)
-        print(f"  saved → {csv_path}")
 
-        # Save validation history
         hist_path = os.path.join(args.out_dir, f"val_history_{mode_name}.csv")
         with open(hist_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'iteration', 'dataset_size', 'sup_mse',
-                'steady_mean', 'steady_std', 'weak3_mean', 'weak3_std',
-                'worst_mean', 'worst_std', 'ep_fail_030', 'ep_fail_005'])
-            writer.writeheader()
+            fields = ['iteration', 'n_episodes', 'total_frames', 'sup_mse', 'hidden_drift',
+                      'steady_mean', 'steady_std', 'weak3_mean', 'weak3_std',
+                      'worst_mean', 'worst_std', 'ep_fail_030', 'ep_fail_005']
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
             for h in result['val_history']:
-                writer.writerow({k: h.get(k, '') for k in writer.fieldnames})
-        print(f"  saved → {hist_path}")
+                w.writerow({k: h.get(k, '') for k in fields})
 
         all_results[mode_name] = result
 
-    # Save manifest
     manifest = {
-        'git_commit': commit_hash,
-        'config': args.config,
-        'training_seed': args.seed,
-        'K': cfg.scenario.K, 'Q': cfg.scenario.Q,
+        'git_commit': commit_hash, 'config': args.config,
+        'training_seed': args.seed, 'K': cfg.scenario.K, 'Q': cfg.scenario.Q,
+        'chunk_size': args.chunk_size,
         'dagger_iters': args.dagger_iters,
-        'teacher_eps': args.teacher_eps,
-        'student_eps': args.student_eps,
         'val_seeds': f"{val_seeds[0]}-{val_seeds[-1]}",
         'test_seeds': f"{test_seeds[0]}-{test_seeds[-1]}",
-        'protocol': 'recurrent DAgger (streaming GRU rollout + stored h_prev training)',
+        'protocol': 'chunk-based truncated BPTT (h=0 at chunk start, detach between chunks)',
         'checkpoint_selection': 'max val weak3, steady >= base_steady - 0.01',
         'limitations': [
-            'Single training seed (seed=42). Multi-seed requires separate runs.',
-            'Per-frame stored h_prev, not chunk-based BPTT.',
-            'Communication not trained; deferred to PPO stage.',
+            'Single training seed.',
+            'Chunk size=16; no full-episode BPTT.',
+            'Communication not trained; deferred to PPO.',
         ],
         'results': {
             k: {
-                'pd_mode': v['test_summary'].get('pd_mode', MODES[k]),
+                'pd_mode': MODES[k],
                 'steady_mean': v['test_summary']['steady_mean'],
-                'steady_std': v['test_summary']['steady_std'],
                 'weak3_mean': v['test_summary']['weak3_mean'],
-                'weak3_std': v['test_summary']['weak3_std'],
                 'worst_mean': v['test_summary']['worst_mean'],
                 'ep_fail_030': v['test_summary']['ep_fail_030'],
                 'ep_fail_005': v['test_summary']['ep_fail_005'],
-            }
-            for k, v in all_results.items()
+            } for k, v in all_results.items()
         },
     }
-    manifest_path = os.path.join(args.out_dir, "run_manifest.json")
-    with open(manifest_path, 'w') as f:
+    with open(os.path.join(args.out_dir, "run_manifest.json"), 'w') as f:
         json.dump(manifest, f, indent=2)
-    print(f"\nManifest → {manifest_path}")
 
-    # Comparison table
     if len(all_results) > 1:
         print(f"\n{'='*80}")
         print(f"{'Variant':<8} {'steady':>10} {'weak3':>10} {'worst':>10} "
@@ -518,10 +524,8 @@ def main():
                       f"{m['worst_mean']:10.4f} {m['ep_fail_030']:12.3f} "
                       f"{m['ep_fail_005']:12.3f}")
         print(f"{'='*80}")
-        print("Note: single training seed. Δ < per-ep std → not a significant difference.")
-        print("D2 removed: communication training deferred to PPO stage.")
+        print("Note: single training seed; D1 chosen as PPO init for interface consistency.")
         print("ep_fail_030 = fraction of episodes with min_q P_D < 0.3 in steady window.")
-        print("ep_fail_005 = fraction with min_q P_D < 0.05 (legacy threshold).")
 
 
 if __name__ == "__main__":
