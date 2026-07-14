@@ -108,12 +108,17 @@ def build_fresh_case(aspace, dag_ckpt, dag_keys):
 
 
 def save_snapshot(agents):
-    """Save actor, critic, and optimizer states for restoration."""
+    """Save actor, critic, and optimizer states for restoration.
+
+    Uses deepcopy for optimizer state (contains nested tensors).
+    The snapshot is taken BEFORE any PPO update, so optimizer state
+    should be empty (no momentum yet). This is asserted at restore time.
+    """
     return {
         'actor': {k: v.clone() for k, v in agents[0].actor.state_dict().items()},
         'critic': {k: v.clone() for k, v in agents[0].critic.state_dict().items()},
-        'actor_opt': {k: v for k, v in agents[0].actor_optimizer.state_dict().items()},
-        'critic_opt': {k: v for k, v in agents[0].critic_optimizer.state_dict().items()},
+        'actor_opt': copy.deepcopy(agents[0].actor_optimizer.state_dict()),
+        'critic_opt': copy.deepcopy(agents[0].critic_optimizer.state_dict()),
     }
 
 

@@ -21,7 +21,6 @@ def test_streaming_differs_from_zero_init(k, q):
     actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
     actor.eval()
 
-    # Simulate 10-frame sequence
     torch.manual_seed(42)
     frames = [torch.randn(1, obs_dim) for _ in range(10)]
 
@@ -47,7 +46,7 @@ def test_streaming_differs_from_zero_init(k, q):
 
     # Later frames should diverge if GRU is working
     diffs = [(stream_outputs[i] - zero_outputs[i]).abs().max().item() for i in range(10)]
-    max_late_diff = max(diffs[3:])  # frames 3+
+    max_late_diff = max(diffs[3:])
     assert max_late_diff > 1e-6, (
         f"Streaming GRU output identical to h=0 across all frames. "
         f"Max diff (frames 3+): {max_late_diff:.2e}. GRU may be degenerate."
@@ -55,30 +54,42 @@ def test_streaming_differs_from_zero_init(k, q):
 
 
 def test_streaming_hidden_reset_per_episode():
-    """New episode should reset h_prev to None (not carry over from previous)."""
+    """New episode h=None must differ from leaked h from previous episode."""
     k, q = 4, 4
     obs_dim = 29 + 18*q + 8*(k-1)
     actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
     actor.eval()
 
     torch.manual_seed(42)
+    # Episode 1: 5 frames, different observation each frame
     ep1_frames = [torch.randn(1, obs_dim) for _ in range(5)]
-    ep2_frames = [torch.randn(1, obs_dim) for _ in range(5)]
+    # Episode 2: fresh frames (same seed continuation → different values)
+    ep2_first = torch.randn(1, obs_dim)
 
     with torch.no_grad():
-        # Episode 1
-        h = None
+        # Run episode 1, accumulate hidden state
+        h_ep1 = None
         for f in ep1_frames:
-            _, _, _, _, _, h = actor(f, h)
-        ep1_final_dp, _, _, _, _, _ = actor(ep1_frames[-1], h)
+            _, _, _, _, _, h_ep1 = actor(f, h_ep1)
 
-        # Episode 2 (fresh h=None)
-        _, _, _, _, _, _ = actor(ep2_frames[0], None)  # should match
+        # Episode 2, frame 1: fresh h=None (CORRECT reset)
+        fresh_out, _, _, _, _, _ = actor(ep2_first, None)
 
-        # Episode 2 with leaked h from ep1 (WRONG)
-        ep2_leaked_dp, _, _, _, _, _ = actor(ep2_frames[0], h)
+        # Episode 2, frame 1 again: fresh h=None (should match)
+        fresh_out2, _, _, _, _, _ = actor(ep2_first, None)
 
-    diff = (ep2_leaked_dp - ep1_final_dp).abs().max().item()
-    # These should differ because the obs are different and h carries ep1 state
-    # The point is: h must be reset to None per episode
-    assert diff != 0 or True  # informational — actual assertion is in _evaluate()
+        # Episode 2, frame 1 with LEAKED h from ep1 (INCORRECT — no reset)
+        leaked_out, _, _, _, _, _ = actor(ep2_first, h_ep1)
+
+    # Two fresh calls with same input must match
+    fresh_diff = (fresh_out - fresh_out2).abs().max().item()
+    assert fresh_diff < 1e-7, (
+        f"Same input+h=None should give identical output: diff={fresh_diff:.2e}"
+    )
+
+    # Leaked h must produce DIFFERENT output (h carries ep1 state)
+    leaked_diff = (fresh_out - leaked_out).abs().max().item()
+    assert leaked_diff > 1e-6, (
+        f"Leaked h from ep1 should produce different output than fresh h=None. "
+        f"Diff={leaked_diff:.2e}. If zero, GRU is not encoding temporal state."
+    )

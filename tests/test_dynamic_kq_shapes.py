@@ -60,7 +60,8 @@ def test_actor_dynamic_kq(k, q):
 
 
 def test_cvar_k_dynamic():
-    """CVaR top-k must scale with Q."""
-    for q, expected_k in [(4, 1), (8, 2), (12, 3), (1, 1)]:
-        cvar_k = max(1, int(np.ceil(0.25 * q)))
-        assert cvar_k == expected_k, f"Q={q}: expected cvar_k={expected_k}, got {cvar_k}"
+    """CVaR top-k must scale with Q — calls production function, not formula copy."""
+    from uav_isac.agents.trainer import compute_cvar_k
+    for q, expected_k in [(4, 1), (8, 2), (12, 3), (1, 1), (16, 4), (2, 1)]:
+        result = compute_cvar_k(q)
+        assert result == expected_k, f"Q={q}: expected cvar_k={expected_k}, got {result}"

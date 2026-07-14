@@ -486,41 +486,41 @@ class EnvironmentCore:
             self.belief_mgr.update_after_observation(i, q, obs, ts)
             self.belief_mgr.update_after_observation(j, q, obs, ts)
 
-        # 9. Build next observations
-        next_obs = self._build_observations()
-
-        # 10. Check termination
-        dones = {}
-        all_dead = all(not u.is_alive() for u in self.uavs)
-        time_up = self.t >= self.T
-        done_flag = all_dead or time_up
-
-        for k in range(self.K):
-            dones[k] = done_flag or not self.uavs[k].is_alive()
-
-        dones['__all__'] = done_flag
-
-        # Store previous P_D for next observation
+        # 9. Compute previous P_D BEFORE building next observations.
+        #    Fixes off-by-one: previously prev_P_D was updated AFTER
+        #    _build_observations, so next_obs got P_D_{t-1} not P_D_t.
         self.prev_P_D = P_D_q.copy()
 
-        # P1 FIX: compute per-UAV LOCAL detection confidence.
-        # Each UAV k sees only P_D computed from deflection of pairs where
-        # k is either tx or rx. This respects the decentralized information
-        # boundary (no free global fusion-centre broadcast).
+        # P1 FIX: per-UAV LOCAL detection confidence (RX-only by default).
+        # Only the RX UAV of each bistatic pair gets local P_D credit;
+        # this respects the physical reality that RX performs detection.
+        # TX must learn target status via neighbor comm messages or
+        # explicit RX→TX feedback (not yet modeled).
         self.prev_P_D_local = {}
         for k in range(self.K):
             D_k = np.zeros(self.Q, dtype=np.float64)
             for (i, j, q) in p0_solution.selected_set:
-                if i == k or j == k:
+                if j == k:  # RX-only (方案A)
                     for e in deflection_entries:
                         if e.i == i and e.j == j and e.q == q:
                             D_k[q] += e.d_eff
                             break
-            # Compute local P_D from local deflection using the same formula
             from uav_isac.physical.detection import compute_P_D
             P_D_local_k = np.array([compute_P_D(D_k[q], self.cfg.detection.P_FA)
                                     for q in range(self.Q)])
             self.prev_P_D_local[k] = P_D_local_k
+
+        # 10. Build next observations (now sees correct prev_P_D_local from step 9)
+        next_obs = self._build_observations()
+
+        # 11. Check termination
+        dones = {}
+        all_dead = all(not u.is_alive() for u in self.uavs)
+        time_up = self.t >= self.T
+        done_flag = all_dead or time_up
+        for k in range(self.K):
+            dones[k] = done_flag or not self.uavs[k].is_alive()
+        dones['__all__'] = done_flag
 
         # Build step info
         uav_states = [u.get_state() for u in self.uavs]
@@ -610,11 +610,12 @@ class EnvironmentCore:
         if not hasattr(self, '_prev_obs_deque'):
             self._prev_obs_deque: dict = {}  # {agent_id: deque of prev frames}
         for k in range(self.K):
-            # P1 FIX: use per-UAV LOCAL detection confidence, not global fused P_D.
-            # Falls back to global prev_P_D if prev_P_D_local is empty (backward compat).
-            local_pd = self.prev_P_D_local.get(k, self.prev_P_D)
+            # P1 FIX: per-UAV LOCAL detection confidence (RX-only).
+            # No fallback to global prev_P_D — strict decentralized mode.
+            # First frame (t=0) or UAV with no RX role gets zeros.
+            local_pd = self.prev_P_D_local.get(k)
             if local_pd is None:
-                local_pd = self.prev_P_D
+                local_pd = np.zeros(self.Q, dtype=np.float64)
             cur = self.obs_builder.build_local_obs(
                 k, uav_states, beliefs, local_pd,
                 oracle_targets=oracle_targets,

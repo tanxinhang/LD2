@@ -15,6 +15,19 @@ from typing import Dict, List, Optional, Tuple
 from collections import deque
 import time
 
+def compute_cvar_k(Q: int, tail_fraction: float = 0.25) -> int:
+    """Number of worst targets for CVaR tail-risk constraint.
+
+    Args:
+        Q: number of targets
+        tail_fraction: fraction of targets in the tail (default 0.25)
+
+    Returns:
+        k: number of worst targets to average over (≥1)
+    """
+    return max(1, int(np.ceil(tail_fraction * Q)))
+
+
 from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.buffer import RolloutBuffer
 from uav_isac.agents.networks import (
@@ -415,8 +428,7 @@ class MAPPTrainer:
                 if tau_cvar > 0:
                     pd_frame = np.array(macro_pd[-1]) if macro_pd else np.zeros(self.Q)
                     deficits = np.maximum(0.0, tau_cvar - pd_frame)  # (Q,)
-                    # P1 FIX: top-k driven by Q, not hardcoded 2
-                    cvar_k = max(1, int(np.ceil(0.25 * self.Q)))
+                    cvar_k = compute_cvar_k(self.Q)
                     sorted_def = np.sort(deficits)[::-1]
                     cvar_deficit = float(np.mean(sorted_def[:cvar_k]))
                     self._rollout_cvar_deficits.append(cvar_deficit)
