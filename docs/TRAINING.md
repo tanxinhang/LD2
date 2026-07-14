@@ -178,7 +178,30 @@ P0Solution(
 
 ---
 
-## 7. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
+## 7. DAgger 变体训练 (D0/D1/D2, 2026-07-14)
+
+三个 local-PD 输入模式的 DAgger 对照训练：
+
+```bash
+python scripts/train_dagger_variants.py --mode all \
+    --config config/exp_800_q4.yaml \
+    --dagger-iters 5 --teacher-eps 60 --student-eps 40 \
+    --test-episodes 100 --out-dir results/dagger_variants
+```
+
+| Mode | PD_hist | Comm | 用途 |
+|------|:---:|:---:|------|
+| D0 | zeros | zeros | 无检测历史基线 |
+| D1 | RX-only local | zeros | local confidence 独立价值 |
+| D2 | RX-only local | enabled | 邻居通信传播覆盖状态 |
+
+所有变体使用相同的 StructuredActorNetwork（含 pd_hist_proj），唯一差异是训练和评估时观测中 PD_hist 和 comm 部分的掩码。Checkpoint 通过 validation bank 上的 best steady_P_D 选择。
+
+**K=4,Q=4 结果**：三组差异在评估噪声范围内（Δ<0.005）。local-PD 对 nearest-target teacher 无可测量增益。价值应在 PPO fine-tuning 阶段重新评估。
+
+---
+
+## 8. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
 
 修复 GRU/PPO 状态一致性后，所有基于 PPO 的实验结论需要用修复后代码重新验证。建议验证矩阵：
 

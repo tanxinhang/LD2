@@ -1,7 +1,23 @@
 # 已知问题与技术债务
 
+> **2026-07-14 基础设施审计闭环。** 截至 commit `c77f3e0`，recurrent PPO rollout–buffer–update 条件一致性、streaming GRU 评估、动态 K/Q、per-target GAE bootstrap、RX-only 局部检测置信度边界均已通过自动化回归测试（8 个测试文件，全部硬断言）。此前基于非法 PPO ratio 和全局 P_D 历史输入得到的训练退化与模块归因结果不再作为有效证据。后续实验统一基于修复后的 local-PD 代码路径。
+
 统一格式:问题 / 现象 / 原因 / 状态 / 诊断方法 / 优先级 / 相关文件。
 **已修复**与**开放**分列。
+
+---
+
+## DAgger 变体对照 (D0/D1/D2, 2026-07-14)
+
+对 local-PD 的三种输入模式进行了 DAgger 训练对照（`scripts/train_dagger_variants.py`，K=4,Q=4，5 iterations，100 test episodes）：
+
+| Variant | PD_hist | Comm | steady | weak3 | ep_fail |
+|---------|:---:|:---:|:---:|:---:|:---:|
+| D0 | zeros | zeros | 0.700 | 0.600 | 0.63 |
+| D1 | RX-only | zeros | 0.703 | 0.603 | 0.61 |
+| D2 | RX-only | enabled | 0.703 | 0.603 | 0.61 |
+
+**结论**：local-PD 对 nearest-target DAgger 无显著增益（Δ < 评估噪声）。nearest-target teacher 基于真实目标位置决策，不需要检测历史。local-PD 的价值应在 PPO fine-tuning 阶段评估——当 critic 提供目标级优势信号时，Actor 可能需要差异化响应。高 ep_fail (~0.6) 说明 nearest-target 自身不是公平覆盖策略。Checkpoint 位于 `results/dagger_variants/`。
 
 ---
 
