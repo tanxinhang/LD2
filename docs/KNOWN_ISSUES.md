@@ -13,7 +13,8 @@
 - 数据保存为 episode 序列（不存储 h_prev）。
 - 训练：chunk-based TBPTT (chunk_size=16)。
   - h=0 **仅在 episode 边界**。
-  - Chunk 间传递 `h_next = h_prev_chunk_end`（无需显式 detach — Actor 在 `networks.py:329` 已内置 `hn.detach()`，每帧自动截断梯度）。
+  - Chunk 内部：`detach_h_new=False`，梯度跨帧传播（最多 L=16 帧）。
+  - Chunk 边界：`h_next = h_end.detach()` — 保留状态值，截断梯度。
   - Optimizer step 在 episode 结束后执行一次（episode 内所有 chunk 看到相同参数）。
 - Student rollout：streaming GRU，episode 边界清零。
 - 每轮报告 `hidden_drift` 诊断值（当前 actor vs 上一轮 actor 在相同观测上的 h 差异）。
@@ -21,11 +22,13 @@
 - Test：100 eps 独立 bank，checkpoint 冻结后运行一次。
 - ep_fail 主门限 τ=0.3（辅以 τ=0.05）。
 
-**Chunk BPTT 回归测试** (`tests/test_chunk_bptt_consistency.py`)：4/4 通过
+**Chunk BPTT 回归测试** (`tests/test_chunk_bptt_consistency.py`)：6/6 通过
 1. Full-sequence == chunked 输出逐帧一致（max|diff| < 1e-5）
 2. Chunk 边界 carry state（carried h ≠ h=0 reset）
 3. Episode 边界 reset hidden（fresh ≠ leaked from previous ep）
-4. Actor h_new 内置 detach（`grad_fn is None`，梯度不跨帧泄漏）
+4. `detach_h_new=False` → 梯度在 chunk 内跨帧传播
+5. Chunk 边界 `detach()` → 梯度被截断
+6. `detach_h_new=True`（默认）→ 无跨帧梯度（rollout/eval 模式）
 
 **限制**：单一 training seed；chunk_size=16（非完整 episode BPTT）；通信推迟到 PPO。
 

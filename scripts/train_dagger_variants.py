@@ -151,8 +151,9 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
     """Chunk-based truncated BPTT training.
 
     Each episode: h_0 = 0 at episode boundary.
-    Chunk i: forward frames [i*L, (i+1)*L) with h_in from previous chunk end.
-    Actor internally detaches h_new (networks.py:329) — no explicit detach needed.
+    Chunk i: forward frames [i*L, (i+1)*L) with detach_h_new=False.
+    Gradient flows within the chunk (up to L frames). At chunk boundary:
+    h_next = detach(h_end) — preserves state value, cuts gradient.
     Optimizer steps once per episode (all chunks see same parameters).
     """
     opt = torch.optim.Adam(actor.parameters(), lr=lr)
@@ -193,9 +194,13 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
                 for t in range(L):
                     ob_t = chunk_obs[t:t+1]
                     h_in = None if h_state is None else h_state
-                    dp_mean, _, _, _, _, h_new = actor(ob_t, h_in)
+                    # detach_h_new=False → gradient flows within chunk (true TBPTT)
+                    dp_mean, _, _, _, _, h_new = actor(ob_t, h_in, detach_h_new=False)
                     preds.append(torch.tanh(dp_mean) * dp_scale)
-                    h_state = h_new  # actor already detaches internally (networks.py:329)
+                    h_state = h_new
+
+                # Chunk boundary: detach to truncate BPTT
+                h_state = h_state.detach()
 
                 pred = torch.cat(preds, dim=0)
                 # Accumulate weighted loss: sum of per-frame squared errors

@@ -223,14 +223,25 @@ _evaluate() per episode:
 此前评估调用 `actor(obs)` 每帧从零初始化 GRU（与 rollout 不一致）。
 现在评估的 recurrent 路径与 rollout 完全一致。
 
-### 4.10 Actor 内置 Truncated BPTT (2026-07-14)
+### 4.10 Actor `detach_h_new` 参数 (2026-07-14)
 
-`StructuredActorNetwork.forward()` 在返回 `h_new` 前已调用 `hn.detach()` (line 329)。这意味着：
-- 每帧的 GRU hidden state 在传递给下一帧前自动切断梯度。
-- 训练代码不需要额外的 `h_state.detach()` — actor 已处理。
-- TBPTT 的梯度窗口 = 单帧（每帧独立反向传播，不跨帧）。
+`StructuredActorNetwork.forward(detach_h_new=True)`：
+- **True（默认）**：返回 `hn.detach()`，用于 rollout、evaluation 和 PPO 单步更新。
+  梯度不跨帧传播——每帧独立反向。
+- **False**：返回 `hn`（保留计算图），用于 DAgger chunk BPTT 训练。
+  梯度在 chunk 内部跨帧传播（最多 L 帧）。调用者必须在 chunk 边界显式 `detach()`。
 
-对于 DAgger chunk 训练：chunk 间传递 `h_state = h_new` 即可（无需显式 detach），因为 actor 内部已截断。Optimizer step 在 episode 结束后执行，确保 episode 内所有帧看到相同参数。
+DAgger chunk BPTT 时序：
+```
+episode: h=0
+  chunk 0 [0:L]:   actor(obs, h, detach_h_new=False) → ... → h_end
+                    h_next = h_end.detach()  ← chunk boundary
+  chunk 1 [L:2L]:  actor(obs, h_next, detach_h_new=False) → ...
+                    h_next = h_end.detach()
+  ...
+  loss.backward()   ← once per episode
+  optimizer.step()
+```
 
 ### 4.11 single_frame_dim 动态检测 (P1 fix, 2026-07-14)
 

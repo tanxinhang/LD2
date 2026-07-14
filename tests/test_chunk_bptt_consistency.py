@@ -1,10 +1,12 @@
-"""P0 regression: chunk BPTT forward must match full-sequence forward.
+"""P0 regression: chunk BPTT correctness.
 
-Four invariants:
-  1. Full-sequence output == chunked output (detach between chunks).
-  2. Chunk boundary h≠0 after first chunk (proves state is CARRIED).
-  3. Episode boundary h=0 (new episode starts fresh).
-  4. Chunk 2 has no gradient path back to chunk 1 (detach works).
+Six invariants:
+  1. Full-sequence output == chunked output.
+  2. Chunk boundary h≠0 after first chunk (state CARRIED).
+  3. Episode boundary h=0 (new episode fresh).
+  4. detach_h_new=False → gradient flows across frames within chunk.
+  5. Chunk boundary detach() → gradient stops.
+  6. detach_h_new=True (default) → no cross-frame gradient (rollout/eval mode).
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -144,38 +146,102 @@ def test_episode_boundary_resets_hidden(k, q):
 
 
 @pytest.mark.parametrize("k,q", [(4, 4)])
-def test_chunk_detach_blocks_gradient(k, q):
-    """Actor returns detached h_new — gradients cannot leak across timesteps.
+def test_detach_h_new_false_allows_gradient_flow(k, q):
+    """With detach_h_new=False, loss at frame t+1 creates gradient at frame t.
 
-    StructuredActorNetwork.forward() internally calls hn.detach() on the GRU
-    output (networks.py line 329). This is the built-in Truncated BPTT
-    mechanism: each frame's hidden state is detached before being passed to
-    the next frame. The training code does not need an additional detach.
+    This is the defining property of true chunk BPTT: the computation graph
+    spans multiple frames within a chunk.
     """
     obs_dim = 29 + 18 * q + 8 * (k - 1)
     actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
     actor.train()
 
     torch.manual_seed(42)
-    obs = torch.randn(10, obs_dim)
+    obs0 = torch.randn(1, obs_dim, requires_grad=True)
+    obs1 = torch.randn(1, obs_dim, requires_grad=True)
 
-    # Forward a sequence: h_new from actor should always have no grad_fn
-    h_state = None
-    for t in range(10):
-        dp_m, _, _, _, _, h_new = actor(obs[t:t+1], None if h_state is None else h_state)
-        # Actor internally detaches h_new → no gradient path across frames
-        assert h_new.grad_fn is None, (
-            f"Frame {t}: h_new.grad_fn is not None. "
-            f"Actor should detach h_new internally (Truncated BPTT). "
-            f"Without this, gradients would leak across timesteps."
+    # Frame 0 → h1 (with grad)
+    _, _, _, _, _, h1 = actor(obs0, None, detach_h_new=False)
+    assert h1.grad_fn is not None, (
+        "h1 has no grad_fn with detach_h_new=False. "
+        "Gradient cannot flow from frame 1 back to frame 0."
+    )
+
+    # Frame 1 → loss
+    out1, _, _, _, _, _ = actor(obs1, h1, detach_h_new=False)
+    loss = out1.sum()
+    loss.backward()
+
+    # Frame 0 input must receive gradient (proves cross-frame gradient flow)
+    assert obs0.grad is not None, (
+        "obs0.grad is None after loss.backward(). "
+        "detach_h_new=False should allow gradient to flow from frame 1 to frame 0."
+    )
+    assert obs0.grad.abs().sum() > 1e-8, (
+        f"obs0.grad is all-zero (sum={obs0.grad.abs().sum().item():.2e}). "
+        "Gradient is not propagating through the GRU hidden state."
+    )
+
+
+@pytest.mark.parametrize("k,q", [(4, 4)])
+def test_chunk_boundary_detach_stops_gradient(k, q):
+    """After explicit detach(), chunk 2 loss cannot create gradients in chunk 1."""
+    obs_dim = 29 + 18 * q + 8 * (k - 1)
+    actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
+    actor.train()
+
+    torch.manual_seed(42)
+    chunk_size = 4
+    obs1 = torch.randn(chunk_size, obs_dim, requires_grad=True)
+    obs2 = torch.randn(chunk_size, obs_dim, requires_grad=True)
+
+    # Chunk 1: forward with detach_h_new=False, detach at boundary
+    h = None
+    for t in range(chunk_size):
+        _, _, _, _, _, h_new = actor(obs1[t:t+1], None if h is None else h,
+                                     detach_h_new=False)
+        h = h_new
+    h_boundary = h.detach()  # explicit chunk boundary detach
+
+    # Chunk 2: forward with detached h
+    for t in range(chunk_size):
+        _, _, _, _, _, h_new = actor(obs2[t:t+1], h_boundary,
+                                     detach_h_new=False)
+        h_boundary = h_new
+
+    loss = h_boundary.sum()
+    loss.backward()
+
+    # Chunk 1 leaf tensor must have zero gradient (detach blocked the path)
+    if obs1.grad is not None:
+        grad_sum = obs1.grad.abs().sum().item()
+        assert grad_sum < 1e-10, (
+            f"Chunk 1 received gradient (sum={grad_sum:.2e}). "
+            f"Chunk boundary detach() did not block gradient flow."
         )
-        h_state = h_new
 
-    # Backward through the last frame should work (gradients flow within
-    # that single frame's computation graph, but not to previous frames)
-    loss = dp_m.sum()
-    loss.backward()  # should not raise
+    # Chunk 2 leaf tensor SHOULD have gradient
+    assert obs2.grad is not None, "Chunk 2 received no gradient — backward path broken"
+    assert obs2.grad.abs().sum() > 1e-8, (
+        f"Chunk 2 grad is all-zero. Backward path through chunk is broken."
+    )
 
-    # Verify that parameters DO have gradients (from the last frame)
-    grad_count = sum(1 for p in actor.parameters() if p.grad is not None)
-    assert grad_count > 0, "No parameters received gradients — backward path broken"
+
+@pytest.mark.parametrize("k,q", [(4, 4)])
+def test_detach_h_new_true_blocks_gradient(k, q):
+    """Default detach_h_new=True cuts gradient between frames (rollout/eval mode)."""
+    obs_dim = 29 + 18 * q + 8 * (k - 1)
+    actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
+    actor.train()
+
+    torch.manual_seed(42)
+    obs0 = torch.randn(1, obs_dim, requires_grad=True)
+    obs1 = torch.randn(1, obs_dim, requires_grad=True)
+
+    _, _, _, _, _, h1 = actor(obs0, None)  # default detach_h_new=True
+    assert h1.grad_fn is None, (
+        "detach_h_new=True should produce h_new with no grad_fn"
+    )
+    _, _, _, _, _, _ = actor(obs1, h1)
+    # obs0 should have no grad regardless
+    assert obs0.grad is None, "obs0 should have no grad in default (detached) mode"

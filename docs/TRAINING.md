@@ -198,9 +198,9 @@ python scripts/train_dagger_variants.py --mode all \
 **协议要点 (v3, chunk BPTT)**：
 - 数据保存为 episode 序列（不存储 h_prev）
 - 训练：chunk-based TBPTT (chunk_size=16)
-  - h=0 仅在 episode 边界；chunk 间传递 hidden state
-  - Actor 内置 `hn.detach()` (networks.py:329)，每帧自动截断梯度
-  - Optimizer step 在 episode 结束后执行一次
+  - h=0 仅在 episode 边界
+  - Chunk 内部：`detach_h_new=False`，梯度跨帧传播（最多 L=16 帧）
+  - Chunk 边界：`h.detach()` 截断梯度；Optimizer step 在 episode 结束后执行一次
 - 每轮报告 hidden drift 诊断值
 - Validation (20 eps) 按 max weak3 (steady ≥ base-0.01) 选择 checkpoint
 - Test (100 eps, 独立 bank)；ep_fail 主门限 τ=0.3

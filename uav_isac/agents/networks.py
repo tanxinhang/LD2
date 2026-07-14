@@ -297,15 +297,18 @@ class StructuredActorNetwork(nn.Module):
 
         return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
 
-    def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None):
+    def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None,
+                detach_h_new: bool = True):
         """Forward with optional streaming GRU hidden state.
 
         Args:
             obs: (B, obs_dim) observation batch
-            h_prev: (1, B*(K-1), D) GRU hidden states from rollout, or None
-                    for zero-init (used when no temporal context is available).
-                    CRITICAL: h_prev MUST be passed consistently between rollout
-                    and update to keep the PPO ratio valid.
+            h_prev: (1, B*(K-1), D) GRU hidden states, or None for zero-init.
+            detach_h_new: If True (default), detach h_new before returning.
+                True for rollout, evaluation, and PPO single-step updates
+                (prevents cross-timestep computation graphs).
+                False for DAgger chunk BPTT training (allows gradient flow
+                within a chunk; caller must detach at chunk boundaries).
 
         Returns:
             dp_mean, log_std, role_logits, comm_msg, pd_pred, h_new
@@ -343,7 +346,7 @@ class StructuredActorNetwork(nn.Module):
         else:
             _, hn = self.neighbor_gru(n_input)
         ne = self.neighbor_proj(hn.squeeze(0)).reshape(B, Nn, -1)
-        h_new = hn.detach()  # (1, B*Nn, D) — detach for Truncated BPTT
+        h_new = hn.detach() if detach_h_new else hn  # (1, B*Nn, D)
 
         entities = torch.cat([ge, te, ne], dim=1)
         ctx, _ = self.attn(se, entities, entities)
