@@ -626,7 +626,7 @@ class MAPPTrainer:
                 # distributions conditioned on the SAME h_prev as rollout.
                 mb_h_prev = None
                 if 'h_prev' in data:
-                    mb_h_prev_full = data['h_prev'][mb_idx]  # (mb, K-1, D)
+                    mb_h_prev_full = data['h_prev'][mb_idx].to(self.device)  # (mb, K-1, D)
                     # Reshape to (1, mb*(K-1), D) for GRU forward
                     mb_h_prev = mb_h_prev_full.reshape(1, -1, mb_h_prev_full.shape[-1])
 
