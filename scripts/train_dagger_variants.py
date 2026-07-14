@@ -153,8 +153,9 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
     Each episode: h_0 = 0 at episode boundary.
     Chunk i: forward frames [i*L, (i+1)*L) with detach_h_new=False.
     Gradient flows within the chunk (up to L frames). At chunk boundary:
-    h_next = detach(h_end) — preserves state value, cuts gradient.
-    Optimizer steps once per episode (all chunks see same parameters).
+    h_next = detach(h_end) — preserves state, cuts gradient.
+    Per-chunk backward with (chunk_loss / T) scaling — avoids holding all
+    chunk graphs in memory. Optimizer steps once per episode.
     """
     opt = torch.optim.Adam(actor.parameters(), lr=lr)
     dp_scale = float(max_dp)
@@ -194,7 +195,6 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
                 for t in range(L):
                     ob_t = chunk_obs[t:t+1]
                     h_in = None if h_state is None else h_state
-                    # detach_h_new=False → gradient flows within chunk (true TBPTT)
                     dp_mean, _, _, _, _, h_new = actor(ob_t, h_in, detach_h_new=False)
                     preds.append(torch.tanh(dp_mean) * dp_scale)
                     h_state = h_new
@@ -203,17 +203,17 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
                 h_state = h_state.detach()
 
                 pred = torch.cat(preds, dim=0)
-                # Accumulate weighted loss: sum of per-frame squared errors
-                chunk_loss = ((pred - chunk_act) ** 2).sum()  # sum, not mean
-                ep_loss += chunk_loss
+                chunk_loss = ((pred - chunk_act) ** 2).sum()  # sum of per-frame squared errors
+                # Per-chunk backward scaled by frames in this chunk / total episode frames.
+                # This keeps gradient scale consistent across variable-length episodes and
+                # avoids holding all chunk computation graphs in memory simultaneously.
+                (chunk_loss / T).backward()
+                ep_loss += chunk_loss.item()
                 ep_frames += L
 
-            # One optimizer step per episode — hidden state was produced by
-            # the SAME parameters throughout the episode.
-            (ep_loss / ep_frames).backward()
             opt.step()
 
-            total_loss += ep_loss.item()
+            total_loss += ep_loss
             total_frames += ep_frames
 
     return total_loss / max(total_frames, 1)
@@ -490,11 +490,16 @@ def main():
         'dagger_iters': args.dagger_iters,
         'val_seeds': f"{val_seeds[0]}-{val_seeds[-1]}",
         'test_seeds': f"{test_seeds[0]}-{test_seeds[-1]}",
-        'protocol': 'chunk-based truncated BPTT (h=0 at chunk start, detach between chunks)',
+        'dagger_version': 'v3_chunk_bptt',
+        'chunk_len': args.chunk_size,
+        'detach_inside_chunk': False,
+        'detach_at_chunk_boundary': True,
+        'optimizer_step_scope': 'episode',
+        'protocol': 'chunk BPTT: detach_h_new=False within chunk, detach() at boundary, per-chunk backward with (loss/T) scaling, optimizer once per episode',
         'checkpoint_selection': 'max val weak3, steady >= base_steady - 0.01',
         'limitations': [
             'Single training seed.',
-            'Chunk size=16; no full-episode BPTT.',
+            f'Chunk size={args.chunk_size}; no full-episode BPTT.',
             'Communication not trained; deferred to PPO.',
         ],
         'results': {
