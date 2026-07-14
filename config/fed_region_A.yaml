@@ -1,0 +1,119 @@
+channel:
+  NF: 4.0
+  eta_los_dB: 0.1
+  eta_nlos_dB: 21.0
+  kT: 4.0e-21
+  los_a: 4.88
+  los_b: 0.43
+  ric_K: 6.0
+  use_los_prob: true
+  use_swerling: false
+detection:
+  B_q: 64
+  K_q_max: 3
+  P_D_min: 0.2
+  P_FA: 0.001
+  T_report: 0.005
+  g_min: 0.5
+marl:
+  actor_decision_interval: 5
+  alpha_pd: 0.5
+  assignment_hold_frames: 5
+  bc_beta_init: 0.1
+  belief_detection_sampling: false
+  centralized_critic: true
+  early_stop: true
+  early_stop_min_delta: 0.005
+  early_stop_patience: 12
+  entropy_decay_frames: 500000
+  entropy_final: 0.005
+  entropy_init: 0.03
+  eta_mc: 0.05
+  eval_episodes: 5
+  eval_interval: 50
+  eval_seeds:
+  - 10001
+  - 10002
+  - 10003
+  - 10004
+  - 10005
+  freeze_actor_after: 0
+  gae_lambda: 0.95
+  gamma: 0.99
+  hidden_layers:
+  - 256
+  - 256
+  lagrangian_lr: 0.002
+  lagrangian_max: 1.0
+  lambda_report: 0.001
+  learn_roles: false
+  lr: 0.0003
+  max_grad_norm: 0.5
+  minibatch_size: 256
+  num_envs: 4
+  num_episodes: 1000
+  obs_history_frames: 2
+  p0_uses_belief: false
+  ppo_clip: 0.1
+  ppo_epochs: 2
+  rollout_steps: 1024
+  shape_w: 0.01
+  target_kl: 0.02
+  use_centered_marginal: true
+  use_difference_reward: false
+  use_distance_shaping: false
+  use_p0_sinr_gated: false
+  vf_coef: 0.5
+otfs:
+  B: 1000000.0
+  M: 64
+  N: 16
+  T_sym: 6.4e-05
+  delta_f: 15625.0
+  fc: 28000000000.0
+  g_rx_dBi: 16.0
+  g_tx_dBi: 16.0
+  n_cpi: 128
+p0_solver:
+  capacity_per_rx: 256
+  latency_max: 0.005
+scenario:
+  C: 1
+  K: 8
+  Q: 8
+  T: 150
+  dt: 0.1
+  height: 20
+  region_size:
+  - 800
+  - 800
+seeds:
+- 42
+- 123
+- 456
+- 789
+- 1024
+target:
+  motion_model: CV
+  omega_q:
+  - 0.125
+  - 0.125
+  - 0.125
+  - 0.125
+  - 0.125
+  - 0.125
+  - 0.125
+  - 0.125
+  rcs: 1.0
+  sigma_a: 0.5
+  speed_range:
+  - 0
+  - 5
+uav:
+  B_max: 50000
+  P_fly_coeff: 0.05
+  P_fly_static: 80
+  P_report: 0.25
+  P_sense: 0.0251
+  d_safe: 20
+  v_max: 25

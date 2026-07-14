@@ -1,0 +1,113 @@
+# 多 UAV 协同 ISAC 序贯感知调度 — 项目文档
+
+> 本 `docs/` 目录的目标:让**没看过代码的人,仅靠文档就能理解、运行、检查、继续修改本项目**。
+> 阅读顺序建议:`README` → `SYSTEM_MODEL` → `ARCHITECTURE` → `TRAINING` → `EXPERIMENTS` → `KNOWN_ISSUES`。
+
+---
+
+## 1. 项目摘要(1 页)
+
+**研究问题。** 在一个二维区域内,用 `K` 架无人机(UAV)对 `Q` 个匀速运动目标做**双基地(bistatic)协同感知**:每架 UAV 既可作为发射机(TX)也可作为接收机(RX),一对 (TX, RX) 对某个目标形成一条双基地观测链路。系统要在**通信容量、能量、安全间距、检测公平性**等约束下,通过控制 UAV 轨迹和感知配对,最大化各目标的检测概率 `P_D`。
+
+**规模(默认配置 `config/default.yaml`)。** `K=4` UAV,`Q=2` 目标,区域 `400×400 m`,飞行高度 `20 m`,每回合 `T=150` 帧,帧长 `dt=0.1 s`。载频 28 GHz。在当前整套射频/检测/CPI 参数组合下有效感知距离约 120 m(受发射功率、噪声、RCS、天线增益、载频、双基地距离、DD 有效性、P_D/P_FA 阈值共同决定;`n_cpi=128` 是其中重要的增益来源之一,但非唯一决定因素)。
+
+**输入 / 决策 / 内层优化 / 输出。**
+
+```text
+输入:   UAV 初始状态、目标运动状态、信道/OTFS 参数、能量与通信约束
+决策:   每架 UAV 的二维位移 Δp;(可选)TX/RX/Idle 角色 —— 见下方"完成程度"
+内层:   给定几何,P0 贪心选择双基地 (tx, rx, target) 配对,受容量/时延/基数约束
+输出:   每目标 P_D、通信开销(bits)、能耗、公平性、约束违反率、团队/个体奖励
+```
+
+**核心算法。** 外层 MAPPO / IPPO(多智能体 PPO,CTDE)学习 UAV 轨迹;内层 P0 **启发式贪心**做感知配对(基于边际检测效用;注意当前效用非凹,**无**次模/近似保证,见 `SYSTEM_MODEL §3.4`);Kalman(CV 模型)做目标 belief 预测与更新。
+
+**项目定位(重要,避免误读)。** 这是一个**几何驱动 + 链路级抽象的研究原型仿真**,**不是**波形级 OTFS 仿真。感知质量用解析的 "deflection"(检测统计量)→`P_D` 映射建模,没有原始 IQ 波形、没有真实调制解调、没有飞控硬件接口。边界详见 `SYSTEM_MODEL.md §0`。
+
+**当前完成程度(统一表述,避免歧义)。**
+- 环境、物理/几何/检测/belief/约束/奖励、P0 与角色派生逻辑:**已完成并通过环境侧验证**(单元测试)。
+- MAPPO/IPPO 训练代码:**已实现**。
+- 但 `learn_roles=False` 这条新训练路径**尚未完成 GPU 端端到端冒烟,也未做正式多 seed 验证**。换言之:能端到端跑的部分已验证,新角色模式下的完整训练回路尚待跑通。
+
+**当前主要结果——注意:目前主要是"环境审计结果",不是最终学习算法结果。**
+- 角色修复后,确定性评估不再崩塌:`full_greedy` 评估 `steady_P_D` 从 0.027 → 0.977,`valid_pair_rate` 0.04 → 1.00(env 侧实测)。
+- 默认 400×400 场景对策略**过于简单**:静止/随机已达 `steady_P_D≈0.98`,无可学空间;正式训练应用有 headroom 的 `config/exp_800_q4.yaml`(随机≈0.18,Greedy-Oracle≈0.73)。详见 `EXPERIMENTS.md`。
+- **尚不能下结论**:MAPPO 是否优于 Random/IPPO、CTDE 是否有效、belief 输入是否够、训练是否稳定——这些都要等 800×800/Q=4 的 5-seed 训练结果。
+
+**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度,正式训练前需决断):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码、默认场景过易、新训练路径未跑通。
+
+---
+
+## 2. 安装
+
+代码用 Python + PyTorch。推荐用项目自带虚拟环境或新建一个:
+
+```bash
+# 关键依赖(见 requirements.txt)
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+主要依赖:`numpy`, `scipy`, `torch`, `gymnasium`, `matplotlib`, `pyyaml`, `pytest`。
+GPU 非必需但训练强烈建议(`torch.cuda` 自动检测,无 GPU 退回 CPU)。
+
+---
+
+## 3. 快速运行
+
+```bash
+# 单次训练(默认 400×400 场景,seed=42)
+python scripts/run_mappo.py
+
+# 非学习基线对照(Random / P0-Fixed / Greedy)
+python scripts/run_baselines.py
+
+# 正式多 seed 主实验(MAPPO vs IPPO + 基线),推荐用有 headroom 的场景:
+python scripts/run_experiments.py --config config/exp_800_q4.yaml --seeds 5
+# 先冒烟一遍确认梯度路径正常:
+python scripts/run_experiments.py --config config/exp_800_q4.yaml --seeds 1
+
+# 环境/物理完整性诊断
+python scripts/deep_audit_sim.py
+
+# 测试
+pytest tests/ -q
+```
+
+运行命令、预期产物、复现细节见 `EXPERIMENTS.md`。
+
+---
+
+## 4. 目录速览
+
+```text
+config/        参数(default.yaml 为单一真源;exp_800_q4.yaml 为训练用大场景)
+uav_isac/
+  environment/ env_core(一帧主循环)、env_wrapper(Gym 接口)、action、observation、
+               reward、constraints、belief、target、uav
+  physical/    geometry、deflection、inner_solver(P0)、detection、channel、otfs
+  agents/      mappo_agent、networks、buffer、trainer、myopic/p0_fixed/base agent
+  utils/       math_utils、seeding、types
+scripts/       run_mappo / run_ippo / run_baselines / run_experiments / deep_audit_sim
+tests/         单元 + 集成 + 完整性审计测试
+docs/          本文档
+```
+
+模块职责、调用关系、一帧数据流见 `ARCHITECTURE.md`。
+
+---
+
+## 5. 文档能否回答这 10 个问题(自检索引)
+
+| # | 问题 | 去哪看 |
+|---|------|--------|
+| 1 | Actor 控制什么? | `ARCHITECTURE §2`,`SYSTEM_MODEL §3.3` |
+| 2 | P0 控制什么? | `TRAINING §6`(P0 求解器) |
+| 3 | 每帧先移动 UAV 还是先算感知? | `ARCHITECTURE §3`(帧序 + 陷阱) |
+| 4 | `obs_dim` 每一维是什么? | `ARCHITECTURE §4.1` |
+| 5 | 训练动作 vs 评估动作? | `TRAINING §5`(train/eval 差异表) |
+| 6 | `P_D` 如何从几何/deflection 得到? | `SYSTEM_MODEL §3.4–3.5` |
+| 7 | 奖励每项的数值范围? | `TRAINING §4`(奖励分解) |
+| 8 | 为什么某帧没有有效 TX–RX 配对? | `KNOWN_ISSUES`(角色崩溃)+ `TRAINING §6` |
+| 9 | 如何用完全相同的随机场景复现? | `EXPERIMENTS §4`(种子与复现) |
+| 10 | 当前结果哪些可信、哪些在诊断? | `KNOWN_ISSUES` + `EXPERIMENTS §3` |

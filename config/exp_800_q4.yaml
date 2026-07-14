@@ -1,0 +1,118 @@
+# Experiment config: large-area, 4-target scenario with learnable headroom.
+#
+# Rationale: after the P0-assigns-roles fix, the anchored 400x400 / Q=2 scenario
+# became trivial — stationary/random already reach steady_P_D ~0.98 because the
+# ~120 m sensing radius (n_cpi=128) covers most of a 400 m box, so positioning is
+# irrelevant and a trained policy shows no gain over random (null result).
+#
+# Enlarging to 800x800 with Q=4 restores headroom (measured on eval_seeds):
+#   stationary ~0.20, random ~0.18, greedy(true-pos) ~0.73  -> ~0.55 gap to climb.
+# Now UAVs MUST fly within ~120 m of targets AND the 4 UAVs must be allocated
+# across 4 targets (only ~2 bistatic pairs/frame under the single-role rule),
+# so both positioning and coordination matter -> MARL can demonstrate value.
+#
+# Only region_size, Q, omega_q differ from default.yaml; the anchored 400x400
+# baseline (default.yaml) is left untouched for comparison.
+
+scenario:
+  region_size: [800, 800]      # enlarged 400->800: sensing radius (~120 m) << area
+  height: 20
+  K: 4
+  Q: 4                         # 2->4 targets: 4 UAVs must allocate across 4 targets
+  T: 150
+  dt: 0.1
+  C: 1
+
+uav:
+  v_max: 25
+  d_safe: 20
+  P_sense: 0.0251
+  P_report: 0.25
+  B_max: 50000
+  P_fly_static: 80
+  P_fly_coeff: 0.05
+
+target:
+  motion_model: "CV"
+  speed_range: [0, 5]
+  sigma_a: 0.5
+  rcs: 1.0
+  omega_q: [0.25, 0.25, 0.25, 0.25]   # equal priorities for Q=4
+
+otfs:
+  fc: 2.8e+10
+  B: 1.0e+6
+  delta_f: 1.5625e+4
+  M: 64
+  N: 16
+  T_sym: 6.4e-5
+  g_tx_dBi: 16.0
+  g_rx_dBi: 16.0
+  n_cpi: 128                   # sensing radius ~120 m (kept; this is what makes 800 m non-trivial)
+
+channel:
+  NF: 4.0
+  use_los_prob: true
+  los_a: 4.88
+  los_b: 0.43
+  eta_los_dB: 0.1
+  eta_nlos_dB: 21.0
+  use_swerling: false
+  kT: 4.0e-21
+  ric_K: 6.0
+
+detection:
+  P_FA: 0.001
+  g_min: 0.5
+  K_q_max: 3
+  B_q: 64
+  P_D_min: 0.2
+  T_report: 0.005
+
+p0_solver:
+  capacity_per_rx: 256
+  latency_max: 0.005
+
+marl:
+  hidden_layers: [256, 256]
+  lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo_clip: 0.1
+  ppo_epochs: 2
+  rollout_steps: 2048
+  minibatch_size: 256
+  entropy_init: 0.03
+  entropy_final: 0.005
+  entropy_decay_frames: 500000
+  eta_mc: 0.5
+  use_distance_shaping: false
+  shape_w: 0.01
+  lambda_report: 1.0e-3           # 100x increase: make comm cost matter
+  alpha_pd: 0.5                   # 0.5=hybrid (50% direct P_D + 50% utility)
+  lambda_report_comm: 1.0e-3      # explicit comm cost coefficient
+  bc_beta_init: 0.05              # weak MSE BC anchor: prevents catastrophic divergence only
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  lagrangian_lr: 0.002
+  lagrangian_max: 1.0
+  target_kl: 0.02
+  num_episodes: 1000
+  num_envs: 8
+  learn_roles: false           # P0 assigns tx/rx; policy only controls movement
+  assignment_hold_frames: 5    # hold P0 assignment for 5 frames
+  actor_decision_interval: 5    # macro-action: hold actor action for 5 micro-frames
+  # Inner-scheduler information source. Default here = ORACLE (P0 ranks on true
+  # target geometry) -> upper bound. For the DEPLOYABLE method run, flip both on
+  # via CLI: run_experiments.py ... --p0-belief --detect-sample
+  p0_uses_belief: false            # B6: false=oracle ranking, true=fused-belief ranking
+  belief_detection_sampling: false # B7: false=optimistic update, true=Bernoulli(P_D) gating
+  eval_seeds: [10001, 10002, 10003, 10004, 10005]
+  early_stop: true
+  eval_interval: 50
+  eval_episodes: 5             # average over the 5 fixed eval scenarios
+  early_stop_patience: 12
+  early_stop_min_delta: 0.005
+  centralized_critic: true
+
+seeds: [42, 123, 456, 789, 1024]

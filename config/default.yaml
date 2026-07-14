@@ -1,0 +1,95 @@
+# Phase 1: Minimum System (No Federation, C=1)
+# All simulation parameters — single source of truth
+
+scenario:
+  region_size: [400, 400]     # m — anchored to Device-free MARL ISAC (IEEE TVT 2024): 400x400 m
+  height: 20                   # m UAV altitude — Device-free MARL (TVT 2024): H=20 m
+  K: 4                         # number of UAVs
+  Q: 2                         # number of moving targets
+  T: 150                       # frames per episode (mobility 2.5*150=375m > half-diag 283m -> traversable)
+  dt: 0.1                      # frame duration (seconds)
+  C: 1                         # number of regions (Phase 1: no federation)
+
+uav:
+  v_max: 25                    # m/s max flight speed
+  d_safe: 20                   # m safe separation distance
+  P_sense: 0.0251              # W = 14 dBm sensing power — Device-free MARL (TVT 2024): P^(r)=14 dBm
+  P_report: 0.25               # W reporting power — Device-free MARL comm power set {0.25..1 W}
+  B_max: 50000                 # J initial battery energy
+  P_fly_static: 80             # W hover power (rotorcraft)
+  P_fly_coeff: 0.05            # speed-dependent coefficient (P_fly ∝ v^2)
+
+target:
+  motion_model: "CV"           # Constant Velocity
+  speed_range: [0, 5]          # Stage-1 curriculum: slow targets (was [0,20]) so task is learnable; ramp up later
+  sigma_a: 0.5                 # m/s^2 process noise std
+  rcs: 1.0                     # m^2 radar cross section
+  omega_q: [0.5, 0.5]          # target priorities (equal by default)
+
+otfs:
+  fc: 2.8e+10                  # carrier frequency (Hz, mmWave 28 GHz) — Low-Latency ISAC V2X (28 GHz)
+  B: 1.0e+6                    # bandwidth (Hz) — Device-free MARL (TVT 2024): B=1 MHz
+  delta_f: 1.5625e+4           # subcarrier spacing = B/M = 1e6/64
+  M: 64                        # delay-dimension bins
+  N: 16                        # Doppler-dimension bins
+  T_sym: 6.4e-5                # symbol period (s) = 1/delta_f
+  g_tx_dBi: 16.0               # tx array gain (64-elem UAV phased array; lit: 8 dBi single / "large arrays")
+  g_rx_dBi: 16.0               # rx array gain
+  n_cpi: 128                   # coherent integration frames -> sensing radius ~120 m (matches 400x400 area)
+
+channel:
+  NF: 4.0                      # noise figure (dB): kT*B*NF = 4e-21*1e6*2.51 = 1e-14 W = -110 dBm (TVT 2024 N0)
+  use_los_prob: true           # H=20m low-altitude: Al-Hourani prob. LoS/NLoS on report link (blockage)
+  los_a: 4.88                  # suburban Al-Hourani param
+  los_b: 0.43                  # suburban Al-Hourani param
+  eta_los_dB: 0.1              # LoS excess loss (dB)
+  eta_nlos_dB: 21.0            # NLoS excess loss (dB) — suburban
+  use_swerling: false          # optional Swerling-II RCS fading on sensing (default OFF)
+  kT: 4.0e-21                  # thermal noise density (W/Hz) at 290K
+  ric_K: 6.0                   # Rician K-factor (dB) for reporting link
+
+detection:
+  P_FA: 0.001                  # false alarm probability
+  g_min: 0.5                   # DD effectiveness threshold
+  K_q_max: 3                   # max reporting sources per target
+  B_q: 64                      # soft info bits per report
+  P_D_min: 0.2                 # fairness floor (D4); 0.8 was unreachable -> Lagrangian blowup.
+                               # re-tune from run_baselines.py 'steady_P_D' (reachable & binding)
+  T_report: 0.005              # max reporting latency (s)
+
+p0_solver:
+  capacity_per_rx: 256         # bits per frame per receiving UAV
+  latency_max: 0.005           # max latency per rx UAV (s)
+
+marl:
+  hidden_layers: [256, 256]    # actor/critic MLP architecture
+  lr: 0.0003                   # Adam learning rate
+  gamma: 0.99                  # discount factor
+  gae_lambda: 0.95             # GAE λ
+  ppo_clip: 0.2                # PPO clip ε
+  ppo_epochs: 4                # 10 -> 4: fewer epochs/rollout -> less overfit -> no policy collapse
+  rollout_steps: 2048          # tuned (stable MAPPO); single source of truth
+  minibatch_size: 256          # SGD minibatch size
+  entropy_init: 0.08           # 0.03 -> 0.08: belief fix's strong gradient overwhelmed 0.03 -> raise
+  entropy_final: 0.08          # constant 0.08
+  entropy_decay_frames: 1000000 # frames over which entropy decays
+  eta_mc: 0.5                  # marginal contribution shaping coefficient
+  use_distance_shaping: false  # OFF: slow-target curriculum makes detection reward dense enough;
+                               # the coverage-distance proxy was misaligned with bistatic P_D (hurt last run)
+  shape_w: 0.01                # distance-shaping weight (only used if enabled)
+  lambda_report: 1.0e-5        # comms-cost weight; small vs detection utility (was 1e-3 -> P_D collapse)
+  vf_coef: 0.5                 # value function loss coefficient
+  max_grad_norm: 0.5           # gradient clipping max norm
+  lagrangian_lr: 0.002         # lowered: avoids monotonic λ climb -> non-stationary returns
+  lagrangian_max: 1.0          # cap so λ can't dominate the reward
+  target_kl: 0.02              # 0.03 -> 0.02: tighter per-rollout policy drift bound
+  num_episodes: 1000           # max episodes (hard cap; early-stop usually stops sooner)
+  num_envs: 8                  # parallel envs (tuned; stable MAPPO)
+  early_stop: true             # stop at convergence (plateau on deterministic eval)
+  eval_interval: 50            # deterministic eval every N episodes
+  eval_episodes: 3             # eval episodes averaged
+  early_stop_patience: 12      # stop after N evals w/o steady_P_D improvement
+  early_stop_min_delta: 0.005  # min improvement counted
+  centralized_critic: true     # MAPPO (CTDE, global-state critic); set false for IPPO (local-obs critic)
+
+seeds: [42, 123, 456, 789, 1024]
