@@ -558,6 +558,10 @@ class MAPPTrainer:
 
         agent = self.agents[0]  # shared networks
 
+        # Ensure train mode (eval may have been called between updates)
+        agent.actor.train()
+        agent.critic.train()
+
         # ═══════════════════════════════════════════════════════════════
         # P0 ASSERTION: old-log-prob consistency check.
         # Verifies that recomputing log-probs with stored h_prev reproduces

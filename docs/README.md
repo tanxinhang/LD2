@@ -34,7 +34,9 @@
 - 默认 400×400 场景对策略**过于简单**:静止/随机已达 `steady_P_D≈0.98`,无可学空间;正式训练应用有 headroom 的 `config/exp_800_q4.yaml`(随机≈0.18,Greedy-Oracle≈0.73)。详见 `EXPERIMENTS.md`。
 - **尚不能下结论**:MAPPO 是否优于 Random/IPPO、CTDE 是否有效、belief 输入是否够、训练是否稳定——这些都要等 800×800/Q=4 的 5-seed 训练结果。
 
-**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度,正式训练前需决断):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码、默认场景过易、新训练路径未跑通。
+**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度,正式训练前需决断):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码、默认场景过易、长期训练稳定性待验证。
+
+**2026-07-14 重要更正**:此前所有 PPO 训练结果均在 GRU/PPO 状态不一致导致的非法 PPO ratio 下测得。修复后验证:1 次 PPO 更新不再破坏 DAgger 策略(Δweak3 < 0.005)。详见 `KNOWN_ISSUES.md A0` 和 `审计报告_逐层失效定位.md` 顶部的更正说明。
 
 ---
 
@@ -59,8 +61,14 @@ GPU 非必需但训练强烈建议(`torch.cuda` 自动检测,无 GPU 退回 CPU)
 # 单次训练(默认 400×400 场景,seed=42)
 python scripts/run_mappo.py
 
+# K=8, Q=8 大场景训练 (2026-07-14 新增)
+python scripts/run_mappo.py --config config/exp_800_k8_q8.yaml
+
 # 非学习基线对照(Random / P0-Fixed / Greedy)
 python scripts/run_baselines.py
+
+# PPO ratio 修复验证 (DAgger → 1 PPO update → 对比)
+python scripts/test_ppo_ratio_fix.py
 
 # 正式多 seed 主实验(MAPPO vs IPPO + 基线),推荐用有 headroom 的场景:
 python scripts/run_experiments.py --config config/exp_800_q4.yaml --seeds 5

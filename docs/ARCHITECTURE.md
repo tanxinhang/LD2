@@ -153,5 +153,46 @@ buffer 行布局为 `[env0_step0, env1_step0, …, env_{N-1}_step0, env0_step1, 
 | `actions_role` | (buffer_size, K) |
 | `log_probs / values / rewards / dones / masks` | (buffer_size, K) |
 | `advantages / returns`(GAE 后) | (buffer_size, K) |
+| `h_prev` (P0 fix, StructuredActor only) | (buffer_size, K, K-1, gru_hidden_dim) |
+| `per_target_rewards / per_target_values` | (buffer_size, K, Q) |
+| `per_target_advantages / per_target_returns` (GAE 后) | (buffer_size, K, Q) |
 
 `get_training_data` 把 (T,K,·) 展平成 (T·K,·),并对 advantage 做**一次全局**标准化。
+
+### 4.6 GRU Hidden State 一致性路径 (P0 fix, 2026-07-14)
+
+```
+Rollout (collect_rollout):
+  env._gru_hidden[(k,kk)] → h_prev_batch (1, N*K*(K-1), D)
+    → actor(obs, h_prev_batch) → h_new
+      → store h_prev per-env to buffer  ← NEW
+      → store h_new back to env._gru_hidden
+
+Update (update):
+  buffer.get_training_data() → data['h_prev']  ← NEW
+    → per-minibatch: reshape to (1, mb*(K-1), D) .to(device)
+      → actor(obs, mb_h_prev)  ← NEW (was actor(obs) before fix)
+
+Consistency assertion (before first optimizer step):
+  verify_old_log_prob_consistency(obs, actions, old_lp, h_prev):
+    recompute log_prob with stored h_prev
+    assert max|old_lp - recomputed_lp| < 1e-4
+```
+
+### 4.7 PD_hist 数据流 (P1 fix, 2026-07-14)
+
+```
+ObservationBuilder.build_local_obs:
+  prev_P_D (Q,) → obs_parts.append → flat obs
+
+StructuredActorNetwork._parse_one:
+  pd_hist = obs[:, ptr:ptr+Q]  → RETURNED (was discarded before fix)
+
+StructuredActorNetwork.forward:
+  pd_last = pd_hist[..., -1]   (last timestep, shape (B, Q))
+  pd_feat = pd_hist_proj(pd_last.unsqueeze(-1))  (B, Q, D)
+  te = target_enc(targets) + pd_feat               ← residual modulation
+
+Note: PD_hist in local obs is assumed to be the UAV's LOCAL detection
+confidence. If changed to global fused P_D from fusion centre, the
+communication cost (delay, bits, AoI) MUST be accounted for.

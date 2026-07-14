@@ -156,6 +156,7 @@ print("=" * 70)
 
 # Reload DAgger
 agents[0].actor.load_state_dict(dag_ckpt, strict=False)
+agents[0].actor.train()  # must be in train mode for GRU backward
 
 # Freeze attention (with the FIXED condition that includes attn_norm)
 enc_params, head_params, attn_params = split_param_groups(agents[0].actor.named_parameters())

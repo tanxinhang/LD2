@@ -5,11 +5,23 @@
 
 ---
 
-## 训练崩塌归因(诊断闭环,2026-06)
+## 训练崩塌归因(诊断闭环,2026-06; 2026-07-14 更正)
 
 **现象**:MAPPO 训练后 eval `steady_P_D`≈0.018、`avg_P_D`≈0.12(**低于随机 0.16、低于静止 0.20**);`entropy` Ep50 塌到下限、`kl`→0(策略冻结);训练日志显示 `avg_P_D` 从 Ep0 的 0.21 随熵塌缩**一路下降**。无论 400/800、oracle/belief 都同样崩。
 
-**逐项排除(均有证据)**:
+### 根因 (2026-07-14 更正)
+
+**P0 级 bug：GRU/PPO 循环状态不一致导致 PPO ratio 非法。** Rollout 时 Actor 接收持续维护的 GRU hidden state `h_{t-1}`，但 PPO 更新时 `evaluate_actions()` 调用 `actor(obs)` 没有传入对应的 `h_prev`。更新阶段 GRU 从零初始化，导致：
+
+- rollout: π(a_t | o_t, h_{t-1})
+- update:  π(a_t | o_t, h=0)
+- PPO ratio r_t ≠ 1 在第一次 optimizer step 之前就已失效
+
+这可以解释此前观察到的所有现象：DAgger 本身很好但一次 PPO 就破坏 weak3；降 LR/clip/KL 都无法保护；模块归因不稳定、符号翻转。
+
+**2026-07-14 已修复**（commit `7993770`），修复后验证：1 次 PPO 更新不再破坏 DAgger（Δweak3 < 0.005）。
+
+### 逐项排除(均有证据)
 - ❌ 角色 argmax 崩溃 → 已修(A1)。
 - ❌ 确定性评估 bug → 已修(P0 诊断)。
 - ❌ P0 次模/最优性 → 贪心经验=穷举最优 100%(B8 审计)。
@@ -17,8 +29,9 @@
 - ❌ 观测编码/表达力 → **关键证据**:一个"只从 obs 向量读目标+homing"的策略达 **0.71(oracle)/0.72(belief)**,映射近乎线性 → obs 充分、好策略可表达。
 - ❌ belief 质量 → belief-obs homing = 0.72,与 oracle 几乎一致。
 - ❌ BC≈random 不能证明"学不到":`sup_mse` 收敛到 0.15 却 eval≈random,是**开环 BC 分布偏移**(covariate shift)的标准特征,不是编码问题。
+- ✅ **根因 (2026-07-14)**: **GRU/PPO 循环状态不一致** → PPO ratio 非法 → 任何 PPO 更新都等价于对随机扰动后的分布做梯度步。
 
-**结论(已闭环)**:这是**探索/优化**失败,不是 obs/critic/表达力。长程导航(目标数百米外、每步 2.5m)下,动作噪声探索太局部,**在熵塌缩前走不到目标**;策略在比随机更差的均值上提前 commit 并冻结。可表达的上升方向客观存在(homing 0.72),PPO 从零探索到不了。
+**结论(已闭环,2026-07-14 更正)**:这是**GRU/PPO 状态一致性问题**,不是探索/优化失败,不是 obs/critic/表达力不足。修复后 PPO 不再立即破坏 DAgger。长程导航的探索困难可能仍存在,但不是崩塌的主因。
 
 **对应工具/修法(已交付,待 GPU 验证)**:
 - `scripts/dagger_warmstart.py`:DAgger 克隆可达 obs 的 nearest teacher(天花板 0.504)进 actor,修分布偏移,存 `results/warmstart_actor.pt`。
@@ -30,6 +43,32 @@
 ---
 
 ## A. 已修复
+
+### A0. GRU/PPO 循环状态不一致 → PPO ratio 非法 🔴 P0 (2026-07-14)
+- **现象**:DAgger 策略本身很好 (steady 0.65-0.74)，但一次 PPO 更新立即破坏 weak3（下降 ~26%）。降 LR、加 KL anchor、clip 都无法保护。模块归因结果不稳定、符号翻转。
+- **原因**:Rollout 时 Actor 使用持续维护的 GRU hidden state `h_{t-1}`，但 PPO 更新 `evaluate_actions()` 调用 `actor(obs)` 时没有传入 `h_prev`。更新阶段 GRU 从零初始化 → rollout 和 update 的 log-prob 条件不同 → PPO ratio r_t ≠ 1 在第一次 optimizer step 之前就已失效。
+- **状态**:已修复。Buffer 存储每帧 GRU hidden state `(K, K-1, D)`，PPO 更新时从 buffer 读取并传入 `evaluate_actions()`。新增 `verify_old_log_prob_consistency()` 断言，训练开始时自动检查 `max|old_lp - recomputed_lp| < 1e-4`。
+- **修复后验证**:1 次 Full PPO update: Δsteady=+0.002, Δweak3=+0.004, Δworst=-0.006。PPO 不再立即破坏 DAgger。
+- **相关文件**:`buffer.py`, `mappo_agent.py`, `trainer.py`, `networks.py`。测试脚本:`scripts/test_ppo_ratio_fix.py`。
+
+### A0b. Attention 冻结遗漏 attn_norm (2026-07-14)
+- **现象**:文档声称 "Attention 冻结成功"，但 `attn_norm.weight/bias` 不以 `attn.` 开头，未被 `requires_grad_(False)` 覆盖。
+- **状态**:已修复。`networks.py` 新增 `split_param_groups()` 显式列出三个参数组（`ATTENTION_PARAM_PREFIXES = ('attn.', 'attn_norm.')`, `ENCODER_PARAM_PREFIXES`, `HEAD_PARAM_PREFIXES`）。`trainer.py` 的 freeze 逻辑改用显式分组。
+- **相关文件**:`networks.py`, `trainer.py`。
+
+### A0c. Q=8 硬编码移除 (2026-07-14)
+- **现象**:`buffer.py` 写死 `self.num_targets = 8`，与正式配置 K=4,Q=4 不一致；`action.py` 同样硬编码。per-target 存储/GAE 在 Q≠8 时 shape 不匹配。
+- **状态**:已修复。`num_targets` 从 config 全链路传入：`config.scenario.Q → MAPPOAgent(num_targets=Q) → RolloutBuffer(num_targets=Q) → CriticNetwork(num_targets=Q) → buffer per_target 存储`。新增 `config/exp_800_k8_q8.yaml` 明确绑定 8×8 实验配置。
+- **相关文件**:`buffer.py`, `mappo_agent.py`, `trainer.py`, `action.py`, 各 `run_*.py`, `config/exp_800_k8_q8.yaml`。
+
+### A0d. PD_hist 接入 Actor target encoding (2026-07-14)
+- **现象**:`StructuredActorNetwork._parse_one()` 读取 `_pd_hist`（上一帧每目标 P_D）后直接丢弃，Actor 无法直接知道哪些目标上一帧检测概率低。
+- **状态**:已修复。`pd_hist` 从 `_parse_one` 返回，在 `forward()` 中通过新增 `pd_hist_proj` 层投影后作为残差调制加到 target entity encoding。备注了通信假设（当前 PD_hist 在本地 obs 中，若改为融合中心广播需计入通信成本）。
+- **相关文件**:`networks.py`, `observation.py`。
+
+### A0e. Per-target GAE 数据管道就绪 (2026-07-14)
+- **状态**:已完成。`buffer.compute_gae()` 新增 per-target GAE 计算（per-target TD error → per-target advantage）；`get_training_data()` 返回 `per_target_advantages` 和 `per_target_returns`。**Actor loss 仍使用 scalar advantage**，S3c target-wise advantage 集成待后续完成。
+- **相关文件**:`buffer.py`, `mappo_agent.py`, `trainer.py`。
 
 ### A1. 确定性评估角色 argmax → 全同角色 → 零配对 → P_D 崩塌
 - **现象**:训练采样性能尚可,但确定性评估 `steady_P_D` 极低(C 模式 0.027);`all_same_role` 95.5%,`valid_pair_rate` 0.04。

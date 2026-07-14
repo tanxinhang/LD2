@@ -20,6 +20,7 @@ YAML 配置        (config/default.yaml 或 --config 指定的文件)
 - `_dict_to_dataclass`(`params.py`)只映射 dataclass 里有的字段,YAML 多余键被忽略、缺失键用默认值——所以新增配置项必须先加进 dataclass。
 - `get_default_config()` 读 `default.yaml`;`load_config(path)` 读任意 YAML。
 - **实验场景** `config/exp_800_q4.yaml`:800×800、Q=4、`learn_roles=false`、`omega_q` 四等分,其余同默认。用于正式训练(default 场景过易,见 §3)。
+- **大场景** `config/exp_800_k8_q8.yaml`(2026-07-14 新增):K=8,Q=8,800×800。所有 8×8 实验必须绑定此配置,不可依赖脚本内临时覆盖。
 
 ### 影响网络维度的配置(改了必须重训)
 

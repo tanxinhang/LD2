@@ -185,22 +185,27 @@ if delta_weak3 < -0.02:
 
 ## 六、实施进度
 
+> **2026-07-14 P0 修复**：发现并修复了 GRU/PPO 状态一致性 bug（此前所有 PPO 训练均在 ratio 非法状态下进行）。修复后 1 次 PPO 更新不再破坏 DAgger。以下进度已更新。
+
 | 阶段 | 内容 | 状态 | 结果 |
 |:---:|------|:---:|------|
-| **S1** | Attention 冻结 + 降低 LR | ✅ 完成 | 3/3 seeds stable, steady flat, weak3 flat |
+| **P0** | **GRU/PPO 状态一致性修复** | **✅ 完成** | ratio 验证 max\|diff\|<1e-5, Full/EH 1 update 不破坏 DAgger |
+| **P0** | **Attention 冻结补全 (attn_norm)** | **✅ 完成** | 6 params frozen, 显式 param group |
+| **P0** | **Q 硬编码移除** | **✅ 完成** | num_targets 全链路 config 驱动, 新增 k8q8 config |
+| **P1** | **PD_hist 接入 Actor** | **✅ 完成** | pd_hist_proj → target entity residual modulation |
+| **S1** | Attention 冻结 + 降低 LR | **✅ 完成** | 已补全 attn_norm, 显式 param groups |
 | S2 | 更新回滚机制 | ⏳ 待实施 | — |
 | S3 | Per-target Critic heads (诊断) | ✅ 完成 | heads 已添加, forward_with_targets() 就绪 |
-| **S3b** | **Per-target storage + values** | **✅ 完成** | buffer 存储 per-target rewards + values, 编译通过, smoke test OK |
-| S3c | Per-target GAE | ⏳ 待实施 | 需在 buffer.compute_gae 中添加 per-target 路径 |
+| **S3b** | **Per-target storage + values** | **✅ 完成** | buffer 存储 per-target rewards + values |
+| **S3c** | **Per-target GAE** | **✅ 完成** | buffer.compute_gae 计算 per-target advantages/returns; Actor loss 仍用 scalar advantage, target-wise integration 待 S4 |
 | S4 | 反事实贡献 + 弱目标加权 | ⏳ 待实施 | — |
 | S5 | Neighbor GRU + Gate 审计 | ⏳ 待实施 | — |
 
-### S1 详细结果 (2026-07-14)
+### S1 详细结果 (2026-07-14, P0 修复后重新测试)
 
-| Seed | Ep 0 steady | Ep 19 steady | Ep 0 weak3 | Ep 19 weak3 |
+| 模式 | Δsteady | Δweak3 | Δworst | PPO ratio OK? |
 |:---:|:---:|:---:|:---:|:---:|
-| 42 | 0.647 | 0.650 | 0.181 | 0.192 |
-| 123 | 0.649 | 0.651 | 0.183 | 0.179 |
-| 456 | 0.645 | 0.644 | 0.185 | 0.177 |
+| Full PPO 1 update | +0.002 | +0.004 | -0.006 | ✅ max\|diff\|=8e-6 |
+| EH PPO 1 update | +0.000 | -0.001 | +0.000 | ✅ (attn frozen) |
 
-**结论**: Attention 冻结成功防止崩溃 (max |Δsteady|=0.003)。但 weak3 未改善——mean-P_D 奖励无法引导 Encoder+Heads 向弱目标方向优化。需要 S3b (per-target GAE) + S4 (反事实信用) 提供正确梯度信号。
+**结论 (更正)**: PPO 不再立即破坏 DAgger。此前 S1 的 "Attention 冻结成功防止崩溃" 结论部分成立（冻结确实比全量更安全），但当时观察到的"全量 PPO 崩溃"实际是 GRU 状态不一致导致的 ratio 非法，而非 PPO 更新本身的系统性失败。修复后 EH 和 Full 在 1 update 下表现几乎无差异（Δ<0.005）。长期训练 (>20 updates) 仍需验证。
