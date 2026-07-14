@@ -505,8 +505,8 @@ class EnvironmentCore:
                         if e.i == i and e.j == j and e.q == q:
                             D_k[q] += e.d_eff
                             break
-            from uav_isac.physical.detection import compute_P_D
-            P_D_local_k = np.array([compute_P_D(D_k[q], self.cfg.detection.P_FA)
+            from uav_isac.utils.math_utils import compute_PD
+            P_D_local_k = np.array([compute_PD(D_k[q], self.cfg.detection.P_FA)
                                     for q in range(self.Q)])
             self.prev_P_D_local[k] = P_D_local_k
 
