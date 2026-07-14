@@ -14,7 +14,7 @@ Protocol (v3, 2026-07-14):
     h_next = detach(h_prev_chunk_end) — preserves state value, cuts gradient.
     Optimizer steps once per episode (all chunks within an episode see the
     same parameters). This eliminates stored-h_prev staleness from old policy.
-  - Hidden drift diagnostic measured after each DAgger iteration.
+  - Hidden step-change diagnostic measured after each DAgger iteration.
   - D2 removed: communication training deferred to PPO stage.
 
 Usage:
@@ -189,26 +189,31 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
                     ep_obs[chunk_start:chunk_end], dtype=torch.float32, device=device)
                 chunk_act = torch.as_tensor(
                     ep_act[chunk_start:chunk_end], dtype=torch.float32, device=device)
-                L = chunk_obs.shape[0]
+                L = chunk_obs.shape[0]  # frames in chunk
 
                 preds = []
                 for t in range(L):
-                    ob_t = chunk_obs[t:t+1]
+                    ob_t = chunk_obs[t]  # (K, obs_dim) — K UAVs as batch
+                    assert ob_t.ndim == 2 and ob_t.shape[0] == K, \
+                        f"Expected ({K}, obs_dim), got {ob_t.shape}"
                     h_in = None if h_state is None else h_state
                     dp_mean, _, _, _, _, h_new = actor(ob_t, h_in, detach_h_new=False)
-                    preds.append(torch.tanh(dp_mean) * dp_scale)
+                    pred_t = torch.tanh(dp_mean) * dp_scale  # (K, 2)
+                    assert pred_t.shape == (K, 2), f"Expected ({K}, 2), got {pred_t.shape}"
+                    preds.append(pred_t)
                     h_state = h_new
 
                 # Chunk boundary: detach to truncate BPTT
                 h_state = h_state.detach()
 
-                pred = torch.cat(preds, dim=0)
-                chunk_loss = ((pred - chunk_act) ** 2).sum()  # sum of per-frame squared errors
-                # Per-chunk backward scaled by frames in this chunk / total episode frames.
-                # This keeps gradient scale consistent across variable-length episodes and
-                # avoids holding all chunk computation graphs in memory simultaneously.
-                (chunk_loss / T).backward()
-                ep_loss += chunk_loss.item()
+                pred = torch.stack(preds, dim=0)  # (L, K, 2)
+                assert pred.shape == chunk_act.shape, \
+                    f"Shape mismatch: pred {pred.shape} vs target {chunk_act.shape}"
+
+                # Per-element MSE, weighted by chunk fraction of episode
+                chunk_mse = torch.nn.functional.mse_loss(pred, chunk_act, reduction='mean')
+                (chunk_mse * L / T).backward()
+                ep_loss += chunk_mse.item() * L * K * 2  # accumulate total squared error
                 ep_frames += L
 
             opt.step()
@@ -219,7 +224,7 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
     return total_loss / max(total_frames, 1)
 
 
-def measure_hidden_drift(actor, episodes, device, chunk_size=16):
+def measure_hidden_step_change(actor, episodes, device, chunk_size=16):
     """Diagnostic: compare stored student-rollout h (from old policy) with
     recomputed h (from current actor) on the same observation sequences.
 
@@ -357,8 +362,8 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
                                max_dp, device, args.chunk_size)
         actor.eval()
 
-        # Hidden drift diagnostic
-        drift = measure_hidden_drift(actor, episodes, device, args.chunk_size)
+        # Hidden step-change diagnostic
+        drift = measure_hidden_step_change(actor, episodes, device, args.chunk_size)
 
         # Validation
         val_eps = evaluate_streaming(cfg, actor, device, Q, pd_mode, val_seeds)
@@ -367,10 +372,10 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
         val_summary['n_episodes'] = len(episodes)
         val_summary['total_frames'] = total_frames
         val_summary['sup_mse'] = float(mse)
-        val_summary['hidden_drift'] = float(drift)
+        val_summary['hidden_step_change'] = float(drift)
         history.append(val_summary)
 
-        print(f"  iter {it}: mse={mse:.4f}  h_drift={drift:.4f}  "
+        print(f"  iter {it}: mse={mse:.4f}  h_step={drift:.4f}  "
               f"val_steady={val_summary['steady_mean']:.4f}±{val_summary['steady_std']:.4f}  "
               f"val_weak3={val_summary['weak3_mean']:.4f}±{val_summary['weak3_std']:.4f}  "
               f"val_worst={val_summary['worst_mean']:.4f}  "
@@ -473,7 +478,7 @@ def main():
 
         hist_path = os.path.join(args.out_dir, f"val_history_{mode_name}.csv")
         with open(hist_path, 'w', newline='') as f:
-            fields = ['iteration', 'n_episodes', 'total_frames', 'sup_mse', 'hidden_drift',
+            fields = ['iteration', 'n_episodes', 'total_frames', 'sup_mse', 'hidden_step_change',
                       'steady_mean', 'steady_std', 'weak3_mean', 'weak3_std',
                       'worst_mean', 'worst_std', 'ep_fail_030', 'ep_fail_005']
             w = csv.DictWriter(f, fieldnames=fields)

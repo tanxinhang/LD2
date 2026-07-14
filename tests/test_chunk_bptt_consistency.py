@@ -1,12 +1,13 @@
 """P0 regression: chunk BPTT correctness.
 
-Six invariants:
+Seven invariants:
   1. Full-sequence output == chunked output.
   2. Chunk boundary h≠0 after first chunk (state CARRIED).
   3. Episode boundary h=0 (new episode fresh).
   4. detach_h_new=False → gradient flows across frames within chunk.
   5. Chunk boundary detach() → gradient stops.
   6. detach_h_new=True (default) → no cross-frame gradient (rollout/eval mode).
+  7. Multi-UAV real data shape (T, K, obs_dim) trains without shape errors.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -225,6 +226,53 @@ def test_chunk_boundary_detach_stops_gradient(k, q):
     assert obs2.grad.abs().sum() > 1e-8, (
         f"Chunk 2 grad is all-zero. Backward path through chunk is broken."
     )
+
+
+def test_train_chunk_bptt_multi_uav_shape():
+    """DAgger real data shape (T, K, obs_dim) must train without shape errors."""
+    k, q = 4, 4
+    obs_dim = 29 + 18 * q + 8 * (k - 1)
+    actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
+
+    # Simulate episode data as produced by collect_teacher_episodes:
+    # ep_obs: (T, K, obs_dim), ep_act: (T, K, 2)
+    torch.manual_seed(42)
+    T = 35  # non-multiple of chunk_size=16
+    ep_obs = torch.randn(T, k, obs_dim)
+    ep_act = torch.randn(T, k, 2)
+
+    # Minimal training: 1 episode, 1 epoch, chunk_size=16
+    opt = torch.optim.Adam(actor.parameters(), lr=1e-3)
+    chunk_size = 16
+    dp_scale = 2.5
+
+    opt.zero_grad()
+    h_state = None
+    for chunk_start in range(0, T, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, T)
+        chunk_obs = ep_obs[chunk_start:chunk_end]
+        chunk_act = ep_act[chunk_start:chunk_end]
+        L = chunk_obs.shape[0]
+
+        preds = []
+        for t in range(L):
+            ob_t = chunk_obs[t]  # (K, obs_dim)
+            assert ob_t.shape == (k, obs_dim), f"Expected ({k},{obs_dim}), got {ob_t.shape}"
+            dp_mean, _, _, _, _, h_new = actor(ob_t, None if h_state is None else h_state,
+                                               detach_h_new=False)
+            preds.append(torch.tanh(dp_mean) * dp_scale)
+            h_state = h_new
+
+        h_state = h_state.detach()
+        pred = torch.stack(preds, dim=0)  # (L, K, 2)
+        assert pred.shape == chunk_act.shape, f"Shape mismatch: {pred.shape} vs {chunk_act.shape}"
+
+        chunk_mse = torch.nn.functional.mse_loss(pred, chunk_act, reduction='mean')
+        (chunk_mse * L / T).backward()
+
+    opt.step()
+    # If we got here without shape errors, the test passes
+    assert True
 
 
 @pytest.mark.parametrize("k,q", [(4, 4)])

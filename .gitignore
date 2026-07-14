@@ -18,3 +18,5 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+results/dagger_variants/
+results/dagger_variants_smoke/
