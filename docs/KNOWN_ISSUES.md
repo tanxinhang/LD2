@@ -7,18 +7,34 @@
 
 ---
 
-## DAgger 变体对照 (D0/D1, chunk BPTT, 2026-07-14 v3)
+## DAgger 变体对照 (D0/D1, chunk BPTT v3, 2026-07-14)
 
-**协议**：episode 序列存储 → chunk-based truncated BPTT (chunk_size=16)。每 chunk 用当前 actor 以 h=0 起始前向，chunk 间 detach。此方法消除了 v2 中 stored h_prev 随策略更新而过期的问题。Student rollout 使用 streaming GRU。Validation (20 eps) 按 max weak3 (steady ≥ base-0.01) 选 checkpoint。Test (100 eps) 独立。ep_fail 主门限 τ=0.3。每轮报告 hidden drift 诊断值。
+**协议**：
+- 数据保存为 episode 序列（不存储 h_prev）。
+- 训练：chunk-based TBPTT (chunk_size=16)。
+  - h=0 **仅在 episode 边界**。
+  - Chunk 间传递 `h_next = h_prev_chunk_end`（无需显式 detach — Actor 在 `networks.py:329` 已内置 `hn.detach()`，每帧自动截断梯度）。
+  - Optimizer step 在 episode 结束后执行一次（episode 内所有 chunk 看到相同参数）。
+- Student rollout：streaming GRU，episode 边界清零。
+- 每轮报告 `hidden_drift` 诊断值（当前 actor vs 上一轮 actor 在相同观测上的 h 差异）。
+- Checkpoint 选择：max val weak3，约束 steady ≥ base_steady - 0.01。
+- Test：100 eps 独立 bank，checkpoint 冻结后运行一次。
+- ep_fail 主门限 τ=0.3（辅以 τ=0.05）。
+
+**Chunk BPTT 回归测试** (`tests/test_chunk_bptt_consistency.py`)：4/4 通过
+1. Full-sequence == chunked 输出逐帧一致（max|diff| < 1e-5）
+2. Chunk 边界 carry state（carried h ≠ h=0 reset）
+3. Episode 边界 reset hidden（fresh ≠ leaked from previous ep）
+4. Actor h_new 内置 detach（`grad_fn is None`，梯度不跨帧泄漏）
 
 **限制**：单一 training seed；chunk_size=16（非完整 episode BPTT）；通信推迟到 PPO。
 
-| Variant | PD_hist | Comm | 训练方式 |
-|---------|:---:|:---:|------|
-| D0 | zeros | zeros | chunk BPTT |
-| D1 | RX-only | zeros | chunk BPTT |
+| Variant | PD_hist | Comm |
+|---------|:---:|:---:|
+| D0 | zeros | zeros |
+| D1 | RX-only | zeros |
 
-**结论**：D1 作为 PPO 统一初始化——接口一致性选择（与最终分布式信息结构一致，`pd_hist_proj` 从 DAgger 阶段参与训练），非性能胜出。local-PD 的价值应在 PPO + target-wise advantage 阶段检验。
+**结论**：D1 作为 PPO 统一初始化——接口一致性选择，非性能胜出。
 
 ---
 

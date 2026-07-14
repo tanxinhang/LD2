@@ -196,16 +196,21 @@ python scripts/train_dagger_variants.py --mode all \
 | D1 | RX-only local | zeros | local confidence（通信推迟到 PPO） |
 
 **协议要点 (v3, chunk BPTT)**：
-- Student rollout 使用 streaming GRU
 - 数据保存为 episode 序列（不存储 h_prev）
-- 训练：chunk-based truncated BPTT (chunk_size=16)
-  每 chunk 用当前 actor 以 h=0 起始前向，chunk 间 detach
-  消除 stored-h_prev 随策略更新而过期的问题
+- 训练：chunk-based TBPTT (chunk_size=16)
+  - h=0 仅在 episode 边界；chunk 间传递 hidden state
+  - Actor 内置 `hn.detach()` (networks.py:329)，每帧自动截断梯度
+  - Optimizer step 在 episode 结束后执行一次
 - 每轮报告 hidden drift 诊断值
 - Validation (20 eps) 按 max weak3 (steady ≥ base-0.01) 选择 checkpoint
-- Test (100 eps, 独立 bank)
-- ep_fail 主门限 τ=0.3（辅以 τ=0.05）
-- D2 已移除：通信训练推迟到 PPO 阶段
+- Test (100 eps, 独立 bank)；ep_fail 主门限 τ=0.3
+- D2 已移除：通信训练推迟到 PPO
+
+**回归测试** (`tests/test_chunk_bptt_consistency.py`)：4/4 通过
+1. Full-sequence == chunked 输出 (max|diff| < 1e-5)
+2. Chunk 边界 carry state (carried ≠ reset)
+3. Episode 边界 reset hidden (fresh ≠ leaked)
+4. Actor h_new.grad_fn is None (内置 TBPTT detach)
 
 **建议**：选 D1 作为 PPO 初始化——符合分布式信息结构，`pd_hist_proj` 从 DAgger 阶段参与训练。
 

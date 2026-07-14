@@ -152,10 +152,8 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
 
     Each episode: h_0 = 0 at episode boundary.
     Chunk i: forward frames [i*L, (i+1)*L) with h_in from previous chunk end.
-    After chunk: h_next = detach(h_end) — preserves state, cuts gradient.
-    Gradients accumulated across all chunks in an episode; optimizer.step()
-    once per episode. This avoids intra-episode parameter updates that would
-    invalidate the carried-forward hidden state.
+    Actor internally detaches h_new (networks.py:329) — no explicit detach needed.
+    Optimizer steps once per episode (all chunks see same parameters).
     """
     opt = torch.optim.Adam(actor.parameters(), lr=lr)
     dp_scale = float(max_dp)
@@ -197,7 +195,7 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
                     h_in = None if h_state is None else h_state
                     dp_mean, _, _, _, _, h_new = actor(ob_t, h_in)
                     preds.append(torch.tanh(dp_mean) * dp_scale)
-                    h_state = h_new.detach()  # carry state, cut gradient
+                    h_state = h_new  # actor already detaches internally (networks.py:329)
 
                 pred = torch.cat(preds, dim=0)
                 # Accumulate weighted loss: sum of per-frame squared errors
