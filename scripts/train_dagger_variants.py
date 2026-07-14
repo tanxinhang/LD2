@@ -10,8 +10,10 @@ Protocol (v3, 2026-07-14):
   - Student rollout uses streaming GRU (h_prev across frames, reset per ep).
   - Data saved as episode sequences: [(o_1,a_1), (o_2,a_2), ...] per episode.
   - Training: chunk-based truncated BPTT (chunk_size=16).
-    Each chunk is re-forwarded through the CURRENT actor with h=0 at chunk start.
-    This eliminates stored-h_prev staleness from old policy parameters.
+    h=0 ONLY at episode boundary. Between chunks within an episode:
+    h_next = detach(h_prev_chunk_end) — preserves state value, cuts gradient.
+    Optimizer steps once per episode (all chunks within an episode see the
+    same parameters). This eliminates stored-h_prev staleness from old policy.
   - Hidden drift diagnostic measured after each DAgger iteration.
   - D2 removed: communication training deferred to PPO stage.
 
@@ -148,25 +150,20 @@ def collect_student_episodes(cfg, actor, device, n_eps, seed, Q, pd_mode):
 def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16):
     """Chunk-based truncated BPTT training.
 
-    Each episode is split into chunks of chunk_size frames. For each chunk,
-    the CURRENT actor is forwarded with h=0 at chunk start (or detached from
-    the previous chunk within the same episode). Loss is MSE on dp prediction.
-
-    This eliminates stored-h_prev staleness: the forward pass always uses
-    the current model parameters, not old-policy hidden states.
+    Each episode: h_0 = 0 at episode boundary.
+    Chunk i: forward frames [i*L, (i+1)*L) with h_in from previous chunk end.
+    After chunk: h_next = detach(h_end) — preserves state, cuts gradient.
+    Gradients accumulated across all chunks in an episode; optimizer.step()
+    once per episode. This avoids intra-episode parameter updates that would
+    invalidate the carried-forward hidden state.
     """
     opt = torch.optim.Adam(actor.parameters(), lr=lr)
     dp_scale = float(max_dp)
 
-    # Flatten all frames from all episodes into (obs, action) pairs, keeping
-    # episode boundaries for h-reset.
-    all_obs = []   # list of (T_e, K, obs_dim) arrays per episode
-    all_act = []   # list of (T_e, K, 2) arrays per episode
+    all_obs, all_act = [], []
     for ep in episodes:
-        obs_arr = np.stack([f[0] for f in ep])   # (T, K, obs_dim)
-        act_arr = np.stack([f[1] for f in ep])   # (T, K, 2)
-        all_obs.append(obs_arr)
-        all_act.append(act_arr)
+        all_obs.append(np.stack([f[0] for f in ep]))
+        all_act.append(np.stack([f[1] for f in ep]))
 
     n_episodes = len(all_obs)
     K = all_obs[0].shape[1]
@@ -177,47 +174,46 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
         total_frames = 0
 
         for ep_idx in ep_order:
-            ep_obs = all_obs[ep_idx]   # (T, K, obs_dim)
-            ep_act = all_act[ep_idx]   # (T, K, 2)
+            ep_obs = all_obs[ep_idx]
+            ep_act = all_act[ep_idx]
             T = ep_obs.shape[0]
 
-            # Process episode in chunks
-            h_state = None  # reset at episode boundary
+            opt.zero_grad()
+            h_state = None  # h=0 ONLY at episode boundary
+            ep_loss = 0.0
+            ep_frames = 0
+
             for chunk_start in range(0, T, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, T)
                 chunk_obs = torch.as_tensor(
                     ep_obs[chunk_start:chunk_end], dtype=torch.float32, device=device)
                 chunk_act = torch.as_tensor(
                     ep_act[chunk_start:chunk_end], dtype=torch.float32, device=device)
-                L = chunk_obs.shape[0]  # frames in this chunk
+                L = chunk_obs.shape[0]
 
-                # Forward through chunk frame by frame with maintained GRU state
                 preds = []
                 for t in range(L):
-                    ob_t = chunk_obs[t:t+1]  # (1, K, obs_dim)
-                    if h_state is None:
-                        h_in = None
-                    else:
-                        h_in = h_state  # (1, K*(K-1), D)
+                    ob_t = chunk_obs[t:t+1]
+                    h_in = None if h_state is None else h_state
                     dp_mean, _, _, _, _, h_new = actor(ob_t, h_in)
                     preds.append(torch.tanh(dp_mean) * dp_scale)
-                    h_state = h_new.detach()  # detach for truncated BPTT
+                    h_state = h_new.detach()  # carry state, cut gradient
 
-                pred = torch.cat(preds, dim=0)  # (L, K, 2)
-                loss = ((pred - chunk_act) ** 2).mean()
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
+                pred = torch.cat(preds, dim=0)
+                # Accumulate weighted loss: sum of per-frame squared errors
+                chunk_loss = ((pred - chunk_act) ** 2).sum()  # sum, not mean
+                ep_loss += chunk_loss
+                ep_frames += L
 
-                total_loss += loss.item() * L * K
-                total_frames += L * K
+            # One optimizer step per episode — hidden state was produced by
+            # the SAME parameters throughout the episode.
+            (ep_loss / ep_frames).backward()
+            opt.step()
 
-        avg_loss = total_loss / max(total_frames, 1)
-        if (epoch + 1) % 20 == 0 or epoch == 0:
-            actor.eval()
-            actor.train()
+            total_loss += ep_loss.item()
+            total_frames += ep_frames
 
-    return avg_loss
+    return total_loss / max(total_frames, 1)
 
 
 def measure_hidden_drift(actor, episodes, device, chunk_size=16):
