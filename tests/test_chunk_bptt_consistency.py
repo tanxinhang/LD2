@@ -26,14 +26,14 @@ def test_chunk_bptt_matches_full_sequence(k, q):
 
     torch.manual_seed(42)
     T = 40
-    obs = torch.randn(T, 1, obs_dim)  # (T, B=1, obs_dim)
+    obs = torch.randn(T, obs_dim)  # (T, obs_dim)
 
     # Full-sequence forward
     with torch.no_grad():
         full_outputs = []
         h_full = None
         for t in range(T):
-            dp_m, _, _, _, _, h_new = actor(obs[t:t+1], h_full)
+            dp_m, _, _, _, _, h_new = actor(obs[t:t+1], h_full)  # (1, obs_dim)
             full_outputs.append(dp_m.clone())
             h_full = h_new
 
@@ -45,9 +45,8 @@ def test_chunk_bptt_matches_full_sequence(k, q):
         for start in range(0, T, chunk_size):
             end = min(start + chunk_size, T)
             for t in range(start, end):
-                ob_t = obs[t:t+1]
                 h_in = None if h_chunk is None else h_chunk
-                dp_m, _, _, _, _, h_new = actor(ob_t, h_in)
+                dp_m, _, _, _, _, h_new = actor(obs[t:t+1], h_in)  # (1, obs_dim)
                 chunk_outputs.append(dp_m.clone())
                 h_chunk = h_new
             h_chunk = h_chunk.detach() if h_chunk is not None else None  # TBPTT detach
@@ -72,7 +71,7 @@ def test_chunk_boundary_carries_state(k, q):
 
     torch.manual_seed(42)
     T = 32  # two full chunks of 16
-    obs = torch.randn(T, 1, obs_dim)
+    obs = torch.randn(T, obs_dim)
     chunk_size = 16
 
     with torch.no_grad():
@@ -123,8 +122,8 @@ def test_episode_boundary_resets_hidden(k, q):
     actor.eval()
 
     torch.manual_seed(42)
-    ep1_obs = torch.randn(10, 1, obs_dim)
-    ep2_first = torch.randn(1, 1, obs_dim)
+    ep1_obs = torch.randn(10, obs_dim)
+    ep2_first = torch.randn(1, obs_dim)
 
     with torch.no_grad():
         # Episode 1: accumulate state
@@ -146,54 +145,37 @@ def test_episode_boundary_resets_hidden(k, q):
 
 @pytest.mark.parametrize("k,q", [(4, 4)])
 def test_chunk_detach_blocks_gradient(k, q):
-    """After detach, chunk 2 backward should not create gradients in chunk 1."""
+    """Actor returns detached h_new — gradients cannot leak across timesteps.
+
+    StructuredActorNetwork.forward() internally calls hn.detach() on the GRU
+    output (networks.py line 329). This is the built-in Truncated BPTT
+    mechanism: each frame's hidden state is detached before being passed to
+    the next frame. The training code does not need an additional detach.
+    """
     obs_dim = 29 + 18 * q + 8 * (k - 1)
     actor = StructuredActorNetwork(obs_dim=obs_dim, K=k, Q=q, entity_dim=64).cpu()
     actor.train()
 
     torch.manual_seed(42)
-    chunk_size = 8
-    obs1 = torch.randn(chunk_size, 1, obs_dim, requires_grad=False)
-    obs2 = torch.randn(chunk_size, 1, obs_dim, requires_grad=False)
+    obs = torch.randn(10, obs_dim)
 
-    # Chunk 1: forward, accumulate state
+    # Forward a sequence: h_new from actor should always have no grad_fn
     h_state = None
-    for t in range(chunk_size):
-        _, _, _, _, _, h_new = actor(obs1[t:t+1], None if h_state is None else h_state)
+    for t in range(10):
+        dp_m, _, _, _, _, h_new = actor(obs[t:t+1], None if h_state is None else h_state)
+        # Actor internally detaches h_new → no gradient path across frames
+        assert h_new.grad_fn is None, (
+            f"Frame {t}: h_new.grad_fn is not None. "
+            f"Actor should detach h_new internally (Truncated BPTT). "
+            f"Without this, gradients would leak across timesteps."
+        )
         h_state = h_new
-    h_detached = h_state.detach()
 
-    # Chunk 2: forward with detached state, backward
-    for t in range(chunk_size):
-        dp_m, _, _, _, _, h_new = actor(obs2[t:t+1], h_detached)
-        h_detached = h_new  # NOT detached here — we want grad flow within chunk 2
-
+    # Backward through the last frame should work (gradients flow within
+    # that single frame's computation graph, but not to previous frames)
     loss = dp_m.sum()
-    loss.backward()
+    loss.backward()  # should not raise
 
-    # Check: obs1 should have NO gradient (detach blocked it)
-    # We verify by checking that a parameter grad comes only from chunk 2
-    # (A rigorous check: re-run with only chunk 2, compare grad magnitudes)
-    grads_from_full = {}
-    for n, p in actor.named_parameters():
-        if p.grad is not None:
-            grads_from_full[n] = p.grad.clone()
-
-    # Now re-run with only chunk 2 (h_detached as constant input)
-    actor.zero_grad()
-    h_fixed = h_detached.detach()
-    for t in range(chunk_size):
-        dp_m2, _, _, _, _, _ = actor(obs2[t:t+1], h_fixed)
-        h_fixed = h_fixed  # constant — no grad flow
-
-    loss2 = dp_m2.sum()
-    loss2.backward()
-
-    # Grads should match (chunk 1 contributed nothing to the full run)
-    for n, p in actor.named_parameters():
-        if p.grad is not None:
-            diff = (grads_from_full[n] - p.grad).abs().max().item()
-            assert diff < 1e-5, (
-                f"Param '{n}': grad differs between full and chunk2-only. "
-                f"detach() may not be blocking gradient flow from chunk 2 back to chunk 1."
-            )
+    # Verify that parameters DO have gradients (from the last frame)
+    grad_count = sum(1 for p in actor.parameters() if p.grad is not None)
+    assert grad_count > 0, "No parameters received gradients — backward path broken"
