@@ -24,7 +24,7 @@ target:
   speed_range: [0, 5]
   sigma_a: 0.5
   rcs: 1.0
-  omega_q: [0.25, 0.25, 0.25, 0.25]  # equal, K=8
+  omega_q: [0.25, 0.25, 0.25, 0.25]  # equal weights, K=4
 
 otfs:
   fc: 2.8e+10
@@ -75,7 +75,7 @@ marl:
   eta_mc: 0.5
   use_distance_shaping: false
   shape_w: 0.01
-  lambda_report: 1.0e-5       # lower: 8 UAVs → comm cost adds up faster
+  lambda_report: 1.0e-5       # lower: 4 UAVs → comm cost adds up faster
   alpha_pd: 0.5
   lambda_report_comm: 1.0e-5
   bc_beta_init: 0.05
@@ -85,7 +85,7 @@ marl:
   lagrangian_max: 1.0
   target_kl: 0.02
   num_episodes: 300
-  num_envs: 8                  # reduced: 8 agents × 4 envs = 32 agents/batch
+  num_envs: 8                  # 8 parallel envs × 4 envs = 32 agents/batch
   learn_roles: false
   assignment_hold_frames: 5
   actor_decision_interval: 5

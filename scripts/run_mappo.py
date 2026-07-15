@@ -176,7 +176,10 @@ def main():
 
     # Save results for reproducibility and paired bootstrap
     import csv, json as _json, subprocess as _sp
-    out_dir = args.out_dir or os.path.join("results", "full_eh", f"seed_{seed}")
+    # Auto-derive variant from config name: exp_800_q4_full → full
+    config_stem = os.path.splitext(os.path.basename(args.config or "config/default.yaml"))[0]
+    variant = config_stem.replace("exp_800_q4_", "") if "exp_800_q4_" in config_stem else config_stem
+    out_dir = args.out_dir or os.path.join("results", "full_eh", variant, f"seed_{seed}")
     os.makedirs(out_dir, exist_ok=True)
 
     # Commit hash
@@ -211,6 +214,26 @@ def main():
             w.writeheader()
             for m in metrics_history:
                 w.writerow({k: m.get(k, "") for k in keys})
+
+    # Per-episode evaluation on FIXED test bank for paired bootstrap
+    paired_seeds = [30001, 30002, 30003, 30004, 30005,
+                    30006, 30007, 30008, 30009, 30010,
+                    30011, 30012, 30013, 30014, 30015,
+                    30016, 30017, 30018, 30019, 30020]
+    try:
+        trainer.agents[0].actor.eval()
+        # Use _evaluate with streaming GRU (already fixed in P0-3)
+        ev = trainer._evaluate(n_episodes=len(paired_seeds), eval_seeds=paired_seeds)
+        eval_keys = sorted(ev.keys())
+        with open(os.path.join(out_dir, "paired_eval.csv"), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(eval_keys)
+            w.writerow([ev.get(k, "") for k in eval_keys])
+        # Save best checkpoint
+        torch.save(trainer.agents[0].actor.state_dict(),
+                   os.path.join(out_dir, "best_restored.pt"))
+    except Exception as e:
+        print(f"  [warn] paired eval failed: {e}")
 
     print(f"Results saved → {out_dir}")
     env.close()
