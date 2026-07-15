@@ -20,3 +20,4 @@ __pycache__/
 Thumbs.db
 results/dagger_variants/
 results/dagger_variants_smoke/
+results/full_eh/

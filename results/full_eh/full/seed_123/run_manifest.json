@@ -1,0 +1,15 @@
+{
+  "git_commit": "a681171bb04b13d98e6f5e7c9f6af158cf98afde",
+  "config": "config/exp_800_q4_full.yaml",
+  "seed": 123,
+  "K": 4,
+  "Q": 4,
+  "warm_start": "results/dagger_variants/dagger_D1.pt",
+  "warm_start_mode": "direct",
+  "learned_comm_mode": "off",
+  "freeze_attention": false,
+  "use_per_module_lr": true,
+  "best_steady_P_D": 0.4993969336961516,
+  "total_frames": 612000,
+  "total_episodes": 300
+}
