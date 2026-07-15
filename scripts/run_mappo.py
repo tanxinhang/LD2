@@ -32,6 +32,8 @@ def main():
                          "3e-5 recommended for BC warmstart to keep KL within trust region.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--episodes", type=int, default=None, help="override marl.num_episodes")
+    ap.add_argument("--out-dir", default=None,
+                    help="output directory for results (default: results/full_eh/seed_{seed})")
     args = ap.parse_args()
 
     # Config: single source of truth (default.yaml) or an explicit --config.
@@ -172,6 +174,45 @@ def main():
         print(f"Initial actor loss: {actor_losses[0]:.4f}" if actor_losses else "")
         print(f"Final actor loss: {actor_losses[-1]:.4f}" if actor_losses else "")
 
+    # Save results for reproducibility and paired bootstrap
+    import csv, json as _json, subprocess as _sp
+    out_dir = args.out_dir or os.path.join("results", "full_eh", f"seed_{seed}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Commit hash
+    try:
+        commit = _sp.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        commit = "unknown"
+
+    # Manifest
+    manifest = {
+        "git_commit": commit,
+        "config": args.config or "config/default.yaml",
+        "seed": seed,
+        "K": config.scenario.K, "Q": config.scenario.Q,
+        "warm_start": args.warm_start,
+        "warm_start_mode": args.warm_start_mode,
+        "learned_comm_mode": config.marl.learned_comm_mode,
+        "freeze_attention": getattr(config.marl, "freeze_attention", False),
+        "use_per_module_lr": getattr(config.marl, "use_per_module_lr", False),
+        "best_steady_P_D": float(trainer.best_score),
+        "total_frames": trainer.total_frames,
+        "total_episodes": len(metrics_history),
+    }
+    with open(os.path.join(out_dir, "run_manifest.json"), "w") as f:
+        _json.dump(manifest, f, indent=2)
+
+    # Training metrics CSV
+    if metrics_history:
+        keys = sorted(metrics_history[0].keys())
+        with open(os.path.join(out_dir, "train_metrics.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            for m in metrics_history:
+                w.writerow({k: m.get(k, "") for k in keys})
+
+    print(f"Results saved → {out_dir}")
     env.close()
     print("Done.")
 

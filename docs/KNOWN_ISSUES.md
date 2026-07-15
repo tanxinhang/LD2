@@ -50,22 +50,24 @@ D1 在 iter 2-4 的 val weak3 比 D0 高 ~0.01（单 seed，不显著）。
 
 ## Full/EH 长期对照实验 (Seed=42, 2026-07-15)
 
-**配置**：`exp_800_q4_full.yaml` / `exp_800_q4_eh.yaml`，D1 warm-start (direct mode)，learned communication disabled，per-module LR。Full 与 EH 唯一变量：Attention LR (1e-5 vs 0)。
+**配置**：`exp_800_q4_full.yaml` / `exp_800_q4_eh.yaml`，D1 warm-start (direct mode)，learned communication disabled，per-module LR，`num_episodes=300`。Full 与 EH 唯一变量：Attention LR (1e-5 vs 0)。
+
+**注意**: `D1 Init` (0.501/0.334) 使用 PPO online eval bank (5 seeds, `10001-10005`) 重新评估，与 DAgger 独立 100-episode test score (0.703/0.604) 不可直接比较。跨实验比较需使用同一 test bank。
 
 **Seed=42 结果** (300 episodes，early-stop 未触发)：
 
-| | D1 Init | Full (best) | Full (Ep 250) | EH (best) | EH (Ep 250) |
-|---|---|:---:|:---:|:---:|:---:|
-| steady | 0.501 | 0.501 | 0.497 | 0.503 | 0.483 |
-| weak3 | 0.334 | 0.334 | 0.329 | 0.337 | 0.311 |
-| PPO RATIO | — | OK (1e-5) | — | OK (8e-6) | — |
-| entropy | 2.84 | — | 2.79 | — | 2.79 |
-| KL | — | — | <0.001 | — | <0.001 |
+| | D1 Init | Full best-restored | EH best-restored |
+|---|---|:---:|:---:|
+| steady | 0.501 | 0.501 | 0.503 |
+| weak3 | 0.334 | 0.334 | 0.337 |
+| PPO RATIO | — | OK (1e-5) | OK (8e-6) |
+
+训练轨迹：entropy 2.84→2.79（缓慢下降未塌缩），KL <0.001 持续受控。EH 在 Ep 250 处 weak3 短暂降至 0.311 后恢复，未观测到灾难性崩塌。
 
 **核心结论**：
-1. **PPO 不再破坏 DAgger。** 300 次 on-policy 更新后 steady 保持在 0.48-0.50，weak3 保持在 0.31-0.34。修复前 1 次更新就崩溃到 random 水平。
-2. **Full 和 EH 在 seed=42 下差异在噪声范围内。** Entropy 缓慢下降但未塌缩，KL 持续受控。
-3. **Attention 冻结在此实验设定下未显示显著稳定性优势。** 需要 3 seeds 确认。
+1. **PPO 不再破坏 DAgger。** 300 次 on-policy 更新后 best-restored checkpoint 保住 D1 初始化性能。修复前 1 次更新就崩溃到 random 水平。
+2. **在 seed=42 固定 5-episode eval bank 上，Full 与 EH 数值接近，未观察到稳定分离。** 统计显著性待 3 training seeds + 独立 paired test bank 验证。
+3. **Attention 冻结在此实验设定下未显示稳定性优势。** 需要 3 seeds 确认。
 
 **配置**：`config/exp_800_q4_full.yaml`, `config/exp_800_q4_eh.yaml`。运行命令见 `TRAINING.md §8`。
 
