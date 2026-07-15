@@ -221,39 +221,41 @@ def train_chunk_bptt(actor, episodes, epochs, lr, max_dp, device, chunk_size=16)
             total_loss += ep_loss
             total_frames += ep_frames
 
+        if (epoch + 1) % 10 == 0:
+            print(f"    epoch {epoch+1}/{epochs}: loss={total_loss/max(total_frames,1):.4f}",
+                  flush=True)
+
     return total_loss / max(total_frames, 1)
 
 
 def measure_hidden_step_change(actor, episodes, device, chunk_size=16):
-    """Diagnostic: compare stored student-rollout h (from old policy) with
-    recomputed h (from current actor) on the same observation sequences.
+    """Diagnostic: mean relative change of GRU hidden across adjacent frames.
 
-    Returns mean relative drift: |h_stored - h_recomputed| / (|h_recomputed| + ε).
-    Large values indicate stored h_prev staleness.
+    Returns mean |h_t - h_{t+1}| / (|h_{t+1}| + ε) over sampled episodes.
+    Large values indicate rapid hidden-state dynamics; near-zero may indicate
+    saturated or dead GRU.
     """
     if not episodes:
         return 0.0
 
     K = episodes[0][0][0].shape[0]
-    drifts = []
-    n_samples = 0
+    changes = []
 
     with torch.no_grad():
-        for ep in episodes[:min(5, len(episodes))]:  # sample 5 episodes
-            obs_arr = np.stack([f[0] for f in ep])
+        for ep in episodes[:min(5, len(episodes))]:
+            obs_arr = np.stack([f[0] for f in ep])  # (T, K, obs_dim)
             T = obs_arr.shape[0]
             h_state = None
             for t in range(T):
-                ob_t = torch.as_tensor(obs_arr[t:t+1], dtype=torch.float32, device=device)
+                ob_t = torch.as_tensor(obs_arr[t], dtype=torch.float32, device=device)
                 _, _, _, _, _, h_new = actor(ob_t, h_state if h_state is not None else None)
                 if h_state is not None and h_new is not None:
-                    drift = (h_state - h_new).abs().mean().item()
+                    change = (h_state - h_new).abs().mean().item()
                     norm = h_new.abs().mean().item() + 1e-8
-                    drifts.append(drift / norm)
-                    n_samples += 1
+                    changes.append(change / norm)
                 h_state = h_new.detach() if h_new is not None else None
 
-    return float(np.mean(drifts)) if drifts else 0.0
+    return float(np.mean(changes)) if changes else 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -7,7 +7,8 @@
 
 ---
 
-## DAgger 变体对照 (D0/D1, chunk BPTT v3, 2026-07-14)
+
+## DAgger 变体对照 (D0/D1, chunk BPTT v3, 2026-07-15)
 
 **协议**：
 - 数据保存为 episode 序列（不存储 h_prev）。
@@ -15,29 +16,35 @@
   - h=0 **仅在 episode 边界**。
   - Chunk 内部：`detach_h_new=False`，梯度跨帧传播（最多 L=16 帧）。
   - Chunk 边界：`h_next = h_end.detach()` — 保留状态值，截断梯度。
-  - Optimizer step 在 episode 结束后执行一次（episode 内所有 chunk 看到相同参数）。
+  - Per-chunk backward（`chunk_mse × L/T`），optimizer step 在 episode 结束后执行一次。
 - Student rollout：streaming GRU，episode 边界清零。
-- 每轮报告 `hidden_drift` 诊断值（当前 actor vs 上一轮 actor 在相同观测上的 h 差异）。
+- 每轮报告 `hidden_step_change`（相邻帧 h 相对变化）。
 - Checkpoint 选择：max val weak3，约束 steady ≥ base_steady - 0.01。
-- Test：100 eps 独立 bank，checkpoint 冻结后运行一次。
+- Test：100 eps 独立 bank（seeds 30001-30100），checkpoint 冻结后运行一次。
 - ep_fail 主门限 τ=0.3（辅以 τ=0.05）。
 
-**Chunk BPTT 回归测试** (`tests/test_chunk_bptt_consistency.py`)：6/6 通过
+**Chunk BPTT 回归测试** (`tests/test_chunk_bptt_consistency.py`)：7/7 通过
 1. Full-sequence == chunked 输出逐帧一致（max|diff| < 1e-5）
 2. Chunk 边界 carry state（carried h ≠ h=0 reset）
-3. Episode 边界 reset hidden（fresh ≠ leaked from previous ep）
+3. Episode 边界 reset hidden（fresh ≠ leaked）
 4. `detach_h_new=False` → 梯度在 chunk 内跨帧传播
 5. Chunk 边界 `detach()` → 梯度被截断
-6. `detach_h_new=True`（默认）→ 无跨帧梯度（rollout/eval 模式）
+6. `detach_h_new=True`（默认）→ 无跨帧梯度
+7. 多 UAV 真实形状 `(T,K,obs_dim)` 训练无误
 
-**限制**：单一 training seed；chunk_size=16（非完整 episode BPTT）；通信推迟到 PPO。
+**D0/D1 训练结果** (K=4, Q=4, seed=42, 5 DAgger iters, 20 val / 100 test eps)：
 
-| Variant | PD_hist | Comm |
-|---------|:---:|:---:|
-| D0 | zeros | zeros |
-| D1 | RX-only | zeros |
+| Variant | test steady | test weak3 | test worst | ep_fail_030 | ep_fail_005 |
+|---------|:---:|:---:|:---:|:---:|:---:|
+| D0 | 0.701 | 0.601 | 0.152 | 0.83 | 0.71 |
+| D1 | 0.703 | 0.604 | 0.174 | 0.80 | 0.70 |
+| Δ | +0.002 | +0.003 | +0.023 | −0.03 | −0.01 |
 
-**结论**：D1 作为 PPO 统一初始化——接口一致性选择，非性能胜出。
+D1 在 iter 2-4 的 val weak3 比 D0 高 ~0.01（单 seed，不显著）。
+
+**限制**：单一 training seed；chunk_size=16；通信推迟到 PPO。
+
+**结论**：D1 作为 PPO 统一初始化——接口一致性选择，非性能胜出。local-PD 的价值应在 PPO + target-wise advantage 阶段检验。Checkpoint：`results/dagger_variants/dagger_D1.pt`。
 
 ---
 
