@@ -98,6 +98,71 @@ def test_split_param_groups_includes_comm_heads():
     assert len(head_names) >= 4, f"Expected >=4 comm head params, got {len(head_names)}"
 
 
+def test_real_trainer_init_completes():
+    """Real MAPPTrainer must complete __init__ without errors.
+    Catches indentation bugs that put init code inside _effective_comm."""
+    from config.params import load_config
+    from uav_isac.environment.env_wrapper import UAVISACEnv
+    from uav_isac.environment.action import ActionSpace
+    from uav_isac.agents.mappo_agent import MAPPOAgent
+    from uav_isac.agents.trainer import MAPPTrainer
+
+    for config_path, expect_freeze in [
+        ('config/exp_800_k8_q8_full.yaml', False),
+        ('config/exp_800_k8_q8_eh.yaml', True),
+    ]:
+        cfg = load_config(config_path)
+        cfg.marl.num_envs = 1
+        env = UAVISACEnv(config=cfg, seed=42)
+        K, Q = cfg.scenario.K, cfg.scenario.Q
+        aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt)
+        aspace.num_targets = Q
+        aspace.structured_actor = True
+        aspace.structured_entity_dim = 64
+
+        od = env.core.obs_builder.get_obs_dim()
+        gd = env.core.obs_builder.get_global_state_dim()
+        device = 'cpu'
+
+        agents = [
+            MAPPOAgent(k, od, gd, aspace, K, num_targets=Q,
+                       hidden_layers=cfg.marl.hidden_layers,
+                       lr=cfg.marl.lr, device=device)
+            for k in range(K)
+        ]
+        for k in range(1, K):
+            agents[k].actor = agents[0].actor
+            agents[k].critic = agents[0].critic
+
+        trainer = MAPPTrainer(env=env, agents=agents, config=cfg, device=device)
+
+        # __init__ must have completed
+        assert hasattr(trainer, 'total_frames'), f"{config_path}: total_frames missing"
+        assert hasattr(trainer, 'metrics_history'), f"{config_path}: metrics_history missing"
+        assert hasattr(trainer, '_oracle_alpha'), f"{config_path}: _oracle_alpha missing"
+        assert hasattr(trainer, '_ref_beta'), f"{config_path}: _ref_beta missing"
+
+        # Comm heads frozen in both
+        for n, p in trainer.agents[0].actor.named_parameters():
+            if n.startswith(('comm_head.', 'comm_proj.', 'gate.', 'intent_head.')):
+                assert not p.requires_grad, f"{config_path}: {n} not frozen"
+
+        # Attention: frozen in EH, trainable in Full
+        for n, p in trainer.agents[0].actor.named_parameters():
+            if n.startswith(('attn.', 'attn_norm.')):
+                if expect_freeze:
+                    assert not p.requires_grad, f"{config_path}: {n} should be frozen"
+                else:
+                    assert p.requires_grad, f"{config_path}: {n} should be trainable"
+
+        # Optimizer LR
+        lrs = sorted({g['lr'] for g in trainer.agents[0].actor_optimizer.param_groups})
+        assert lrs == [1e-5, 5e-5], f"{config_path}: expected [1e-5, 5e-5], got {lrs}"
+
+        env.close()
+        print(f"  {config_path}: OK (freeze_attn={expect_freeze}, lrs={lrs})")
+
+
 def test_full_eh_param_group_separation():
     """Full vs EH must differ ONLY in attention LR, not encoder/head LR."""
     from uav_isac.agents.networks import StructuredActorNetwork

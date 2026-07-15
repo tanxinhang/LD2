@@ -190,12 +190,6 @@ class MAPPTrainer:
         # ═══════════════════════════════════════════════════════════════
         self._comm_mode = getattr(ma, 'learned_comm_mode', 'on')
         self._comm_off = (self._comm_mode == 'off')
-
-    def _effective_comm(self, comm_msgs: torch.Tensor) -> torch.Tensor:
-        """Return zeroed comm if comm_off, else original. Single entry point."""
-        if self._comm_off:
-            return torch.zeros_like(comm_msgs)
-        return comm_msgs
         freeze_attn = getattr(ma, 'freeze_attention', False)
         use_per_lr = getattr(ma, 'use_per_module_lr', False)
 
@@ -234,16 +228,15 @@ class MAPPTrainer:
                   f'frozen={frozen_count} params')
 
         # CVaR target-tail-risk constraint
-        self._cvar_tau = getattr(ma, 'cvar_tau', 0.0)     # 0=disabled
-        self._cvar_lambda = 0.5                            # initial dual variable (stronger)
+        self._cvar_tau = getattr(ma, 'cvar_tau', 0.0)
+        self._cvar_lambda = 0.5
         self._cvar_epsilon = getattr(ma, 'cvar_epsilon', 0.05)
 
         # DAgger reference KL anchor (conservative fine-tuning)
-        self._ref_beta = 2.0  # KL(π_ref || π_θ) weight
+        self._ref_beta = 2.0
 
-        # Oracle-guided exploration: inject Greedy-Approach actions
-        # α decays from 0.3→0 to stabilise early training
-        self._oracle_alpha = 0.0  # disabled: oracle actions break PPO ratio
+        # Oracle-guided exploration
+        self._oracle_alpha = 0.0
         self._oracle_decay_episodes = 200
         self._oracle_ep_count = 0
 
@@ -252,14 +245,18 @@ class MAPPTrainer:
         self.total_frames = 0
 
         # Shared networks across agents (parameter sharing)
-        # All agents use the same actor/critic
         if len(agents) > 1:
-            # Share networks
             for k in range(1, len(agents)):
                 agents[k].actor = agents[0].actor
                 agents[k].critic = agents[0].critic
                 agents[k].actor_optimizer = agents[0].actor_optimizer
                 agents[k].critic_optimizer = agents[0].critic_optimizer
+
+    def _effective_comm(self, comm_msgs: torch.Tensor) -> torch.Tensor:
+        """Return zeroed comm if comm_off, else original. Single entry point."""
+        if self._comm_off:
+            return torch.zeros_like(comm_msgs)
+        return comm_msgs
 
     def collect_rollout(self) -> bool:
         """Collect a full rollout with parallel environments for GPU batching.
