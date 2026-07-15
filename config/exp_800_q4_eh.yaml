@@ -3,6 +3,8 @@
 # Only differs from exp_800_q4_full.yaml in freeze_attention.
 # Usage: python scripts/run_mappo.py --config config/exp_800_q4_eh.yaml --warm-start results/dagger_variants/dagger_D1.pt --warm-start-mode direct --seed 42
 
+scenario:
+  region_size: [800, 800]
   height: 20
   K: 4
   Q: 4
