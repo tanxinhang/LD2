@@ -206,7 +206,9 @@ python scripts/train_dagger_variants.py --mode all \
 - Test (100 eps, 独立 bank)；ep_fail 主门限 τ=0.3
 - D2 已移除：通信训练推迟到 PPO
 
-**回归测试** (`tests/test_chunk_bptt_consistency.py`)：4/4 通过
+**D0/D1 结果 (K=4,Q=4, seed=42, 2026-07-15)**：D0 (0.701/0.601), D1 (0.703/0.604), Δ<eval noise。D1 选为 PPO 初始化（接口一致性）。
+
+**回归测试** (`tests/test_chunk_bptt_consistency.py`)：7/7 通过
 1. Full-sequence == chunked 输出 (max|diff| < 1e-5)
 2. Chunk 边界 carry state (carried ≠ reset)
 3. Episode 边界 reset hidden (fresh ≠ leaked)
