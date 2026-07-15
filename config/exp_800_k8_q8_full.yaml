@@ -1,0 +1,124 @@
+# Experiment config: large-area, 8-UAV, 8-target scenario.
+#
+# This is the PRIMARY config for all K=8, Q=8 experiments documented in
+# docs/审计报告_逐层失效定位.md and docs/TC-SP-MAPPO_差距分析.md.
+#
+# Key differences from exp_800_q4.yaml:
+#   K: 4 → 8 (UAVs)
+#   Q: 4 → 8 (targets)
+#   omega_q: equal weights for all 8 targets
+#   num_envs: 8 → 4 (more agents → fewer parallel envs for memory)
+#
+# All 8×8 experiments MUST use this config (or explicitly reference it
+# as a base). Do NOT rely on script-level overrides — they are not
+# tracked and make results irreproducible.
+
+scenario:
+  region_size: [800, 800]
+  height: 20
+  K: 8
+  Q: 8
+  T: 150
+  dt: 0.1
+  C: 1
+
+uav:
+  v_max: 25
+  d_safe: 20
+  P_sense: 0.0251
+  P_report: 0.25
+  B_max: 50000
+  P_fly_static: 80
+  P_fly_coeff: 0.05
+
+target:
+  motion_model: "CV"
+  speed_range: [0, 5]
+  sigma_a: 0.5
+  rcs: 1.0
+  omega_q: [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]  # equal, K=8
+
+otfs:
+  fc: 2.8e+10
+  B: 1.0e+6
+  delta_f: 1.5625e+4
+  M: 64
+  N: 16
+  T_sym: 6.4e-5
+  g_tx_dBi: 16.0
+  g_rx_dBi: 16.0
+  n_cpi: 128
+
+channel:
+  NF: 4.0
+  use_los_prob: true
+  los_a: 4.88
+  los_b: 0.43
+  eta_los_dB: 0.1
+  eta_nlos_dB: 21.0
+  use_swerling: false
+  kT: 4.0e-21
+  ric_K: 6.0
+
+detection:
+  P_FA: 0.001
+  g_min: 0.5
+  K_q_max: 3
+  B_q: 64
+  P_D_min: 0.2
+  T_report: 0.005
+
+p0_solver:
+  capacity_per_rx: 256
+  latency_max: 0.005
+
+marl:
+  hidden_layers: [256, 256]
+  lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo_clip: 0.1
+  ppo_epochs: 2
+  rollout_steps: 2048
+  minibatch_size: 256
+  entropy_init: 0.03
+  entropy_final: 0.005
+  entropy_decay_frames: 500000
+  eta_mc: 0.5
+  use_distance_shaping: false
+  shape_w: 0.01
+  lambda_report: 1.0e-5       # lower: 8 UAVs → comm cost adds up faster
+  alpha_pd: 0.5
+  lambda_report_comm: 1.0e-5
+  bc_beta_init: 0.05
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  lagrangian_lr: 0.002
+  lagrangian_max: 1.0
+  target_kl: 0.02
+  num_episodes: 1000
+  num_envs: 4                  # reduced: 8 agents × 4 envs = 32 agents/batch
+  learn_roles: false
+  assignment_hold_frames: 5
+  actor_decision_interval: 5
+  p0_uses_belief: false
+  belief_detection_sampling: false
+  eval_seeds: [10001, 10002, 10003, 10004, 10005]
+  early_stop: true
+  eval_interval: 50
+  eval_episodes: 5
+  early_stop_patience: 12
+  early_stop_min_delta: 0.005
+  centralized_critic: true
+  structured_actor: true
+  rel_features: true
+  obs_history_frames: 1
+  # Full/EH experiment: turn off learned communication (isolation test).
+  # Comm head, comm_proj, gate, intent_head are frozen; comm_msgs zeroed;
+  # loss_comm and loss_intent excluded from total loss.
+  # Full PPO: all modules trainable, learned communication disabled.
+  learned_comm_mode: 'off'
+  use_per_module_lr: true
+  freeze_attention: false
+
+seeds: [42, 123, 456, 789, 1024]

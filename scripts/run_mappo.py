@@ -23,6 +23,10 @@ def main():
     ap.add_argument("--warm-start", default=None,
                     help="path to an actor state_dict (e.g. results/warmstart_actor.pt) to "
                          "initialize the shared actor before PPO (see scripts/dagger_warmstart.py)")
+    ap.add_argument("--warm-start-mode", default="direct",
+                    choices=["direct", "residual"],
+                    help="direct: load into StructuredActorNetwork (Full/EH default). "
+                         "residual: wrap in ResidualActor (legacy safe fine-tuning).")
     ap.add_argument("--warmstart-lr", type=float, default=None,
                     help="override LR when warm-starting (default: config.marl.lr). "
                          "3e-5 recommended for BC warmstart to keep KL within trust region.")
@@ -96,19 +100,22 @@ def main():
         print(f"warm-started actor{'+critic' if 'critic' in ckpt else ''} from {args.warm_start}"
               f"  (σ=1, MSE BC β={config.marl.bc_beta_init})")
 
-    # Wrap in ResidualActor for safe fine-tuning (R2/R3)
+    # Warm-start mode
     if args.warm_start:
-        from uav_isac.agents.residual_actor import ResidualActor
-        base_actor = agents[0].actor
-        residual = ResidualActor(base_actor, max_dp=config.uav.v_max * config.scenario.dt, delta_max=0.06)
-        for agent in agents:
-            agent.actor = residual
-            # Recreate optimizer for residual params only
-            agent.actor_optimizer = torch.optim.Adam(
-                residual.residual.parameters(), lr=train_lr)
-        print(f"ResidualActor: δ_max=0.03, base frozen, {sum(p.numel() for p in residual.residual.parameters())} trainable params")
+        if args.warm_start_mode == "residual":
+            from uav_isac.agents.residual_actor import ResidualActor
+            base_actor = agents[0].actor
+            residual = ResidualActor(base_actor, max_dp=config.uav.v_max * config.scenario.dt, delta_max=0.06)
+            for agent in agents:
+                agent.actor = residual
+                agent.actor_optimizer = torch.optim.Adam(
+                    residual.residual.parameters(), lr=train_lr)
+            print(f"ResidualActor: δ_max=0.03, base frozen, {sum(p.numel() for p in residual.residual.parameters())} trainable params")
+        else:
+            # direct: already loaded into StructuredActorNetwork, no wrapping
+            print(f"Warm-start mode=direct: actor loaded as-is (no ResidualActor wrap)")
 
-    # BC anchor: skip for ResidualActor (DAgger base IS the anchor)
+    # BC anchor: skip for warm-started actors
     bc_actor = None
     if args.warm_start and not action_space.structured_actor:
         bc_actor = MAPPOAgent(agent_id=0, obs_dim=obs_dim, global_state_dim=global_dim,

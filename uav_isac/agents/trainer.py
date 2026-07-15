@@ -190,6 +190,12 @@ class MAPPTrainer:
         # ═══════════════════════════════════════════════════════════════
         self._comm_mode = getattr(ma, 'learned_comm_mode', 'on')
         self._comm_off = (self._comm_mode == 'off')
+
+    def _effective_comm(self, comm_msgs: torch.Tensor) -> torch.Tensor:
+        """Return zeroed comm if comm_off, else original. Single entry point."""
+        if self._comm_off:
+            return torch.zeros_like(comm_msgs)
+        return comm_msgs
         freeze_attn = getattr(ma, 'freeze_attention', False)
         use_per_lr = getattr(ma, 'use_per_module_lr', False)
 
@@ -335,6 +341,9 @@ class MAPPTrainer:
             dp_mean, dp_log_std, role_logits, comm_msgs, _pd_pred, h_new = self.agents[0].actor(
                 self._obs_gpu[:N*K], h_prev_batch)
 
+            # Apply comm mode BEFORE any downstream use (rollout critic, env, buffer)
+            comm_msgs = self._effective_comm(comm_msgs)
+
             # P0 FIX: save h_prev numpy per env for buffer storage.
             # h_prev_list is ordered: env0_k0_nbr0, env0_k0_nbr1, ..., env0_k1_nbr0, ...
             # Reshape to (N, K, K-1, D) then index per env.
@@ -343,9 +352,7 @@ class MAPPTrainer:
                 h_prev_arr = np.stack(h_prev_list).reshape(N, K, K-1, -1)
 
             # Store comm + GRU hidden state per-neighbor for next frame
-            comm_np = comm_msgs.detach().cpu().numpy()  # (N*K, 16)
-            if self._comm_off:
-                comm_np[:] = 0.0  # zero all communication messages
+            comm_np = comm_msgs.detach().cpu().numpy()  # (N*K, 16) — already effective_comm'd
             h_new_np = h_new.cpu().numpy() if h_new is not None else None
             if h_new_np is not None:
                 h_new_np = h_new_np.reshape(N, K, K-1, -1)
@@ -569,6 +576,7 @@ class MAPPTrainer:
             # Forward actor on final obs WITH final GRU state
             _, _, _, final_comm, _, _ = self.agents[0].actor(
                 self._obs_gpu[:N*K], final_h_batch)
+            final_comm = self._effective_comm(final_comm)
             final_comm_agg = final_comm.reshape(N, K, -1).mean(dim=1).repeat_interleave(K, dim=0)
 
             if self.centralized_critic:
