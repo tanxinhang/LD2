@@ -113,5 +113,12 @@ marl:
   structured_actor: true
   rel_features: true
   obs_history_frames: 1
+  # Full/EH experiment: turn off learned communication (isolation test).
+  # Comm head, comm_proj, gate, intent_head are frozen; comm_msgs zeroed;
+  # loss_comm and loss_intent excluded from total loss.
+  learned_comm_mode: 'off'
+  # Per-module LR: isolates Attention trainability as the only variable
+  # between Full and EH (both use encoder=1e-5, head=5e-5).
+  use_per_module_lr: true
 
 seeds: [42, 123, 456, 789, 1024]

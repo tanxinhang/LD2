@@ -185,23 +185,47 @@ class MAPPTrainer:
         self._bc_beta_init = getattr(ma, 'bc_beta_init', 0.05)
         self._bc_beta = self._bc_beta_init
 
-        # S1: Selective plasticity — freeze Attention, per-module LR
-        if getattr(ma, 'freeze_attention', False):
-            # P0 FIX: freeze both attn.* AND attn_norm.* (LayerNorm after attention).
-            # Previously attn_norm was missed because its name doesn't start with 'attn.'
-            enc_params, head_params, attn_params = split_param_groups(
-                agents[0].actor.named_parameters()
-            )
+        # ═══════════════════════════════════════════════════════════════
+        # S1: Selective plasticity + communication mode
+        # ═══════════════════════════════════════════════════════════════
+        self._comm_mode = getattr(ma, 'learned_comm_mode', 'on')
+        self._comm_off = (self._comm_mode == 'off')
+        freeze_attn = getattr(ma, 'freeze_attention', False)
+        use_per_lr = getattr(ma, 'use_per_module_lr', False)
+
+        enc_params, head_params, attn_params = split_param_groups(
+            agents[0].actor.named_parameters())
+
+        if self._comm_off:
+            # Freeze all communication-related heads
+            comm_head_names = ['comm_head.', 'comm_proj.', 'gate.', 'intent_head.']
+            for n, p in agents[0].actor.named_parameters():
+                if any(n.startswith(prefix) for prefix in comm_head_names):
+                    p.requires_grad_(False)
+
+        if freeze_attn:
             for p in attn_params:
                 p.requires_grad_(False)
-            agents[0].actor_optimizer = torch.optim.Adam([
-                {'params': enc_params, 'lr': 1e-5},
-                {'params': head_params, 'lr': 5e-5},
-            ])
-            print(f'[S1] Attention frozen (incl. attn_norm). '
-                  f'Encoder LR=1e-5 ({len(enc_params)} params), '
-                  f'Heads LR=5e-5 ({len(head_params)} params), '
-                  f'Frozen attn={len(attn_params)} params')
+
+        # Build optimizer with per-module LR when requested.
+        # Full:  encoder=1e-5, attention=1e-5, head=5e-5
+        # EH:    encoder=1e-5, attention=0,    head=5e-5
+        # This isolates Attention trainability as the ONLY variable.
+        if use_per_lr or freeze_attn:
+            attn_lr = 0.0 if freeze_attn else 1e-5
+            param_groups = [
+                {'params': [p for p in enc_params if p.requires_grad], 'lr': 1e-5},
+                {'params': [p for p in attn_params if p.requires_grad], 'lr': attn_lr},
+                {'params': [p for p in head_params if p.requires_grad], 'lr': 5e-5},
+            ]
+            # Filter empty groups
+            param_groups = [g for g in param_groups if len(g['params']) > 0]
+            agents[0].actor_optimizer = torch.optim.Adam(param_groups)
+            frozen_count = sum(1 for p in agents[0].actor.parameters() if not p.requires_grad)
+            print(f'[S1] comm={self._comm_mode} freeze_attn={freeze_attn} '
+                  f'per_module_lr={use_per_lr or freeze_attn} '
+                  f'enc_lr=1e-5 attn_lr={attn_lr} head_lr=5e-5 '
+                  f'frozen={frozen_count} params')
 
         # CVaR target-tail-risk constraint
         self._cvar_tau = getattr(ma, 'cvar_tau', 0.0)     # 0=disabled
@@ -320,6 +344,8 @@ class MAPPTrainer:
 
             # Store comm + GRU hidden state per-neighbor for next frame
             comm_np = comm_msgs.detach().cpu().numpy()  # (N*K, 16)
+            if self._comm_off:
+                comm_np[:] = 0.0  # zero all communication messages
             h_new_np = h_new.cpu().numpy() if h_new is not None else None
             if h_new_np is not None:
                 h_new_np = h_new_np.reshape(N, K, K-1, -1)
@@ -714,23 +740,25 @@ class MAPPTrainer:
                     ref_kl_loss = kl_per_dim.mean()
                 bc_loss = ref_kl_loss  # replace MSE BC with KL anchor
 
-                # Comm loss: target variance sweet spot.
-                # Comm: diversity with circuit breaker (prevents cVar→1.0 saturation)
-                comm_var = comm_batch.var(dim=0).mean()
-                comm_coeff = 0.001 if comm_var > 0.05 else 0.01
-                loss_comm = -comm_coeff * comm_var
+                # Comm loss: disabled when learned_comm_mode='off'
+                if self._comm_off:
+                    loss_comm = torch.tensor(0.0, device=self.device)
+                else:
+                    comm_var = comm_batch.var(dim=0).mean()
+                    comm_coeff = 0.001 if comm_var > 0.05 else 0.01
+                    loss_comm = -comm_coeff * comm_var
 
-                # Intention: force comm to encode "which target I'm flying toward"
-                if hasattr(agent.actor, 'intent_head'):
-                    intent_logits = agent.actor.intent_head(comm_batch)
-                    Q = self.Q
-                    target_dists = []
-                    for q in range(Q):
-                        offset = 8 + 9*Q + 8*q + 2
-                        target_dists.append(mb_obs[:, offset:offset+1])
-                    true_target = torch.cat(target_dists, dim=-1).argmin(dim=-1)
-                    loss_intent = torch.nn.functional.cross_entropy(intent_logits, true_target)
-                    loss_comm = loss_comm + 0.05 * loss_intent
+                    # Intention: force comm to encode "which target I'm flying toward"
+                    if hasattr(agent.actor, 'intent_head'):
+                        intent_logits = agent.actor.intent_head(comm_batch)
+                        Q = self.Q
+                        target_dists = []
+                        for q in range(Q):
+                            offset = 8 + 9*Q + 8*q + 2
+                            target_dists.append(mb_obs[:, offset:offset+1])
+                        true_target = torch.cat(target_dists, dim=-1).argmin(dim=-1)
+                        loss_intent = torch.nn.functional.cross_entropy(intent_logits, true_target)
+                        loss_comm = loss_comm + 0.05 * loss_intent
 
                 # Total loss
                 loss = (

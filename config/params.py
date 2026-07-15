@@ -165,6 +165,13 @@ class MARLParams:
     # CTDE centralized critic (MAPPO, critic sees global state) vs decentralized
     # critic (IPPO, critic sees only local obs). de Witt et al. 2020 / Yu et al. 2022.
     centralized_critic: bool = True
+    # Communication mode. 'off' = zero comm messages, freeze comm-related heads,
+    # no comm loss / intent loss. Used for Full/EH isolation experiments.
+    # 'on' (default) = learned communication.
+    learned_comm_mode: str = 'on'
+    # Per-module LR: encoder=1e-5, attention=1e-5, head=5e-5 (Full).
+    # When freeze_attention=True: attention LR→0. False = single LR for all.
+    use_per_module_lr: bool = False
 
 
 @dataclass
