@@ -218,7 +218,42 @@ python scripts/train_dagger_variants.py --mode all \
 
 ---
 
-## 8. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
+## 8. Full/EH 长期对照实验 (2026-07-15)
+
+### 实验设计
+
+```bash
+# Full PPO (Attention trainable)
+python scripts/run_mappo.py \
+  --config config/exp_800_q4_full.yaml \
+  --warm-start results/dagger_variants/dagger_D1.pt \
+  --warm-start-mode direct --seed 42
+
+# EH PPO (Attention frozen)
+python scripts/run_mappo.py \
+  --config config/exp_800_q4_eh.yaml \
+  --warm-start results/dagger_variants/dagger_D1.pt \
+  --warm-start-mode direct --seed 42
+```
+
+| | Encoder LR | Attention LR | Head LR | Comm |
+|---|---|---|---|---|
+| **Full** | 1e-5 | 1e-5 | 5e-5 | off |
+| **EH** | 1e-5 | **0** | 5e-5 | off |
+
+唯一变量：Attention 是否参与训练。`learned_comm_mode='off'` 关闭通信消息、损失和 comm head 梯度。
+
+### Seed=42 结果 (300 episodes)
+
+| | D1 Init | Full (best) | EH (best) |
+|---|---|:---:|:---:|
+| steady | 0.501 | 0.501 | 0.503 |
+| weak3 | 0.334 | 0.334 | 0.337 |
+
+PPO 不再破坏 DAgger。300 次更新后策略保持稳定，entropy 缓慢下降未塌缩。
+Full 与 EH 在单 seed 下差异不显著。需要 3 seeds 做 paired bootstrap。
+
+## 9. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
 
 修复 GRU/PPO 状态一致性后，所有基于 PPO 的实验结论需要用修复后代码重新验证。建议验证矩阵：
 

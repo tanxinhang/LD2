@@ -36,7 +36,9 @@
 
 **当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度,正式训练前需决断):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码、默认场景过易、长期训练稳定性待验证。
 
-**2026-07-14 重要更正**:此前所有 PPO 训练结果均在 GRU/PPO 状态不一致导致的非法 PPO ratio 下测得。修复后验证:1 次 PPO 更新不再破坏 DAgger 策略(Δweak3 < 0.005)。详见 `KNOWN_ISSUES.md A0` 和 `审计报告_逐层失效定位.md` 顶部的更正说明。
+**2026-07-14 重要更正**:此前所有 PPO 训练结果均在 GRU/PPO 状态不一致导致的非法 PPO ratio 下测得。修复后验证:1 次 PPO 更新不再破坏 DAgger 策略(Δweak3 < 0.005)。
+
+**2026-07-15 Full/EH 长期对照**:Seed=42, 300 episodes。PPO 不再破坏 DAgger（steady 保持 0.48-0.50），Full 与 EH 差异在噪声范围内。详见 `KNOWN_ISSUES.md` 和 `TRAINING.md §8`。
 
 ---
 

@@ -48,6 +48,29 @@ D1 在 iter 2-4 的 val weak3 比 D0 高 ~0.01（单 seed，不显著）。
 
 ---
 
+## Full/EH 长期对照实验 (Seed=42, 2026-07-15)
+
+**配置**：`exp_800_q4_full.yaml` / `exp_800_q4_eh.yaml`，D1 warm-start (direct mode)，learned communication disabled，per-module LR。Full 与 EH 唯一变量：Attention LR (1e-5 vs 0)。
+
+**Seed=42 结果** (300 episodes，early-stop 未触发)：
+
+| | D1 Init | Full (best) | Full (Ep 250) | EH (best) | EH (Ep 250) |
+|---|---|:---:|:---:|:---:|:---:|
+| steady | 0.501 | 0.501 | 0.497 | 0.503 | 0.483 |
+| weak3 | 0.334 | 0.334 | 0.329 | 0.337 | 0.311 |
+| PPO RATIO | — | OK (1e-5) | — | OK (8e-6) | — |
+| entropy | 2.84 | — | 2.79 | — | 2.79 |
+| KL | — | — | <0.001 | — | <0.001 |
+
+**核心结论**：
+1. **PPO 不再破坏 DAgger。** 300 次 on-policy 更新后 steady 保持在 0.48-0.50，weak3 保持在 0.31-0.34。修复前 1 次更新就崩溃到 random 水平。
+2. **Full 和 EH 在 seed=42 下差异在噪声范围内。** Entropy 缓慢下降但未塌缩，KL 持续受控。
+3. **Attention 冻结在此实验设定下未显示显著稳定性优势。** 需要 3 seeds 确认。
+
+**配置**：`config/exp_800_q4_full.yaml`, `config/exp_800_q4_eh.yaml`。运行命令见 `TRAINING.md §8`。
+
+---
+
 ## 训练崩塌归因(诊断闭环,2026-06; 2026-07-14 更正)
 
 **现象**:MAPPO 训练后 eval `steady_P_D`≈0.018、`avg_P_D`≈0.12(**低于随机 0.16、低于静止 0.20**);`entropy` Ep50 塌到下限、`kl`→0(策略冻结);训练日志显示 `avg_P_D` 从 Ep0 的 0.21 随熵塌缩**一路下降**。无论 400/800、oracle/belief 都同样崩。
