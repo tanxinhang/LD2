@@ -88,40 +88,39 @@ Online eval (5-seed): Full weak3 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
 
 ---
 
-## S4 Target-wise Advantage 2×2 设计 (待实施)
+## S4 Target-wise Advantage (已实现, 2026-07-16)
 
-Full/EH 已确认 Attention 冻结非关键。后续固定 Full PPO（Attention trainable, comm off, encoder/attn/head LR = 1e-5/1e-5/5e-5）。
+**实现** (commit `62d92a0`)：
+- `config/params.py`: `marl.advantage_mode: 'scalar' | 'target_wise'`
+- `trainer.py`: `_compute_target_wise_advantage(obs, per_target_advantages)`
+  - Inverse-distance softmax responsibility: ρ = softmax(−d / 50m), detached
+  - Per-target independent advantage normalization
+  - Weighted sum → full-batch re-normalization
+- `trainer.py`: `update()` 中自动聚合 when mode='target_wise'
 
-**2×2 消融**：
+**50-episode 快速测试 (D1, seed=42)**：
 
-| Case | DAgger Init | Actor Advantage |
-|------|:---:|:---:|
-| S4-A | D0 (no PD_hist) | scalar |
-| S4-B | D0 (no PD_hist) | target-wise |
-| S4-C | D1 (RX-only local-PD) | scalar |
-| S4-D | D1 (RX-only local-PD) | target-wise |
+| | steady | weak3 | worst | PPO RATIO |
+|---|---|:---:|:---:|:---:|
+| scalar | 0.4984 | 0.3311 | 0.0037 | OK (8e-6) |
+| target_wise | 0.4952 | 0.3269 | 0.0035 | OK (3e-6) |
+| Δ | −0.0032 | −0.0042 | −0.0002 | — |
 
-**目标级 advantage 形式**：
+Δ 在单 seed 噪声范围内（|Δ| < 0.005）。距离责任权重可能与 nearest-target teacher 行为高度重合，不提供新信息。
 
-A^{TW}_{t,k} = Σ_q ρ_{t,k,q} · Ã_{t,q}
+**2×2 消融设计**：Full/EH 已确认 Attention 冻结非关键。固定 Full PPO。
 
-- Ã_{t,q}：每目标独立标准化
-- ρ_{t,k,q}：UAV-target 责任权重（detached inverse-distance softmax）
-- 第一版不引入 counterfactual m_{kq}，仅用几何距离 soft assignment
+| Case | DAgger Init | Advantage | 状态 |
+|------|:---:|:---:|:---:|
+| S4-A | D0 | scalar | 待跑 |
+| S4-B | D0 | target_wise | 待跑 |
+| S4-C | D1 | scalar | 50-ep 完成 |
+| S4-D | D1 | target_wise | 50-ep 完成 |
 
-**主要对比量**：
-- Δ_{TW|D1} = D − C：target-wise 是否让 D1 local-PD 产生价值
-- Δ_{interaction} = (D−C) − (B−A)：PD_hist × target-wise 交互
-- 约束：steady 下降 ≤ 0.01
+**判据**：D vs C weak3 ↑ ≥ 0.02, worst ↑ ≥ 0.01, steady 不降 ≥ 0.01, ≥2/3 seeds 同方向。
 
-**判据**（预注册）：
-- D1-target-wise vs D1-scalar: weak3 ↑ ≥ 0.02, worst ↑ ≥ 0.01
-- 至少 2/3 training seeds 同方向
-- steady 不下降超过 0.01
-
-若仅 D1-target-wise 改善且 interaction > 0：local-PD 在目标级信用信号下被激活。
-
-**注意**：D0/D1 为独立训练的 DAgger checkpoint，此消融检验的是 "initialization variant × advantage type"，非纯粹的 local-PD 特征因果贡献。
+**后续方向**：若距离责任无显著效果，升级为 P0 marginal contribution 责任权重：
+m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 
 ---
 

@@ -259,7 +259,35 @@ Online weak3: Full 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
 PPO 不再破坏 DAgger。Full 与 EH 在 3 seeds 下表现等价。
 GRU/PPO 状态一致性 bug 是此前崩塌的根因，冻结 Attention 不必要。
 
-## 9. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
+## 9. S4 Target-wise Advantage (2026-07-16)
+
+### 配置
+
+```yaml
+marl:
+  advantage_mode: 'target_wise'   # 'scalar' (default) | 'target_wise'
+```
+
+### 实现
+
+`trainer._compute_target_wise_advantage(obs, per_target_advantages)`：
+1. 从 obs 提取 per-target 距离
+2. Inverse-distance softmax 责任权重：ρ = softmax(−d/50m), detached
+3. Per-target advantage 独立标准化
+4. A^{TW} = Σ ρ · Ã → full-batch 再标准化
+
+### 50-ep D1 Quick Test
+
+| | steady | weak3 | PPO RATIO |
+|---|---|:---:|:---:|
+| scalar | 0.498 | 0.331 | OK |
+| target_wise | 0.495 | 0.327 | OK |
+| Δ | −0.003 | −0.004 | — |
+
+Δ 在单 seed 噪声内。距离责任可能与 nearest-target teacher 重合。
+后续若无效则升级为 P0 marginal contribution 责任。
+
+## 10. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
 
 修复 GRU/PPO 状态一致性后，所有基于 PPO 的实验结论需要用修复后代码重新验证。建议验证矩阵：
 
