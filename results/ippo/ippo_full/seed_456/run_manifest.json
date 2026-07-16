@@ -1,13 +1,13 @@
 {
   "git_commit": "8086ccc57e547531b8bfcf6b71867b8ae34e0917",
   "config": "config/exp_800_q4_full.yaml",
-  "seed": 42,
+  "seed": 456,
   "K": 4,
   "Q": 4,
   "warm_start": "results/dagger_variants/dagger_D1.pt",
   "warm_start_mode": "direct",
   "centralized_critic": false,
   "learned_comm_mode": "off",
-  "best_steady_P_D": 0.5012745942285093,
+  "best_steady_P_D": 0.5033674866452656,
   "total_frames": 612000
 }
