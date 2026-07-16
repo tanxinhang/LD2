@@ -757,6 +757,10 @@ class MAPPTrainer:
                     mb_base = global_states[mb_gs_indices]
                 else:
                     mb_base = mb_obs   # IPPO: local observation
+                    # IPPO critic expects obs_dim + K + comm_dim.
+                    # Buffer stores global_state+comm; for IPPO, pad local obs with comm.
+                    comm_pad = torch.zeros(len(mb_idx), 16, device=self.device)
+                    mb_base = torch.cat([mb_base, comm_pad], dim=-1)
                 mb_gs = torch.cat([mb_base, agent_oh_mb], dim=-1)
 
                 mb_actions_dp = actions_dp[mb_idx]
