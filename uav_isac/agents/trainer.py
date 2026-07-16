@@ -191,6 +191,7 @@ class MAPPTrainer:
         self._comm_mode = getattr(ma, 'learned_comm_mode', 'on')
         self._comm_off = (self._comm_mode == 'off')
         self._adv_mode = getattr(ma, 'advantage_mode', 'scalar')
+        self._resp_tau_m = getattr(ma, 'target_responsibility_tau_m', 50.0)
         freeze_attn = getattr(ma, 'freeze_attention', False)
         use_per_lr = getattr(ma, 'use_per_module_lr', False)
 
@@ -700,7 +701,8 @@ class MAPPTrainer:
         if (self._adv_mode == 'target_wise'
                 and 'per_target_advantages' in data):
             tw_advantages = self._compute_target_wise_advantage(
-                obs, data['per_target_advantages'].to(self.device))
+                obs, data['per_target_advantages'].to(self.device),
+                tau_d=self._resp_tau_m)
 
         # ═══════════════════════════════════════════════════════════════
         # P0 ASSERTION: old-log-prob consistency check.

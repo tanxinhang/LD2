@@ -126,6 +126,49 @@ def test_minibatch_invariance():
             f"minibatch norm may be equivalent to full-batch (unlikely with randn data)"
 
 
+def test_trainer_target_wise_end_to_end():
+    """Integration: real trainer._compute_target_wise_advantage with known dist."""
+    from config.params import load_config
+    from uav_isac.agents.trainer import MAPPTrainer
+    from uav_isac.environment.env_wrapper import UAVISACEnv
+    from uav_isac.environment.action import ActionSpace
+    from uav_isac.agents.mappo_agent import MAPPOAgent
+
+    cfg = load_config('config/exp_800_q4_full.yaml')
+    cfg.marl.advantage_mode = 'target_wise'
+    cfg.marl.num_envs = 1
+    env = UAVISACEnv(config=cfg, seed=42)
+    K, Q = cfg.scenario.K, cfg.scenario.Q
+    aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt)
+    aspace.num_targets = Q; aspace.structured_actor = True; aspace.structured_entity_dim = 64
+    od = env.core.obs_builder.get_obs_dim()
+    gd = env.core.obs_builder.get_global_state_dim()
+    agents = [MAPPOAgent(k, od, gd, aspace, K, num_targets=Q,
+               hidden_layers=cfg.marl.hidden_layers, lr=cfg.marl.lr, device='cpu') for k in range(K)]
+    for k in range(1,K): agents[k].actor=agents[0].actor; agents[k].critic=agents[0].critic
+    trainer = MAPPTrainer(env=env, agents=agents, config=cfg, device='cpu')
+
+    B = 32
+    obs = torch.randn(B, od)
+    # Inject known distances at the correct offsets
+    dist_m = torch.tensor([10.0, 100.0, 300.0, 600.0])
+    diag_m = math.hypot(*cfg.scenario.region_size)
+    for q in range(Q):
+        offset = 8 + Q * 9 + q * 8 + 2
+        obs[:, offset] = dist_m[q] / diag_m
+
+    pt_adv = torch.randn(B, Q)
+    result = trainer._compute_target_wise_advantage(obs, pt_adv, tau_d=50.0)
+
+    assert result.shape == (B,)
+    assert torch.isfinite(result).all()
+    # Full-batch normalized: mean≈0, std≈1
+    assert result.mean().abs().item() < 1e-5, f"mean={result.mean():.2e}, expected ~0"
+    assert result.std(unbiased=False).item() == pytest.approx(1.0, abs=1e-5), \
+        f"std={result.std(unbiased=False):.4f}, expected ~1.0"
+    env.close()
+
+
 @pytest.mark.parametrize("Q", [1, 4, 8])
 def test_dynamic_Q(Q):
     """Target-wise advantage must work for any Q without hardcoded offsets."""

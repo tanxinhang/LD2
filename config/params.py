@@ -179,6 +179,9 @@ class MARLParams:
     # target_wise: per-target advantages aggregated via UAV-target
     # responsibility weights (inverse-distance softmax, detached).
     advantage_mode: str = 'scalar'
+    # Temperature for inverse-distance target responsibility (meters).
+    # Only used when advantage_mode='target_wise'.
+    target_responsibility_tau_m: float = 50.0
 
 
 @dataclass
