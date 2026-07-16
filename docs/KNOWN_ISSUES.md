@@ -98,15 +98,17 @@ Online eval (5-seed): Full weak3 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
   - Weighted sum → full-batch re-normalization
 - `trainer.py`: `update()` 中自动聚合 when mode='target_wise'
 
-**50-episode 快速测试 (D1, seed=42)**：
+**修复后 50-ep 测试 (D1, seed=42)**：
 
-| | steady | weak3 | worst | PPO RATIO |
-|---|---|:---:|:---:|:---:|
-| scalar | 0.4984 | 0.3311 | 0.0037 | OK (8e-6) |
-| target_wise | 0.4952 | 0.3269 | 0.0035 | OK (3e-6) |
-| Δ | −0.0032 | −0.0042 | −0.0002 | — |
+| | steady | weak3 | PPO RATIO |
+|---|---|:---:|:---:|
+| scalar | 0.4914 | 0.3218 | OK (4e-6) |
+| target_wise | 0.4987 | 0.3316 | OK (6e-6) |
+| Δ (TW−scalar) | **+0.0073** | **+0.0097** | — |
 
-Δ 在单 seed 噪声范围内（|Δ| < 0.005）。距离责任权重可能与 nearest-target teacher 行为高度重合，不提供新信息。
+修复前（错误索引/单位/minibatch norm）Δ 方向为负；修复后方向翻转，target_wise 在 steady 和 weak3 上均略高。差异在单 seed 噪声范围内，需 3 seeds 确认。
+
+**注**：修复前的 50-ep 结果（Δ=−0.004）因实现 bug 已废弃。
 
 **2×2 消融设计**：Full/EH 已确认 Attention 冻结非关键。固定 Full PPO。
 
