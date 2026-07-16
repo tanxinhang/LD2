@@ -190,6 +190,7 @@ class MAPPTrainer:
         # ═══════════════════════════════════════════════════════════════
         self._comm_mode = getattr(ma, 'learned_comm_mode', 'on')
         self._comm_off = (self._comm_mode == 'off')
+        self._adv_mode = getattr(ma, 'advantage_mode', 'scalar')
         freeze_attn = getattr(ma, 'freeze_attention', False)
         use_per_lr = getattr(ma, 'use_per_module_lr', False)
 
@@ -257,6 +258,56 @@ class MAPPTrainer:
         if self._comm_off:
             return torch.zeros_like(comm_msgs)
         return comm_msgs
+
+    def _compute_target_wise_advantage(
+        self, obs: torch.Tensor,
+        per_target_advantages: torch.Tensor,
+        tau_d: float = 50.0,
+    ) -> torch.Tensor:
+        """Aggregate per-target advantages via detached distance responsibility.
+
+        Args:
+            obs: (B, obs_dim) observation batch
+            per_target_advantages: (B, Q) per-target advantages from buffer
+            tau_d: temperature for inverse-distance softmax (meters)
+
+        Returns:
+            target_wise_adv: (B,) aggregated advantage per sample
+        """
+        B = obs.shape[0]
+        Q = per_target_advantages.shape[1]
+
+        # Extract per-target distances from observation.
+        # Target geometry layout per target: dx(1)+dy(1)+dist(1)+sin(1)+cos(1)+d_s1(1)+d_s2(1)+d_s3(1)
+        # Starting at offset: self(8) + physics(3) + Q*(belief 9 + geom 8) = 11 + Q*17
+        # Actually use a simpler approach: parse distances from known obs layout.
+        # Per-target dist is at offset: 8 + Q*9* + q*8 + 2 (after dx, dy)
+        # More reliably: iterate Q targets and extract the 'dist' field.
+        distances = torch.zeros(B, Q, device=obs.device)
+        for q in range(Q):
+            # target belief(9) + geom: dx(1)+dy(1)+dist(1)+...
+            offset = 8 + 3 + Q * 9 + q * 8  # self(8)+phys(3)+beliefs(Q*9)+geometry(q*8)
+            if offset + 2 < obs.shape[1]:
+                distances[:, q] = obs[:, offset + 2].abs()  # dist is 3rd geom field
+
+        # Inverse-distance softmax responsibility (detached)
+        rho = torch.softmax(-distances / tau_d, dim=-1).detach()
+
+        # Per-target advantage: independently normalize each target across batch
+        pt_adv_norm = torch.zeros_like(per_target_advantages)
+        for q in range(Q):
+            aq = per_target_advantages[:, q]
+            aq_mean = aq.mean()
+            aq_std = aq.std() + 1e-8
+            pt_adv_norm[:, q] = (aq - aq_mean) / aq_std
+
+        # Aggregate: weighted sum of normalized per-target advantages
+        target_wise_adv = (rho * pt_adv_norm).sum(dim=-1)
+
+        # Re-normalize to match scalar advantage scale
+        tw_mean = target_wise_adv.mean()
+        tw_std = target_wise_adv.std() + 1e-8
+        return (target_wise_adv - tw_mean) / tw_std
 
     def collect_rollout(self) -> bool:
         """Collect a full rollout with parallel environments for GPU batching.
@@ -699,6 +750,13 @@ class MAPPTrainer:
                 mb_advantages = advantages[mb_idx]
                 mb_returns = returns[mb_idx]
                 mb_old_values = old_values[mb_idx]
+
+                # S4: target-wise advantage aggregation
+                if (self._adv_mode == 'target_wise'
+                        and 'per_target_advantages' in data):
+                    mb_pt_adv = data['per_target_advantages'][mb_idx].to(self.device)
+                    mb_advantages = self._compute_target_wise_advantage(
+                        mb_obs, mb_pt_adv)
 
                 # P0 FIX: pass stored GRU hidden states so PPO ratio compares
                 # distributions conditioned on the SAME h_prev as rollout.

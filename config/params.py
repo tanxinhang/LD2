@@ -175,6 +175,10 @@ class MARLParams:
     # Freeze attention (attn.* + attn_norm.*) — EH mode.
     # Only meaningful when use_per_module_lr=True.
     freeze_attention: bool = False
+    # Advantage mode: 'scalar' (default) or 'target_wise' (S4).
+    # target_wise: per-target advantages aggregated via UAV-target
+    # responsibility weights (inverse-distance softmax, detached).
+    advantage_mode: str = 'scalar'
 
 
 @dataclass
