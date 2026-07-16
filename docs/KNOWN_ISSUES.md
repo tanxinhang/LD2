@@ -98,17 +98,24 @@ Online eval (5-seed): Full weak3 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
   - Weighted sum → full-batch re-normalization
 - `trainer.py`: `update()` 中自动聚合 when mode='target_wise'
 
-**修复后 50-ep 测试 (D1, seed=42)**：
+**3-seed 50-ep 结果 (D1, 2026-07-16)**：
 
-| | steady | weak3 | PPO RATIO |
-|---|---|:---:|:---:|
-| scalar | 0.4914 | 0.3218 | OK (4e-6) |
-| target_wise | 0.4987 | 0.3316 | OK (6e-6) |
-| Δ (TW−scalar) | **+0.0073** | **+0.0097** | — |
+| Seed | scalar steady | scalar weak3 | tw steady | tw weak3 | Δ steady | Δ weak3 |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 42 | 0.5026 | 0.3369 | 0.5030 | 0.3373 | +0.000 | +0.000 |
+| 123 | 0.4983 | 0.3311 | 0.4918 | 0.3224 | −0.007 | −0.009 |
+| 456 | 0.4962 | 0.3283 | 0.4455 | 0.2607 | **−0.051** | **−0.068** |
 
-修复前（错误索引/单位/minibatch norm）Δ 方向为负；修复后方向翻转，target_wise 在 steady 和 weak3 上均略高。差异在单 seed 噪声范围内，需 3 seeds 确认。
+PPO RATIO 全部 OK。方向不一致（2/3 seeds 负向），seed 456 严重退化（steady −0.051）。
 
-**注**：修复前的 50-ep 结果（Δ=−0.004）因实现 bug 已废弃。
+**结论**：**Distance responsibility target-wise advantage 在 3 seeds 下未通过稳定性检验。** 不可替代 scalar advantage。
+
+**可能根因**：per-target 独立标准化在目标 advantage 方差极小时放大噪声；距离责任与优势方向可能冲突。
+
+**后续方向**：
+1. Per-target advantage clip/正则（minimum std floor）
+2. 升级为 P0 marginal contribution 责任权重：m_{kq} = P_D(all)_q − P_D(without k)_q
+3. 暂时搁置 S4，先推进其他实验（K=8/Q=8、IPPO baseline、通信开启对照）
 
 **2×2 消融设计**：Full/EH 已确认 Attention 冻结非关键。固定 Full PPO。
 

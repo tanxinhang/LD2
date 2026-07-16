@@ -276,16 +276,18 @@ marl:
 3. Per-target advantage 独立标准化
 4. A^{TW} = Σ ρ · Ã → full-batch 再标准化
 
-### 50-ep D1 Quick Test
+### 3-Seed 50-ep D1 Test (2026-07-16)
 
-| | steady | weak3 | PPO RATIO |
-|---|---|:---:|:---:|
-| scalar | 0.498 | 0.331 | OK |
-| target_wise | 0.495 | 0.327 | OK |
-| Δ | −0.003 | −0.004 | — |
+| Seed | scalar steady | scalar weak3 | tw steady | tw weak3 |
+|:---:|:---:|:---:|:---:|:---:|
+| 42 | 0.503 | 0.337 | 0.503 | 0.337 |
+| 123 | 0.498 | 0.331 | 0.492 | 0.322 |
+| 456 | 0.496 | 0.328 | 0.446 | 0.261 |
 
-Δ 在单 seed 噪声内。距离责任可能与 nearest-target teacher 重合。
-后续若无效则升级为 P0 marginal contribution 责任。
+Seed 456 target_wise 严重退化 (Δ steady −0.051)。
+方向不一致，distance responsibility 未通过稳定性检验。
+
+**结论**：暂不替代 scalar advantage。后续方向：P0 marginal contribution 责任或搁置 S4。
 
 ## 10. PPO Ratio 重验证协议 (P0 fix, 2026-07-14)
 
