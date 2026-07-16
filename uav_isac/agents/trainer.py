@@ -266,47 +266,54 @@ class MAPPTrainer:
     ) -> torch.Tensor:
         """Aggregate per-target advantages via detached distance responsibility.
 
+        Pre-computed ONCE before PPO epochs on the full batch; minibatch
+        then indexes into the result. This keeps advantages invariant to
+        minibatch split and shuffle order.
+
         Args:
-            obs: (B, obs_dim) observation batch
+            obs: (B, obs_dim) observation batch (full rollout, flattened)
             per_target_advantages: (B, Q) per-target advantages from buffer
             tau_d: temperature for inverse-distance softmax (meters)
 
         Returns:
             target_wise_adv: (B,) aggregated advantage per sample
         """
+        import math
         B = obs.shape[0]
         Q = per_target_advantages.shape[1]
 
-        # Extract per-target distances from observation.
-        # Target geometry layout per target: dx(1)+dy(1)+dist(1)+sin(1)+cos(1)+d_s1(1)+d_s2(1)+d_s3(1)
-        # Starting at offset: self(8) + physics(3) + Q*(belief 9 + geom 8) = 11 + Q*17
-        # Actually use a simpler approach: parse distances from known obs layout.
-        # Per-target dist is at offset: 8 + Q*9* + q*8 + 2 (after dx, dy)
-        # More reliably: iterate Q targets and extract the 'dist' field.
-        distances = torch.zeros(B, Q, device=obs.device)
+        # Observation layout (with rel_features=True):
+        #   self(8) | beliefs(Q*9) | geometry(Q*8) | physics(3) | ...
+        # Geometry per target: dx, dy, dist_norm, sin, cos, d_s1, d_s2, d_s3
+        # dist_norm = raw_distance / diagonal — need to convert back to meters
+        area_w, area_h = self.cfg.scenario.region_size
+        diag_m = math.hypot(area_w, area_h)
+
+        dist_norm = torch.zeros(B, Q, device=obs.device)
         for q in range(Q):
-            # target belief(9) + geom: dx(1)+dy(1)+dist(1)+...
-            offset = 8 + 3 + Q * 9 + q * 8  # self(8)+phys(3)+beliefs(Q*9)+geometry(q*8)
-            if offset + 2 < obs.shape[1]:
-                distances[:, q] = obs[:, offset + 2].abs()  # dist is 3rd geom field
+            offset = 8 + Q * 9 + q * 8 + 2  # self + beliefs + geom(q) + dist_idx
+            if offset < obs.shape[1]:
+                dist_norm[:, q] = obs[:, offset].abs().clamp(min=1e-8)
+
+        dist_m = dist_norm * diag_m  # normalized → meters
 
         # Inverse-distance softmax responsibility (detached)
-        rho = torch.softmax(-distances / tau_d, dim=-1).detach()
+        rho = torch.softmax(-dist_m / tau_d, dim=-1).detach()
 
         # Per-target advantage: independently normalize each target across batch
         pt_adv_norm = torch.zeros_like(per_target_advantages)
         for q in range(Q):
             aq = per_target_advantages[:, q]
             aq_mean = aq.mean()
-            aq_std = aq.std() + 1e-8
+            aq_std = aq.std(unbiased=False).clamp(min=1e-8)
             pt_adv_norm[:, q] = (aq - aq_mean) / aq_std
 
         # Aggregate: weighted sum of normalized per-target advantages
         target_wise_adv = (rho * pt_adv_norm).sum(dim=-1)
 
-        # Re-normalize to match scalar advantage scale
+        # Re-normalize to match scalar advantage scale (full-batch, once)
         tw_mean = target_wise_adv.mean()
-        tw_std = target_wise_adv.std() + 1e-8
+        tw_std = target_wise_adv.std(unbiased=False).clamp(min=1e-8)
         return (target_wise_adv - tw_mean) / tw_std
 
     def collect_rollout(self) -> bool:
@@ -687,6 +694,14 @@ class MAPPTrainer:
         agent.actor.train()
         agent.critic.train()
 
+        # S4: pre-compute target-wise advantages ONCE before PPO epochs.
+        # This keeps advantages invariant to minibatch split and shuffle.
+        tw_advantages = None
+        if (self._adv_mode == 'target_wise'
+                and 'per_target_advantages' in data):
+            tw_advantages = self._compute_target_wise_advantage(
+                obs, data['per_target_advantages'].to(self.device))
+
         # ═══════════════════════════════════════════════════════════════
         # P0 ASSERTION: old-log-prob consistency check.
         # Verifies that recomputing log-probs with stored h_prev reproduces
@@ -751,12 +766,9 @@ class MAPPTrainer:
                 mb_returns = returns[mb_idx]
                 mb_old_values = old_values[mb_idx]
 
-                # S4: target-wise advantage aggregation
-                if (self._adv_mode == 'target_wise'
-                        and 'per_target_advantages' in data):
-                    mb_pt_adv = data['per_target_advantages'][mb_idx].to(self.device)
-                    mb_advantages = self._compute_target_wise_advantage(
-                        mb_obs, mb_pt_adv)
+                # S4: use pre-computed target-wise advantage (invariant to minibatch)
+                if tw_advantages is not None:
+                    mb_advantages = tw_advantages[mb_idx]
 
                 # P0 FIX: pass stored GRU hidden states so PPO ratio compares
                 # distributions conditioned on the SAME h_prev as rollout.
