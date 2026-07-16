@@ -48,26 +48,32 @@ D1 在 iter 2-4 的 val weak3 比 D0 高 ~0.01（单 seed，不显著）。
 
 ---
 
-## Full/EH 长期对照实验 (Seed=42, 2026-07-15)
+## Full/EH 长期对照实验 (3 seeds, 2026-07-16)
 
-**配置**：`exp_800_q4_full.yaml` / `exp_800_q4_eh.yaml`，D1 warm-start (direct mode)，learned communication disabled，per-module LR，`num_episodes=300`。Full 与 EH 唯一变量：Attention LR (1e-5 vs 0)。
+**配置**：`exp_800_q4_full.yaml` / `exp_800_q4_eh.yaml`，D1 warm-start (direct mode)，learned communication disabled，per-module LR，`num_episodes=300`。唯一变量：Attention LR (1e-5 vs 0)。
 
-**注意**: `D1 Init` (0.501/0.334) 使用 PPO online eval bank (5 seeds, `10001-10005`) 重新评估，与 DAgger 独立 100-episode test score (0.703/0.604) 不可直接比较。跨实验比较需使用同一 test bank。
+**3-Seed 结果** (best_restored steady_P_D)：
 
-**Seed=42 结果** (300 episodes，early-stop 未触发)：
+| Seed | Full | EH |
+|:---:|:---:|:---:|
+| 42 | 0.5023 | 0.5035 |
+| 123 | 0.4994 | 0.5046 |
+| 456 | 0.5028 | 0.5024 |
+| **Mean ± Std** | **0.5015 ± 0.0015** | **0.5035 ± 0.0009** |
 
-| | D1 Init | Full best-restored | EH best-restored |
-|---|---|:---:|:---:|
-| steady | 0.501 | 0.501 | 0.503 |
-| weak3 | 0.334 | 0.334 | 0.337 |
-| PPO RATIO | — | OK (1e-5) | OK (8e-6) |
+Online eval weak3: Full 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
+**Δ(EH−Full): best_steady +0.002, weak3 +0.0025 — 不可区分。**
 
-训练轨迹：entropy 2.84→2.79（缓慢下降未塌缩），KL <0.001 持续受控。EH 在 Ep 250 处 weak3 短暂降至 0.311 后恢复，未观测到灾难性崩塌。
+所有 6 runs PPO RATIO OK (max|diff| < 1e-4)，entropy 缓慢下降未塌缩，KL 持续受控。
 
 **核心结论**：
-1. **PPO 不再破坏 DAgger。** 300 次 on-policy 更新后 best-restored checkpoint 保住 D1 初始化性能。修复前 1 次更新就崩溃到 random 水平。
-2. **在 seed=42 固定 5-episode eval bank 上，Full 与 EH 数值接近，未观察到稳定分离。** 统计显著性待 3 training seeds + 独立 paired test bank 验证。
-3. **Attention 冻结在此实验设定下未显示稳定性优势。** 需要 3 seeds 确认。
+1. **PPO 不再破坏 DAgger。** 修复前 1 次更新就崩溃到 random 水平。
+2. **Full 和 EH 在 3 seeds 下不可区分。** Attention 冻结未提供可测量的稳定性优势。
+3. **GRU/PPO 状态一致性 bug 是此前训练崩塌的根因。** 不需要把冻结 Attention 作为核心算法创新。
+
+**产物**：`results/full_eh/{full,eh}/seed_{42,123,456}/` 含 run_manifest.json、train_metrics.csv、paired_eval.csv。Checkpoint 为本地产物（未入库）。
+
+**注**：D1 Init (0.50) 使用 PPO online eval bank (5 seeds, 10001-10005)，与 DAgger 独立 100-ep test (0.70) 不可直接比较。
 
 **配置**：`config/exp_800_q4_full.yaml`, `config/exp_800_q4_eh.yaml`。运行命令见 `TRAINING.md §8`。
 

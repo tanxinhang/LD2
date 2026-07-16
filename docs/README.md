@@ -34,11 +34,11 @@
 - 默认 400×400 场景对策略**过于简单**:静止/随机已达 `steady_P_D≈0.98`,无可学空间;正式训练应用有 headroom 的 `config/exp_800_q4.yaml`(随机≈0.18,Greedy-Oracle≈0.73)。详见 `EXPERIMENTS.md`。
 - **尚不能下结论**:MAPPO 是否优于 Random/IPPO、CTDE 是否有效、belief 输入是否够、训练是否稳定——这些都要等 800×800/Q=4 的 5-seed 训练结果。
 
-**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码。长期训练稳定性已获 seed=42 单-seed 证据（300 episodes 未崩塌），多-seed 与算法性能提升待验证。
+**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码。PPO 长期稳定性已获 3-seed 证据（Full 与 EH 均不崩塌），算法性能提升方向为 S4 target-wise advantage。
 
 **2026-07-14 重要更正**:此前所有 PPO 训练结果均在 GRU/PPO 状态不一致导致的非法 PPO ratio 下测得。修复后验证:1 次 PPO 更新不再破坏 DAgger 策略(Δweak3 < 0.005)。
 
-**2026-07-15 Full/EH 长期对照**:Seed=42, 300 episodes。PPO 不再破坏 DAgger（steady 保持 0.48-0.50），Full 与 EH 差异在噪声范围内。详见 `KNOWN_ISSUES.md` 和 `TRAINING.md §8`。
+**2026-07-16 Full/EH 3-seed 长期对照**:300 episodes × 3 seeds。PPO 不再破坏 DAgger。Full 与 EH 不可区分（Δbest_steady=+0.002）。GRU/PPO 状态一致性 bug 是此前崩塌的根因，冻结 Attention 不必要。详见 `KNOWN_ISSUES.md`。
 
 ---
 
