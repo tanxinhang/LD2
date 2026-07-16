@@ -194,9 +194,9 @@ m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 - **状态**:已修复。`pd_hist` 从 `_parse_one` 返回，在 `forward()` 中通过新增 `pd_hist_proj` 层投影后作为残差调制加到 target entity encoding。备注了通信假设（当前 PD_hist 在本地 obs 中，若改为融合中心广播需计入通信成本）。
 - **相关文件**:`networks.py`, `observation.py`。
 
-### A0e. Per-target GAE 数据管道就绪 (2026-07-14)
-- **状态**:已完成。`buffer.compute_gae()` 新增 per-target GAE 计算（per-target TD error → per-target advantage）；`get_training_data()` 返回 `per_target_advantages` 和 `per_target_returns`。**Actor loss 仍使用 scalar advantage**，S3c target-wise advantage 集成待后续完成。
-- **相关文件**:`buffer.py`, `mappo_agent.py`, `trainer.py`。
+### A0e. Per-target GAE + Target-wise Advantage (2026-07-16)
+- **状态**:Per-target GAE 管道和 distance-responsibility target-wise advantage aggregation 已实现并测试（3 seeds × 50 eps）。Distance responsibility 未通过稳定性检验（seed 456 退化 Δ=−0.05）。默认继续使用 scalar advantage。S4 搁置，后续方向：P0 marginal contribution 或 IPPO/K=8,Q=8 实验。
+- **相关文件**:`buffer.py`, `trainer.py`, `test_target_wise_advantage.py`。
 
 ### A0f. 验证框架严格化：checkpoint 兼容 + streaming 评估 + 配对实验 (2026-07-14 晚)
 - **现象**:第一轮验证脚本存在四个问题：(1) EH 复用 Full PPO 的 trainer 状态而非独立创建；(2) 旧 DAgger checkpoint 加载时 `pd_hist_proj` 层随机初始化，baseline actor 与 trainer actor 可能得到不同随机权重；(3) 评估调用 `actor(obs)` 无 GRU hidden state，与 rollout 的 recurrent 路径不一致；(4) Full 和 EH 的初始状态不完全相同。

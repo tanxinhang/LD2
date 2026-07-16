@@ -27,15 +27,15 @@
 **当前完成程度(统一表述,避免歧义)。**
 - 环境、物理/几何/检测/belief/约束/奖励、P0 与角色派生逻辑:**已完成并通过环境侧验证**(单元测试)。
 - MAPPO/IPPO 训练代码:**已实现**。
-- `learn_roles=False` + D1 direct warm-start 的端到端 Full/EH 训练已在 seed=42 完成 300 episodes（PPO ratio 正确，策略未崩塌）。多-seed 稳定性与算法性能提升仍待验证。
+- `learn_roles=False` + D1 direct warm-start 的端到端 Full/EH 训练已完成 3-seed × 300 episodes（PPO ratio 正确，策略未崩塌，Full≈EH）。
 
 **当前主要结果**：
 - 角色修复后确定性评估不再崩塌（0.027→0.977）。
 - DAgger D1 warm-start: steady=0.70 (100-ep test)。
 - **Full/EH 3-seed 长期对照**：PPO 不再破坏 DAgger。Full 与 EH 不可区分（Δ<0.005）。GRU/PPO 状态一致性 bug 是此前崩塌的根因。
-- **S4 target-wise advantage** 已实现并测试 (3 seeds × 50 eps)：distance responsibility 未通过稳定性检验（seed 456 严重退化 Δ=−0.05）。暂不替代 scalar advantage。后续方向：P0 marginal contribution 或搁置 S4，先推进其他实验。
+- **S4 target-wise advantage**：distance-responsibility 实现并完成 3-seed × 50-ep 测试。未通过稳定性检验（seed 456 退化），scalar advantage 保留为当前稳定主线。搁置 S4，优先推进 IPPO baseline 和 K=8/Q=8 可扩展性。
 
-**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码。PPO 长期稳定性已获 3-seed 证据（Full 与 EH 均不崩塌），算法性能提升方向为 S4 target-wise advantage。
+**当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码。Scalar MAPPO 为当前稳定主线（3-seed 长期稳定性已验证）。
 
 **2026-07-14 重要更正**:此前所有 PPO 训练结果均在 GRU/PPO 状态不一致导致的非法 PPO ratio 下测得。修复后验证:1 次 PPO 更新不再破坏 DAgger 策略(Δweak3 < 0.005)。
 

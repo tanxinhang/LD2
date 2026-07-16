@@ -1,0 +1,57 @@
+{
+  "protocol": "D1 warm-start, 50 episodes, 3 seeds, scalar vs target_wise",
+  "date": "2026-07-16",
+  "git_commit": "cb3c72a",
+  "K": 4,
+  "Q": 4,
+  "config_base": "exp_800_q4_full.yaml",
+  "advantage_params": {
+    "tau_d_m": 50.0,
+    "responsibility": "inverse-distance softmax (detached)",
+    "normalization": "per-target independent, full-batch once"
+  },
+  "results": {
+    "scalar": {
+      "42": {
+        "ep0_steady": 0.502,
+        "ep0_weak3": 0.336,
+        "ep49_steady": 0.5026,
+        "ep49_weak3": 0.3369
+      },
+      "123": {
+        "ep0_steady": 0.4924,
+        "ep0_weak3": 0.3232,
+        "ep49_steady": 0.4983,
+        "ep49_weak3": 0.3311
+      },
+      "456": {
+        "ep0_steady": 0.503,
+        "ep0_weak3": 0.3373,
+        "ep49_steady": 0.4962,
+        "ep49_weak3": 0.3283
+      }
+    },
+    "target_wise": {
+      "42": {
+        "ep0_steady": 0.4947,
+        "ep0_weak3": 0.3262,
+        "ep49_steady": 0.503,
+        "ep49_weak3": 0.3373
+      },
+      "123": {
+        "ep0_steady": 0.4983,
+        "ep0_weak3": 0.331,
+        "ep49_steady": 0.4918,
+        "ep49_weak3": 0.3224
+      },
+      "456": {
+        "ep0_steady": 0.498,
+        "ep0_weak3": 0.3307,
+        "ep49_steady": 0.4455,
+        "ep49_weak3": 0.2607
+      }
+    }
+  },
+  "conclusion": "Distance responsibility FAILED 3-seed stability gate. Scalar advantage retained as default.",
+  "ppo_ratio": "all OK (max|diff| < 2e-5)"
+}
