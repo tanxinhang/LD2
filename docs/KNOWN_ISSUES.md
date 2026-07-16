@@ -62,20 +62,66 @@ D1 在 iter 2-4 的 val weak3 比 D0 高 ~0.01（单 seed，不显著）。
 | **Mean ± Std** | **0.5015 ± 0.0015** | **0.5035 ± 0.0009** |
 
 Online eval weak3: Full 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
-**Δ(EH−Full): best_steady +0.002, weak3 +0.0025 — 不可区分。**
+**Fixed-bank (20 seeds) 汇总**：
+
+| | steady | weak3 | worst |
+|---|---|:---:|:---:|
+| Full | 0.7083 ± 0.0062 | 0.6110 ± 0.0083 | 0.1189 ± 0.0031 |
+| EH | 0.7052 ± 0.0070 | 0.6069 ± 0.0094 | 0.1186 ± 0.0011 |
+| Δ(EH−Full) | −0.0031 | −0.0041 | −0.0003 |
+
+Online eval (5-seed): Full weak3 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
+差异方向在不同评估 bank 上不一致，绝对值均 ≤ 0.005。
 
 所有 6 runs PPO RATIO OK (max|diff| < 1e-4)，entropy 缓慢下降未塌缩，KL 持续受控。
 
 **核心结论**：
 1. **PPO 不再破坏 DAgger。** 修复前 1 次更新就崩溃到 random 水平。
-2. **Full 和 EH 在 3 seeds 下不可区分。** Attention 冻结未提供可测量的稳定性优势。
+2. **Full 和 EH 在不同评估 bank 上差异方向不一致，未观察到稳定分离。** Attention 冻结不是关键机制。
 3. **GRU/PPO 状态一致性 bug 是此前训练崩塌的根因。** 不需要把冻结 Attention 作为核心算法创新。
 
-**产物**：`results/full_eh/{full,eh}/seed_{42,123,456}/` 含 run_manifest.json、train_metrics.csv、paired_eval.csv。Checkpoint 为本地产物（未入库）。
+**产物**：`results/full_eh/{full,eh}/seed_{42,123,456}/` 含 run_manifest.json、train_metrics.csv、fixed_bank_eval.csv（20-seed 聚合）。注：当前为聚合汇总，非逐 episode 配对数据——S4 前需改为 per-episode 格式。
 
-**注**：D1 Init (0.50) 使用 PPO online eval bank (5 seeds, 10001-10005)，与 DAgger 独立 100-ep test (0.70) 不可直接比较。
+**注**：D1 Init (0.50) 使用 PPO online eval bank (5 seeds, 10001-10005)，与 DAgger 独立 100-ep test (0.70) 不可直接比较。Fixed-bank 0.71 与 online 0.50 的差异来自测试 bank 不同。
 
 **配置**：`config/exp_800_q4_full.yaml`, `config/exp_800_q4_eh.yaml`。运行命令见 `TRAINING.md §8`。
+
+---
+
+## S4 Target-wise Advantage 2×2 设计 (待实施)
+
+Full/EH 已确认 Attention 冻结非关键。后续固定 Full PPO（Attention trainable, comm off, encoder/attn/head LR = 1e-5/1e-5/5e-5）。
+
+**2×2 消融**：
+
+| Case | DAgger Init | Actor Advantage |
+|------|:---:|:---:|
+| S4-A | D0 (no PD_hist) | scalar |
+| S4-B | D0 (no PD_hist) | target-wise |
+| S4-C | D1 (RX-only local-PD) | scalar |
+| S4-D | D1 (RX-only local-PD) | target-wise |
+
+**目标级 advantage 形式**：
+
+A^{TW}_{t,k} = Σ_q ρ_{t,k,q} · Ã_{t,q}
+
+- Ã_{t,q}：每目标独立标准化
+- ρ_{t,k,q}：UAV-target 责任权重（detached inverse-distance softmax）
+- 第一版不引入 counterfactual m_{kq}，仅用几何距离 soft assignment
+
+**主要对比量**：
+- Δ_{TW|D1} = D − C：target-wise 是否让 D1 local-PD 产生价值
+- Δ_{interaction} = (D−C) − (B−A)：PD_hist × target-wise 交互
+- 约束：steady 下降 ≤ 0.01
+
+**判据**（预注册）：
+- D1-target-wise vs D1-scalar: weak3 ↑ ≥ 0.02, worst ↑ ≥ 0.01
+- 至少 2/3 training seeds 同方向
+- steady 不下降超过 0.01
+
+若仅 D1-target-wise 改善且 interaction > 0：local-PD 在目标级信用信号下被激活。
+
+**注意**：D0/D1 为独立训练的 DAgger checkpoint，此消融检验的是 "initialization variant × advantage type"，非纯粹的 local-PD 特征因果贡献。
 
 ---
 
@@ -203,20 +249,12 @@ Online eval weak3: Full 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
 
 ## B. 开放
 
-### B1. 默认场景过易,正式训练待跑
-- **现象**:400×400/Q=2 下 stationary 0.976 ≈ random ≈ greedy → 策略无可学空间。
-- **原因**:感知半径(~120 m)相对区域过大,初始摆位即覆盖目标。
-- **当前状态**:已提供有 headroom 的 `config/exp_800_q4.yaml`(random≈0.18,greedy≈0.73);**正式 5-seed MAPPO/IPPO 训练尚未在 GPU 上跑**。
-- **诊断方法**:area 单变量扫描(见 `EXPERIMENTS §3`);训练时盯 `eval_steady_P_D` 是否从 ~0.16 向 ~0.73 爬。
-- **优先级**:P0(决定论文主结论)。
-- **相关文件**:`config/exp_800_q4.yaml`、`scripts/run_experiments.py`。
+### B1. 默认场景过易 → 已解决
+- **当前状态**:已使用 `config/exp_800_q4.yaml`(800×800, random≈0.18, greedy≈0.73)。Full/EH 训练已在 K=4,Q=4 下完成 3-seed 验证。正式 MAPPO/IPPO 多 seed 实验仍待跑。
+- **相关文件**:`config/exp_800_q4.yaml`、`config/exp_800_q4_full.yaml`、`config/exp_800_q4_eh.yaml`。
 
-### B2. `learn_roles=False` 训练梯度回路未端到端验证
-- **现象**:env 侧(role-agnostic + P0 + 派生角色)已完整测试通过;但策略训练回路(collect/update/evaluate_actions 在 `learn_roles=False` 下)只做了代码审查 + `py_compile`,**未在装 torch 的机器上跑过完整 step**。
-- **风险**:角色项被一致剔除、张量形状未变,理论上低风险;仍需一次冒烟确认 loss/熵/eval 正常。
-- **诊断方法**:`run_experiments --config config/exp_800_q4.yaml --seeds 1` 冒烟。
-- **优先级**:P0。
-- **相关文件**:`mappo_agent.py`、`action.py`、`trainer.py`。
+### B2. `learn_roles=False` 训练回路 → 已验证
+- **当前状态**:Full/EH 3-seed × 300 episodes 已完成。loss/熵/eval/PPO ratio 均正常。训练回路端到端闭环。
 
 ### B3. obs 的"上一帧 P_D"存在一帧额外滞后(off-by-one)
 - **现象**:`next_obs` 在 `_build_observations()` 时用的 `self.prev_P_D` 是上一帧的 P_D;当前帧 `P_D_q` 在其后才写入 `self.prev_P_D`。即用于决定 `a_{t+1}` 的 obs 携带 `P_D_{t-1}` 而非 `P_D_t`。
