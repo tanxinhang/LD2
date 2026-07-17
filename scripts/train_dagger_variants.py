@@ -341,9 +341,12 @@ def train_one(cfg, pd_mode, device, args, val_seeds, test_seeds):
     print(f"{'='*60}")
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
+    use_p0 = getattr(cfg.marl, 'use_p0_sinr_gated', False)
     actor = StructuredActorNetwork(
         obs_dim=obs_dim, K=K, Q=Q, entity_dim=64, max_dp=max_dp,
-        single_frame_dim=single_fd).to(device)
+        single_frame_dim=single_fd,
+        use_corrected_parser=args.corrected_parser,
+        use_p0=use_p0).to(device)
     print(f"Actor params: {sum(p.numel() for p in actor.parameters())}")
 
     # Iter 0: teacher data
@@ -451,6 +454,8 @@ def main():
     ap.add_argument("--val-episodes", type=int, default=20)
     ap.add_argument("--test-episodes", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--corrected-parser", action="store_true",
+                    help="Use block-based ObservationSlices parsing")
     ap.add_argument("--out-dir", default="results/dagger_variants")
     args = ap.parse_args()
 

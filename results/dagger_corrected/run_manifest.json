@@ -1,0 +1,33 @@
+{
+  "git_commit": "a35ee3dac77576d5092e107fbe86b2c7d947ee02",
+  "config": "config/exp_800_q4.yaml",
+  "training_seed": 42,
+  "K": 4,
+  "Q": 4,
+  "chunk_size": 16,
+  "dagger_iters": 5,
+  "val_seeds": "20001-20020",
+  "test_seeds": "30001-30100",
+  "dagger_version": "v3_chunk_bptt",
+  "chunk_len": 16,
+  "detach_inside_chunk": false,
+  "detach_at_chunk_boundary": true,
+  "optimizer_step_scope": "episode",
+  "protocol": "chunk BPTT: detach_h_new=False within chunk, detach() at boundary, per-chunk backward with (loss/T) scaling, optimizer once per episode",
+  "checkpoint_selection": "max val weak3, steady >= base_steady - 0.01",
+  "limitations": [
+    "Single training seed.",
+    "Chunk size=16; no full-episode BPTT.",
+    "Communication not trained; deferred to PPO."
+  ],
+  "results": {
+    "D1": {
+      "pd_mode": "local",
+      "steady_mean": 0.7032145353557402,
+      "weak3_mean": 0.6042860471499425,
+      "worst_mean": 0.1684323613594867,
+      "ep_fail_030": 0.82,
+      "ep_fail_005": 0.69
+    }
+  }
+}
