@@ -167,24 +167,25 @@ class TemporalSelfAttention(nn.Module):
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """Causal temporal self-attention.
 
+        Window is right-aligned: position -1 always holds current frame.
+        Padding positions (mask=False) are ignored via src_key_padding_mask.
+
         Args:
-            x: (B, T, D) sequence of self tokens
-            mask: (B, T) boolean mask, True = valid frame
+            x: (B, T, D) sequence of self tokens, right-aligned
+            mask: (B, T) boolean mask, True = valid frame.
+                  mask[:, -1] MUST be True.
 
         Returns:
-            (B, D) attended token for the LAST valid frame
+            (B, D) attended token for position -1 (current frame)
         """
         B, T, D = x.shape
         x = self.pos_enc(x)
 
-        # Causal mask: frame t can only attend to frames ≤ t
         causal_mask = torch.triu(
             torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
 
-        # Combine with padding mask if provided
         if mask is not None:
             padding_mask = ~mask  # True = ignore
-            # For TransformerEncoder, src_key_padding_mask expects (B, T)
             x_out = self.encoder(
                 x, mask=causal_mask,
                 src_key_padding_mask=padding_mask,
@@ -193,14 +194,8 @@ class TemporalSelfAttention(nn.Module):
         else:
             x_out = self.encoder(x, mask=causal_mask, is_causal=True)
 
-        # Return the last frame's output (or last valid frame)
-        if mask is not None:
-            last_idx = mask.sum(dim=1) - 1  # (B,) index of last valid frame
-            out = x_out[torch.arange(B, device=x.device), last_idx]
-        else:
-            out = x_out[:, -1, :]
-
-        return self.norm(out)
+        # Current frame always at position -1 (right-aligned)
+        return self.norm(x_out[:, -1, :])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -367,9 +362,10 @@ class TICAActor(nn.Module):
 
     def forward(self, obs: torch.Tensor,
                 h_prev: torch.Tensor = None,
-                detach_h_new: bool = True):
+                detach_h_new: bool = True,
+                window_mask: torch.Tensor = None):
         """Forward pass — single-frame or window input."""
-        h = self.encode_features(obs)
+        h = self.encode_features(obs, window_mask=window_mask)
         dp_mean = self.dp_head(h)
         LOG_STD_MIN, LOG_STD_MAX = -1.0, 1.0
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (torch.tanh(self.dp_log_std) + 1.0)
@@ -468,13 +464,69 @@ class D1TICAResidualActor(nn.Module):
         nn.init.zeros_(self.delta_role.weight)
         nn.init.zeros_(self.delta_role.bias)
 
+    # ── Compat properties for MAPPO trainer ──
+    @property
+    def neighbor_gru(self):
+        """Expose D1 base's GRU for trainer's gru_hidden_dim detection."""
+        return self.base_actor.neighbor_gru
+
+    @property
+    def dp_log_std(self):
+        """Expose D1 base's log_std for BC/KL anchor."""
+        return self.base_actor.dp_log_std
+
     @property
     def D(self):
         return self.tica_actor.D
 
+    def get_recurrent_state_dim(self) -> int:
+        """Return GRU hidden dim for buffer allocation."""
+        return self.base_actor.neighbor_gru.hidden_size
+
+    def parameter_groups(self) -> dict:
+        """Return explicit parameter groups for per-module LR.
+
+        Trainer should prefer this over name-based split_param_groups().
+        """
+        tica = self.tica_actor
+        return {
+            'encoder': list(tica.frame_encoder.parameters()),
+            'attention': (
+                list(tica.temporal_attn.parameters())
+                + list(tica.target_attn.parameters())
+                + list(tica.agent_attn.parameters())
+            ),
+            'head': (
+                list(self.delta_dp.parameters())
+                + list(self.delta_role.parameters())
+            ),
+        }
+
+    def trainable_parameters(self):
+        """Only TICA feature branch + delta heads. Excludes unused TICA output heads."""
+        for p in self.tica_actor.frame_encoder.parameters():
+            yield p
+        for p in self.tica_actor.temporal_attn.parameters():
+            yield p
+        for p in self.tica_actor.target_attn.parameters():
+            yield p
+        for p in self.tica_actor.agent_attn.parameters():
+            yield p
+        for p in self.tica_actor.output_proj.parameters():
+            yield p
+        for p in self.tica_actor.output_norm.parameters():
+            yield p
+        yield self.tica_actor.alpha_T
+        yield self.tica_actor.alpha_A
+        for p in self.delta_dp.parameters():
+            yield p
+        for p in self.delta_role.parameters():
+            yield p
+
     def forward(self, obs: torch.Tensor,
                 h_prev: torch.Tensor = None,
-                detach_h_new: bool = True):
+                detach_h_new: bool = True,
+                window_mask: torch.Tensor = None):
         """Forward with D1 base + TICA residual.
 
         Args:
@@ -497,8 +549,8 @@ class D1TICAResidualActor(nn.Module):
                 self.base_actor(obs_last, h_prev=h_prev,
                                 detach_h_new=detach_h_new)
 
-        # TICA branch: encode full window (or single frame)
-        h_tica = self.tica_actor.encode_features(obs)
+        # TICA branch: encode full window (or single frame) with mask
+        h_tica = self.tica_actor.encode_features(obs, window_mask=window_mask)
 
         # Residual heads (zero-init → exact D1 at initialization)
         dp_mean = base_dp + self.delta_dp(h_tica)

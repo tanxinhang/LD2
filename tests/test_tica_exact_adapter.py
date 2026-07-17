@@ -150,8 +150,42 @@ def test_backward_d1_frozen_residual_grad():
     assert adapter.delta_role.weight.grad.abs().sum() > 0, "delta_role grad is all-zero"
 
 
-def test_real_d1_checkpoint_exact_match():
-    """Load actual D1-corrected checkpoint and verify exact match."""
+def test_action_log_prob_exact_match():
+    """Full log-prob computation must match: Gaussian + tanh correction."""
+    adapter, base, sl = build_adapter(K=4, Q=4)
+    B = 4
+    obs = torch.randn(B, sl.total_dim)
+    action_dp = torch.randn(B, 2) * 1.5
+    action_role = torch.randint(0, 3, (B,))
+    dp_scale = 2.5
+
+    with torch.no_grad():
+        base_out = base(obs)
+        adapter_out = adapter(obs)
+
+    def compute_logp(dp_mean, log_std, role_logits, actions_dp, actions_role):
+        dp_norm = actions_dp / dp_scale
+        dp_norm = torch.clamp(dp_norm, -0.999, 0.999)
+        dp_raw = torch.atanh(dp_norm)
+        dp_std_pos = torch.exp(torch.clamp(log_std, -20, 2))
+        var = dp_std_pos ** 2
+        log_prob_dp = -0.5 * (((dp_raw - dp_mean) ** 2) / (var + 1e-6)
+                              + torch.log(2 * 3.14159265 * var + 1e-6)).sum(dim=-1)
+        log_prob_dp -= torch.log(1.0 - dp_norm ** 2 + 1e-6).sum(dim=-1)
+        log_probs_role = torch.log_softmax(role_logits, dim=-1)
+        log_prob_role = log_probs_role.gather(1, actions_role.unsqueeze(-1)).squeeze(-1)
+        return log_prob_dp + log_prob_role
+
+    logp_base = compute_logp(base_out[0], base_out[1], base_out[2], action_dp, action_role)
+    logp_adapter = compute_logp(adapter_out[0], adapter_out[1], adapter_out[2], action_dp, action_role)
+
+    assert torch.allclose(logp_adapter, logp_base, atol=1e-7), \
+        f"log-prob mismatch: max|diff|={(logp_adapter-logp_base).abs().max():.2e}"
+
+
+def test_real_d1_checkpoint_controlled_load():
+    """Load actual D1-corrected checkpoint (controlled load, not strict).
+    Verify all outputs match within 1e-6."""
     d1_path = 'results/dagger_corrected/dagger_D1.pt'
     if not os.path.exists(d1_path):
         pytest.skip(f"{d1_path} not found")
@@ -164,9 +198,14 @@ def test_real_d1_checkpoint_exact_match():
     base = StructuredActorNetwork(
         obs_dim=obs_dim, K=K, Q=Q, entity_dim=64,
         use_corrected_parser=True).cpu()
-    base.load_state_dict(d1_ckpt, strict=False)
+    result = base.load_state_dict(d1_ckpt, strict=False)
     base.zero_init_new_layers(set(d1_ckpt.keys()))
     base.eval()
+
+    # Report load status
+    n_missing = len(result.missing_keys)
+    n_unexpected = len(result.unexpected_keys)
+    print(f"  Controlled load: {n_missing} missing, {n_unexpected} unexpected")
 
     tica = TICAActor(obs_dim=obs_dim, K=K, Q=Q, D=64, L=8).cpu()
     adapter = D1TICAResidualActor(base, tica).cpu()
@@ -179,7 +218,19 @@ def test_real_d1_checkpoint_exact_match():
 
     for i, name in enumerate(['dp_mean', 'log_std', 'role_logits', 'comm', 'pd_pred']):
         diff = (adapter_out[i] - base_out[i]).abs().max().item()
-        assert diff < 1e-6, f"{name}: max|diff|={diff:.2e} (real D1 checkpoint)"
+        assert diff < 1e-6, f"{name}: max|diff|={diff:.2e}"
         print(f"  {name}: max|diff|={diff:.2e} ✓")
 
-    print("D1-corrected exact match: PASSED")
+    # Also verify compat properties
+    assert adapter.neighbor_gru is base.neighbor_gru
+    assert adapter.dp_log_std is base.dp_log_std
+    assert adapter.get_recurrent_state_dim() == base.neighbor_gru.hidden_size
+    print("  Compat properties: OK")
+
+    # Verify parameter_groups has expected keys
+    groups = adapter.parameter_groups()
+    assert set(groups.keys()) == {'encoder', 'attention', 'head'}
+    assert all(len(v) > 0 for v in groups.values())
+    print(f"  Parameter groups: encoder={len(groups['encoder'])} attention={len(groups['attention'])} head={len(groups['head'])}")
+
+    print("D1-corrected controlled load: PASSED")
