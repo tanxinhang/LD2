@@ -112,15 +112,20 @@ class StructuredActorNetwork(nn.Module):
 
     def __init__(self, obs_dim: int, K: int = 8, Q: int = 8,
                  entity_dim: int = 128, max_dp: float = 2.5,
-                 single_frame_dim: int = 0):
+                 single_frame_dim: int = 0,
+                 use_corrected_parser: bool = False,
+                 use_p0: bool = False):
         super().__init__()
         self.K, self.Q = K, Q
         self.max_dp = max_dp
         D = entity_dim
-        # Single-frame observation dimension (without history stacking).
-        # 0 = auto-detect from obs_dim / K / Q; explicitly provided by
-        # ObservationBuilder for multi-config safety (avoids hardcoded 227).
         self.single_frame_dim = single_frame_dim
+        self._use_corrected_parser = use_corrected_parser
+        self._use_p0 = use_p0
+        if use_corrected_parser:
+            from uav_isac.environment.observation_slices import ObservationSlices
+            self._obs_slices = ObservationSlices.from_config(
+                K=K, Q=Q, use_p0=use_p0, use_rel_features=True)
 
         # ── Entity encoders ──
         self.self_enc = nn.Sequential(
@@ -189,28 +194,89 @@ class StructuredActorNetwork(nn.Module):
         """Parse flat obs. Returns entity tensors as sequences (B, N, W, D)."""
         B = obs.shape[0]
         obs_dim = obs.shape[1]
-        # Use configured single-frame dim; fall back to auto-detection
         single_dim = self.single_frame_dim if self.single_frame_dim > 0 else obs_dim
 
-        # Detect 2-frame stacking → split and stack as sequences
+        parse_fn = (self._parse_one_corrected if self._use_corrected_parser
+                    else self._parse_one)
+
         if obs_dim > single_dim + 20:
-            w = obs_dim // single_dim  # number of stacked frames (2)
+            w = obs_dim // single_dim
             frames = []
             for i in range(w):
-                s, t, n, g, c, pd = self._parse_one(obs[:, i*single_dim:(i+1)*single_dim], B)
+                s, t, n, g, c, pd = parse_fn(obs[:, i*single_dim:(i+1)*single_dim], B)
                 frames.append((s, t, n, g, c, pd))
-            # Stack along LAST sequence dim
-            s_seq = torch.stack([f[0] for f in frames], dim=-1)  # (B, 11, W)
-            t_seq = torch.stack([f[1] for f in frames], dim=-1)  # (B, Q, D_t, W)
-            n_seq = torch.stack([f[2] for f in frames], dim=-1)  # (B, K-1, D_n, W)
-            g_seq = torch.stack([f[3] for f in frames], dim=-1)  # (B, 2, W)
-            pd_seq = torch.stack([f[5] for f in frames], dim=-1)  # (B, Q, W)
+            s_seq = torch.stack([f[0] for f in frames], dim=-1)
+            t_seq = torch.stack([f[1] for f in frames], dim=-1)
+            n_seq = torch.stack([f[2] for f in frames], dim=-1)
+            g_seq = torch.stack([f[3] for f in frames], dim=-1)
+            pd_seq = torch.stack([f[5] for f in frames], dim=-1)
             return s_seq, t_seq, n_seq, g_seq, frames[-1][4], w, pd_seq
         else:
-            s, t, n, g, c, pd = self._parse_one(obs, B)
-            # Add seq dim of 1 at the end
+            s, t, n, g, c, pd = parse_fn(obs, B)
             return (s.unsqueeze(-1), t.unsqueeze(-1), n.unsqueeze(-1),
                     g.unsqueeze(-1), c, 1, pd.unsqueeze(-1))
+
+    def _parse_one_corrected(self, obs, B):
+        """Parse using ObservationSlices — correct block-based layout."""
+        K, Q = self.K, self.Q
+        sl = self._obs_slices
+
+        # Self: 8 + physics(3) = 11
+        self_raw = obs[:, sl.self_start:sl.self_start + sl.self_len]
+        phys = obs[:, sl.physics_start:sl.physics_start + sl.physics_len]
+        self_state = torch.cat([self_raw, phys], dim=-1)  # (B, 11)
+
+        # Beliefs block (Q × 9) → reshape
+        beliefs = obs[:, sl.belief_start:sl.belief_start + Q * sl.belief_per_target]
+        beliefs = beliefs.reshape(B, Q, sl.belief_per_target)  # (B, Q, 9)
+
+        # Geometry block (Q × 8) when rel_features
+        if sl.has_rel_features and sl.geom_per_target > 0:
+            geometry = obs[:, sl.geom_start:sl.geom_start + Q * sl.geom_per_target]
+            geometry = geometry.reshape(B, Q, sl.geom_per_target)  # (B, Q, 8)
+        else:
+            geometry = torch.zeros(B, Q, 0, device=obs.device)
+
+        # Per-target: cat belief + geometry
+        targets = []
+        for q in range(Q):
+            tq = torch.cat([beliefs[:, q, :], geometry[:, q, :]], dim=-1)  # 17 dims
+            targets.append(tq)
+        target_stack = torch.stack(targets, dim=1)  # (B, Q, 17)
+
+        # Coverage (P0)
+        if sl.has_p0 and sl.coverage_len > 0:
+            cov = obs[:, sl.coverage_start:sl.coverage_start + sl.coverage_len]
+            target_stack = torch.cat([target_stack, cov.unsqueeze(-1)], dim=-1)  # → 18
+        if target_stack.shape[-1] < 18:
+            target_stack = torch.cat([
+                target_stack,
+                torch.zeros(B, Q, 18 - target_stack.shape[-1], device=obs.device)
+            ], dim=-1)
+
+        # Neighbors block — always pad to 9
+        n_dim = sl.neighbor_per_agent
+        n_raw = obs[:, sl.neighbor_start:sl.neighbor_start + (K-1) * n_dim]
+        neighbors = n_raw.reshape(B, K-1, n_dim)
+        if n_dim == 8:
+            neighbors = torch.cat([
+                neighbors[:, :, :7],
+                torch.zeros(B, K-1, 1, device=obs.device),
+                neighbors[:, :, 7:]
+            ], dim=-1)
+        neighbor_stack = neighbors  # (B, K-1, 9)
+
+        # Global
+        if sl.has_p0 and sl.global_len > 0:
+            global_feat = obs[:, sl.global_start:sl.global_start + sl.global_len]
+        else:
+            global_feat = torch.zeros(B, 2, device=obs.device)
+
+        # PD_hist and comm
+        pd_hist = obs[:, sl.pd_hist_start:sl.pd_hist_start + sl.pd_hist_len]
+        comm_agg = obs[:, sl.comm_start:sl.comm_start + sl.comm_len]
+
+        return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
 
     def _parse_one(self, obs, B):
         """Parse single frame (227 dims) into entity tensors.

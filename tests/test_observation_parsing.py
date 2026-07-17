@@ -58,6 +58,63 @@ def test_observation_slices_self_physics_pd_comm():
     assert np.allclose(slices.extract_comm(obs), 3.0)
 
 
+@pytest.mark.parametrize("k,q,use_p0", [(4, 4, False), (4, 4, True), (8, 8, False), (8, 8, True)])
+def test_frame_encoder_target_isolation(k, q, use_p0):
+    """Changing only target q must NOT affect other targets' tokens."""
+    import torch
+    from uav_isac.agents.tica_actor import FrameEncoder
+    from uav_isac.environment.observation_slices import ObservationSlices
+
+    sl = ObservationSlices.from_config(K=k, Q=q, use_p0=use_p0)
+    encoder = FrameEncoder(sl.total_dim, K=k, Q=q, D=64, use_p0=use_p0).cpu()
+    encoder.eval()
+
+    obs = torch.randn(2, sl.total_dim)
+    with torch.no_grad():
+        _, tokens_before, _ = encoder(obs)
+
+    # Modify target 0's belief block
+    obs_modified = obs.clone()
+    b_start = sl.belief_start
+    obs_modified[:, b_start:b_start + sl.belief_per_target] += 10.0
+    # Also modify geometry if present
+    if sl.has_rel_features and sl.geom_per_target > 0:
+        g_start = sl.geom_start
+        obs_modified[:, g_start:g_start + sl.geom_per_target] += 10.0
+
+    with torch.no_grad():
+        _, tokens_after, _ = encoder(obs_modified)
+
+    # Target 0 MUST change
+    assert not torch.allclose(tokens_before[:, 0], tokens_after[:, 0], atol=1e-4), \
+        "Target 0 token unchanged after modifying its input"
+
+    # Other targets must NOT change
+    for r in range(1, q):
+        assert torch.allclose(tokens_before[:, r], tokens_after[:, r], atol=1e-4), \
+            f"Target {r} token changed when only target 0 was modified"
+
+
+def test_structured_actor_corrected_parser():
+    """StructuredActor with use_corrected_parser=True must produce valid output."""
+    import torch
+    from uav_isac.agents.networks import StructuredActorNetwork
+    from uav_isac.environment.observation_slices import ObservationSlices
+
+    for k, q in [(4, 4), (8, 8)]:
+        sl = ObservationSlices.from_config(K=k, Q=q)
+        actor = StructuredActorNetwork(
+            obs_dim=sl.total_dim, K=k, Q=q, entity_dim=64,
+            use_corrected_parser=True).cpu()
+        actor.eval()
+        obs = torch.randn(2, sl.total_dim)
+        with torch.no_grad():
+            dp, ls, rl, cm, pd, hn = actor(obs)
+        assert dp.shape == (2, 2), f"K={k},Q={q}: dp shape {dp.shape}"
+        assert rl.shape == (2, 3)
+        assert cm.shape == (2, 16)
+
+
 def test_observation_slices_total_dim_matches_env():
     """Slices total dim must match actual env observation dim."""
     from config.params import load_config
