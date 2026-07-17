@@ -66,8 +66,11 @@ class FrameEncoder(nn.Module):
         # Global: always 2 dims (zero-filled when P0 off)
         self.global_enc = nn.Linear(2, D)
 
-        # Communication aggregation (16)
+        # Communication: aggregated (16-dim) for self_token;
+        # per-neighbor individual comm would be added here when observation
+        # builder provides per-neighbor messages (not just aggregated).
         self.comm_proj = nn.Linear(16, D)
+        self.neighbor_comm_proj = nn.Linear(16, D)  # per-neighbor comm → token
 
         self._init_weights()
 
