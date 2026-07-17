@@ -41,6 +41,7 @@ class RolloutBuffer:
         self.num_targets = num_targets
         self.gru_hidden_dim = gru_hidden_dim
         self._has_gru = gru_hidden_dim > 0
+        self._window_len = 0
 
         # Per-agent storage
         self.obs = np.zeros((buffer_size, num_agents, obs_dim), dtype=np.float64)
@@ -60,6 +61,10 @@ class RolloutBuffer:
                 (buffer_size, num_agents, num_agents - 1, gru_hidden_dim),
                 dtype=np.float32,
             )
+
+        # TICA observation window: (T, K, L, obs_dim)
+        self.obs_window = None
+        self._window_len = 0
 
         # Per-target storage (S3b: diagnostics)
         self.per_target_rewards = np.zeros(
@@ -89,6 +94,7 @@ class RolloutBuffer:
         per_target_rewards: np.ndarray = None,  # (K, Q) per-target P_D
         per_target_values: np.ndarray = None,   # (K, Q) per-target V_q(s)
         h_prev: np.ndarray = None,  # (K, K-1, D) GRU hidden states
+        obs_window: np.ndarray = None,  # (K, L, obs_dim) TICA window
     ) -> None:
         """Store one transition for all agents.
 
@@ -131,6 +137,16 @@ class RolloutBuffer:
         # Store GRU hidden states
         if self._has_gru and h_prev is not None:
             self.h_prev[self.ptr] = h_prev  # (K, K-1, D)
+
+        # Store TICA observation window
+        if obs_window is not None:
+            if self.obs_window is None:
+                L = obs_window.shape[-2] if obs_window.ndim >= 3 else 1
+                self.obs_window = np.zeros(
+                    (self.buffer_size, self.num_agents, L, self.obs.shape[-1]),
+                    dtype=np.float64)
+                self._window_len = L
+            self.obs_window[self.ptr] = obs_window
 
         self.global_states[self.ptr] = global_state
         self.ptr += 1
@@ -310,6 +326,12 @@ class RolloutBuffer:
             h_flat = self.h_prev[:actual_size].reshape(-1, self.num_agents - 1,
                                                        self.gru_hidden_dim)
             result['h_prev'] = torch.as_tensor(h_flat, dtype=torch.float32)
+
+        # TICA observation window: (T, K, L, obs_dim) → (T*K, L, obs_dim)
+        if self.obs_window is not None:
+            w_flat = self.obs_window[:actual_size].reshape(-1, self._window_len,
+                                                           self.obs.shape[-1])
+            result['obs_window'] = torch.as_tensor(w_flat, dtype=torch.float32)
 
         # Per-target advantages and returns
         if self.per_target_advantages is not None:
