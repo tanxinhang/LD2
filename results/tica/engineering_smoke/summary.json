@@ -1,0 +1,33 @@
+{
+  "purpose": "engineering_stability_only",
+  "performance_claim": false,
+  "window_length": 16,
+  "base_actor": "D1-corrected (results/dagger_corrected/dagger_D1.pt)",
+  "base_frozen": true,
+  "deployment_closure": false,
+  "ppo_ratio": "all OK (max|diff| < 1e-5)",
+  "results": {
+    "seed_42": {
+      "dp_end": 0.023,
+      "role_end": 0.018,
+      "t_grad_end": 0.0046,
+      "D1_frozen": true,
+      "NaN": false
+    },
+    "seed_123": {
+      "dp_end": 0.035,
+      "role_end": 0.022,
+      "t_grad_end": 0.0073,
+      "D1_frozen": true,
+      "NaN": false
+    },
+    "seed_456": {
+      "dp_end": 0.025,
+      "role_end": 0.016,
+      "t_grad_end": 0.0045,
+      "D1_frozen": true,
+      "NaN": false
+    }
+  },
+  "verdict": "Engineering Stability PASSED \u2014 3/3 seeds no collapse, D1 frozen, TICA learning"
+}
