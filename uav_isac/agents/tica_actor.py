@@ -38,29 +38,32 @@ class LearnedPositionalEncoding(nn.Module):
 class FrameEncoder(nn.Module):
     """Encode per-frame per-UAV observation into entity tokens.
 
-    Produces:
-      - self_token: (B, D) UAV self-state encoding
-      - target_tokens: (B, Q, D) per-target encodings
-      - neighbor_tokens: (B, K-1, D) per-neighbor encodings
+    Uses ObservationSlices for correct parsing (P0-0 fix: beliefs block
+    comes BEFORE geometry block, not interleaved per-target).
     """
-    def __init__(self, obs_dim: int, K: int, Q: int, D: int = 128):
+    def __init__(self, obs_dim: int, K: int, Q: int, D: int = 128,
+                 use_p0: bool = False, use_rel_features: bool = True):
         super().__init__()
         self.K, self.Q = K, Q
+        from uav_isac.environment.observation_slices import ObservationSlices
+        self.slices = ObservationSlices.from_config(
+            K=K, Q=Q, use_p0=use_p0, use_rel_features=use_rel_features)
 
         # Self-state: pos(3)+vel(3)+battery(1)+role(1)+physics(3) = 11
         self.self_enc = nn.Sequential(
             nn.Linear(11, D), nn.ReLU(), nn.Linear(D, D))
 
-        # Target: belief(9) + geometry(8) + PD_hist(1) = 18
+        # Target: belief(9) + geometry(8) = 17 → 18 with coverage
+        target_in = 9 + (8 if use_rel_features else 0) + (1 if use_p0 else 0)
         self.target_enc = nn.Sequential(
-            nn.Linear(18, D), nn.ReLU(), nn.Linear(D, D))
+            nn.Linear(target_in, D), nn.ReLU(), nn.Linear(D, D))
         self.pd_hist_proj = nn.Linear(1, D)
 
-        # Neighbor: rel_pos(2)+rel_vel(2)+role(1)+heading(2)+in_pair(1)+nearest(1) = 9
+        # Neighbor — always 9 dims after padding
         self.neighbor_enc = nn.Sequential(
             nn.Linear(9, D), nn.ReLU(), nn.Linear(D, D))
 
-        # Global: P0 info (2)
+        # Global: always 2 dims (zero-filled when P0 off)
         self.global_enc = nn.Linear(2, D)
 
         # Communication aggregation (16)
@@ -74,92 +77,59 @@ class FrameEncoder(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
                 nn.init.constant_(m.bias, 0.0)
 
-    def _parse_obs(self, obs: torch.Tensor):
-        """Parse flat obs into entity tensors. Same logic as StructuredActorNetwork."""
-        B, obs_dim = obs.shape
+    def forward(self, obs: torch.Tensor):
+        """Encode observation into entity tokens using correct block parsing."""
+        B = obs.shape[0]
         K, Q = self.K, self.Q
-        ptr = 0
+        sl = self.slices
 
         # Self state: pos(3)+vel(3)+battery(1)+role(1) = 8
-        self_raw = obs[:, ptr:ptr+8]; ptr += 8
+        self_raw = obs[:, sl.self_start:sl.self_start + sl.self_len]
 
-        # Targets: belief(9) + geometry(8) = 17 per target
-        targets = []
-        for _ in range(Q):
-            b_mean  = obs[:, ptr:ptr+4]; ptr += 4
-            b_cov   = obs[:, ptr:ptr+4]; ptr += 4
-            b_aoi   = obs[:, ptr:ptr+1]; ptr += 1
-            g_dx    = obs[:, ptr:ptr+1]; ptr += 1
-            g_dy    = obs[:, ptr:ptr+1]; ptr += 1
-            g_dist  = obs[:, ptr:ptr+1]; ptr += 1
-            g_sin   = obs[:, ptr:ptr+1]; ptr += 1
-            g_cos   = obs[:, ptr:ptr+1]; ptr += 1
-            g_s1    = obs[:, ptr:ptr+1]; ptr += 1
-            g_s2    = obs[:, ptr:ptr+1]; ptr += 1
-            g_s3    = obs[:, ptr:ptr+1]; ptr += 1
-            targets.append(torch.cat([
-                b_mean, b_cov, b_aoi,
-                g_dx, g_dy, g_dist, g_sin, g_cos, g_s1, g_s2, g_s3
-            ], dim=-1))
-
-        # Physics features (3)
-        phys = obs[:, ptr:ptr+3]; ptr += 3
+        # Physics
+        phys = obs[:, sl.physics_start:sl.physics_start + sl.physics_len]
         self_state = torch.cat([self_raw, phys], dim=-1)  # (B, 11)
 
-        # Coverage + pairing (P0) — heuristic detection
-        remaining = obs_dim - ptr
-        without_p0 = (K-1)*9 + 2 + Q + 16
-        has_p0 = (remaining > without_p0 + 2)
-        coverage = None
-        if has_p0:
-            coverage = obs[:, ptr:ptr+Q]; ptr += Q
-            _pairing = obs[:, ptr:ptr+(K-1)]; ptr += (K-1)
+        # Beliefs block (Q × 9) — ALL targets, then geometry block (Q × 8)
+        beliefs = obs[:, sl.belief_start:sl.belief_start + Q * sl.belief_per_target]
+        beliefs = beliefs.reshape(B, Q, sl.belief_per_target)  # (B, Q, 9)
 
-        # Neighbors
-        neighbor_dim = 9 if has_p0 else 8
-        neighbors = []
-        for _ in range(K-1):
-            n = obs[:, ptr:ptr+neighbor_dim]; ptr += neighbor_dim
-            if neighbor_dim == 8:
-                n = torch.cat([n[:, :7], torch.zeros(B, 1, device=obs.device), n[:, 7:]], dim=-1)
-            neighbors.append(n)
+        if sl.has_rel_features and sl.geom_per_target > 0:
+            geometry = obs[:, sl.geom_start:sl.geom_start + Q * sl.geom_per_target]
+            geometry = geometry.reshape(B, Q, sl.geom_per_target)  # (B, Q, 8)
+            targets = torch.cat([beliefs, geometry], dim=-1)  # (B, Q, 17)
+        else:
+            targets = beliefs  # (B, Q, 9)
 
-        # Global features
-        if has_p0:
-            global_feat = obs[:, ptr:ptr+2]; ptr += 2
+        # Coverage (P0)
+        if sl.has_p0 and sl.coverage_len > 0:
+            cov = obs[:, sl.coverage_start:sl.coverage_start + sl.coverage_len]
+            targets = torch.cat([targets, cov.unsqueeze(-1)], dim=-1)
+
+        # Neighbors block — always pad to 9 dims before encoding
+        n_dim = sl.neighbor_per_agent
+        n_raw = obs[:, sl.neighbor_start:sl.neighbor_start + (K-1) * n_dim]
+        neighbors = n_raw.reshape(B, K - 1, n_dim)  # (B, K-1, n_dim)
+        if n_dim == 8:
+            neighbors = torch.cat([
+                neighbors[:, :, :7],
+                torch.zeros(B, K-1, 1, device=obs.device),
+                neighbors[:, :, 7:]
+            ], dim=-1)  # → (B, K-1, 9)
+
+        # Global (P0 only)
+        if sl.has_p0 and sl.global_len > 0:
+            global_feat = obs[:, sl.global_start:sl.global_start + sl.global_len]
         else:
             global_feat = torch.zeros(B, 2, device=obs.device)
 
-        # PD_hist (Q dims)
-        pd_hist = obs[:, ptr:ptr+Q]; ptr += Q
+        # PD_hist
+        pd_hist = obs[:, sl.pd_hist_start:sl.pd_hist_start + sl.pd_hist_len]
 
-        # Comm aggregation (16 dims)
-        comm_agg = obs[:, ptr:ptr+16]
+        # Comm
+        comm_agg = obs[:, sl.comm_start:sl.comm_start + sl.comm_len]
 
-        # Stack targets
-        target_stack = torch.stack(targets, dim=1)  # (B, Q, 17)
-        if coverage is not None:
-            target_stack = torch.cat([target_stack, coverage.unsqueeze(-1)], dim=-1)
-        if target_stack.shape[-1] < 18:
-            target_stack = torch.cat([
-                target_stack,
-                torch.zeros(B, Q, 18 - target_stack.shape[-1], device=obs.device)
-            ], dim=-1)
-
-        neighbor_stack = torch.stack(neighbors, dim=1)  # (B, K-1, 9)
-
-        return self_state, target_stack, neighbor_stack, global_feat, pd_hist, comm_agg
-
-    def forward(self, obs: torch.Tensor):
-        """Encode observation into entity tokens.
-
-        Returns:
-            self_token: (B, D)
-            target_tokens: (B, Q, D)
-            neighbor_tokens: (B, K-1, D)
-        """
-        self_state, targets, neighbors, global_feat, pd_hist, comm_agg = self._parse_obs(obs)
-
+        # Encode
         se = self.self_enc(self_state)  # (B, D)
         te = self.target_enc(targets)   # (B, Q, D)
         ne = self.neighbor_enc(neighbors)  # (B, K-1, D)
@@ -304,13 +274,14 @@ class TICAActor(nn.Module):
         max_dp: maximum displacement
     """
     def __init__(self, obs_dim: int, K: int = 4, Q: int = 4,
-                 D: int = 128, L: int = 16, max_dp: float = 2.5):
+                 D: int = 128, L: int = 16, max_dp: float = 2.5,
+                 use_p0: bool = False, use_rel_features: bool = True):
         super().__init__()
         self.K, self.Q, self.D, self.L = K, Q, D, L
         self.max_dp = max_dp
 
-        # Frame encoder
-        self.frame_encoder = FrameEncoder(obs_dim, K, Q, D)
+        # Frame encoder (correct block-based parsing)
+        self.frame_encoder = FrameEncoder(obs_dim, K, Q, D, use_p0, use_rel_features)
 
         # Temporal self-attention
         self.temporal_attn = TemporalSelfAttention(D, num_layers=2, num_heads=4, max_len=L)
@@ -320,6 +291,10 @@ class TICAActor(nn.Module):
 
         # Agent cross-attention
         self.agent_attn = AgentCrossAttention(D, num_heads=4)
+
+        # Learnable fusion gates (init small for conservative D1 fine-tuning)
+        self.alpha_T = nn.Parameter(torch.tensor(0.01))
+        self.alpha_A = nn.Parameter(torch.tensor(0.01))
 
         # Output projection
         self.output_proj = nn.Linear(D, D)
@@ -379,7 +354,10 @@ class TICAActor(nn.Module):
         all_neighbor_tokens = []
         for t in range(T):
             st, tt, nt = self.frame_encoder(obs_window[:, t, :])
-            all_self_tokens.append(st)
+            # Per-frame target pooling: mean over target tokens for temporal SA
+            target_pool = tt.mean(dim=1)  # (B, D)
+            frame_token = st + target_pool  # self + aggregate target context
+            all_self_tokens.append(frame_token)
             all_target_tokens.append(tt)
             all_neighbor_tokens.append(nt)
 
@@ -387,18 +365,19 @@ class TICAActor(nn.Module):
         self_seq = torch.stack(all_self_tokens, dim=1)  # (B, T, D)
 
         # Temporal self-attention → last-frame token
+        # Now encodes full UAV history including target belief/AoI/PD_hist trends
         z_time = self.temporal_attn(self_seq, mask)  # (B, D)
 
-        # Target cross-attention (use last-frame targets)
+        # Target cross-attention (use last-frame targets for current competition)
         target_tokens = all_target_tokens[-1]  # (B, Q, D)
-        z_target = self.target_attn(z_time, target_tokens)  # (B, D)
+        delta_target = self.target_attn(z_time, target_tokens) - z_time  # residual
 
         # Agent cross-attention (use last-frame neighbors)
         neighbor_tokens = all_neighbor_tokens[-1]  # (B, K-1, D)
-        z_agent = self.agent_attn(z_target, neighbor_tokens)  # (B, D)
+        delta_agent = self.agent_attn(z_time, neighbor_tokens) - z_time  # residual
 
-        # Combine
-        h = z_time + z_target + z_agent
+        # Gated parallel fusion (learnable weights, init near zero for D1 compat)
+        h = z_time + self.alpha_T * delta_target + self.alpha_A * delta_agent
         h = self.output_norm(self.output_proj(h))
 
         # Heads
