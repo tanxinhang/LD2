@@ -364,13 +364,14 @@ class StructuredActorNetwork(nn.Module):
         return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
 
     def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None,
-                detach_h_new: bool = True):
+                detach_h_new: bool = True, window_mask: torch.Tensor = None):
         """Forward with optional streaming GRU hidden state.
 
         Args:
             obs: (B, obs_dim) observation batch
             h_prev: (1, B*(K-1), D) GRU hidden states, or None for zero-init.
             detach_h_new: If True (default), detach h_new before returning.
+            window_mask: ignored (interface compat with TICA).
                 True for rollout, evaluation, and PPO single-step updates
                 (prevents cross-timestep computation graphs).
                 False for DAgger chunk BPTT training (allows gradient flow

@@ -166,11 +166,12 @@ class MAPPOAgent(BaseAgent):
 
     def evaluate_actions(
         self,
-        obs: torch.Tensor,               # (batch, obs_dim)
+        obs: torch.Tensor,               # (batch, obs_dim) or (batch, L, obs_dim)
         global_state: torch.Tensor,      # (batch, global_state_dim)
         actions_dp: torch.Tensor,        # (batch, 2)
         actions_role: torch.Tensor,      # (batch,)
         h_prev: torch.Tensor = None,     # (1, batch*(K-1), D) GRU hidden states
+        window_mask: torch.Tensor = None,  # (batch, L) TICA window mask
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO update (computational graph enabled).
 
@@ -190,7 +191,8 @@ class MAPPOAgent(BaseAgent):
         Returns:
             (new_log_probs, values, entropies, dp_means)
         """
-        dp_mean, dp_log_std, role_logits, comm_msgs, pd_pred, _h = self.actor(obs, h_prev)
+        dp_mean, dp_log_std, role_logits, comm_msgs, pd_pred, _h = self.actor(
+            obs, h_prev, window_mask=window_mask)
         values = self.critic(global_state)
 
         # Compute log probs and entropy
@@ -248,6 +250,7 @@ class MAPPOAgent(BaseAgent):
         old_log_probs: torch.Tensor,
         h_prev: torch.Tensor = None,
         tolerance: float = 1e-4,
+        window_mask: torch.Tensor = None,
     ) -> Tuple[bool, float]:
         """P0 ASSERTION: verify that recomputed log-probs match stored old log-probs.
 
@@ -268,7 +271,8 @@ class MAPPOAgent(BaseAgent):
         """
         with torch.no_grad():
             # Use the same code path as evaluate_actions but with no_grad
-            dp_mean, dp_log_std, role_logits, _, _, _ = self.actor(obs, h_prev)
+            dp_mean, dp_log_std, role_logits, _, _, _ = self.actor(
+                obs, h_prev, window_mask=window_mask)
 
             N = obs.shape[0]
             new_log_probs = torch.zeros(N, device=self.device)

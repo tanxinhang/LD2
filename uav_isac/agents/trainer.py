@@ -120,15 +120,25 @@ class MAPPTrainer:
         # Steps per env to maintain total transitions ~= rollout_steps
         self.steps_per_env = max(1, self.rollout_steps // self.num_envs)
         self.macro_interval = getattr(ma, 'actor_decision_interval', 1)
-        # Macro gamma: discount per physical frame, compounded over macro step
         self.gamma_micro = self.gamma
         if self.macro_interval > 1:
             self.steps_per_env = max(1, self.steps_per_env // self.macro_interval)
 
         # Shared buffer (size = steps_per_env * num_envs)
         obs_test, _ = env.reset(seed=0)
-        obs_dim = obs_test['0'].shape[0]  # actual dim (includes history stacking)
-        global_dim = env.core.obs_builder.get_global_state_dim() + 16  # +16 for comm aggregation
+        obs_dim = obs_test['0'].shape[0]
+        global_dim = env.core.obs_builder.get_global_state_dim() + 16
+
+        # TICA window ring buffer: per-env, per-agent, L frames
+        self._window_len = getattr(ma, 'obs_history_frames', 1)
+        self._use_window = (self._window_len > 1)
+        if self._use_window:
+            self._obs_ring = np.zeros(
+                (self.num_envs, self.K, self._window_len, obs_dim),
+                dtype=np.float64)
+            self._window_mask = np.zeros(
+                (self.num_envs, self.K, self._window_len), dtype=bool)
+            print(f'[WINDOW] L={self._window_len}, ring buffer allocated')
 
         # GRU hidden dim for recurrent buffer storage.
         # StructuredActorNetwork uses entity_dim as GRU hidden size;
@@ -340,6 +350,10 @@ class MAPPTrainer:
             if self._current_obs[n] is None:
                 obs, _ = env.reset(seed=int(env.rng.integers(0, 2**31 - 1)))
                 self._current_obs[n] = obs
+                # Clear ring buffer on fresh reset
+                if self._use_window:
+                    self._obs_ring[n].fill(0)
+                    self._window_mask[n].fill(False)
             all_obs.append(self._current_obs[n])
 
         self._rollout_team_rewards = []
@@ -394,8 +408,29 @@ class MAPPTrainer:
             else:
                 h_prev_batch = None
 
+            # ── Window construction for TICA actor ──
+            actor_window = None
+            actor_wmask = None
+            if self._use_window:
+                # Update ring buffer with current observations
+                for n in range(N):
+                    for k in range(K):
+                        self._obs_ring[n, k, :-1] = self._obs_ring[n, k, 1:]
+                        self._obs_ring[n, k, -1] = all_obs[n][str(k)]
+                        self._window_mask[n, k, :-1] = self._window_mask[n, k, 1:]
+                        self._window_mask[n, k, -1] = True
+                # Build window batch: (N*K, L, obs_dim)
+                actor_window = torch.as_tensor(
+                    self._obs_ring.reshape(N * K, self._window_len, -1),
+                    dtype=torch.float32, device=self.device)
+                actor_wmask = torch.as_tensor(
+                    self._window_mask.reshape(N * K, self._window_len),
+                    dtype=torch.bool, device=self.device)
+
             dp_mean, dp_log_std, role_logits, comm_msgs, _pd_pred, h_new = self.agents[0].actor(
-                self._obs_gpu[:N*K], h_prev_batch)
+                actor_window if self._use_window else self._obs_gpu[:N*K],
+                h_prev_batch,
+                window_mask=actor_wmask if self._use_window else None)
 
             # Apply comm mode BEFORE any downstream use (rollout critic, env, buffer)
             comm_msgs = self._effective_comm(comm_msgs)
@@ -548,6 +583,9 @@ class MAPPTrainer:
                 pt_values = target_v_np[idx0:idx1] if target_v_np is not None else None
                 # P0 FIX: extract h_prev for this env
                 env_h_prev = h_prev_arr[n] if h_prev_arr is not None else None
+                # TICA window: save pre-action window for this env
+                env_window = (self._obs_ring[n].copy() if self._use_window
+                              else None)
                 self.buffer.store(
                     obs=obs_int,
                     global_state=gs_with_comm,
@@ -561,6 +599,7 @@ class MAPPTrainer:
                     per_target_rewards=pt_rewards,
                     per_target_values=pt_values,
                     h_prev=env_h_prev,
+                    obs_window=env_window,
                 )
                 self.total_frames += self.macro_interval
 
@@ -594,6 +633,10 @@ class MAPPTrainer:
                         seed=int(env.rng.integers(0, 2**31 - 1))
                     )
                     all_obs[n] = new_obs
+                    # Clear ring buffer on episode boundary
+                    if self._use_window:
+                        self._obs_ring[n].fill(0)
+                        self._window_mask[n].fill(False)
                 else:
                     all_obs[n] = next_obs
 
@@ -723,8 +766,14 @@ class MAPPTrainer:
                 _check_h_full = data['h_prev'][_check_idx]
                 _check_h = _check_h_full.reshape(1, -1, _check_h_full.shape[-1]).to(self.device)
 
+            _check_w = None
+            _check_wm = None
+            if 'obs_window' in data:
+                _check_w = data['obs_window'][_check_idx].to(self.device)
+
             passed, max_diff = agent.verify_old_log_prob_consistency(
-                _check_obs, _check_dp, _check_role, _check_old_lp,
+                _check_w if _check_w is not None else _check_obs,
+                _check_dp, _check_role, _check_old_lp,
                 h_prev=_check_h,
             )
             if not passed:
@@ -784,10 +833,21 @@ class MAPPTrainer:
                     # Reshape to (1, mb*(K-1), D) for GRU forward
                     mb_h_prev = mb_h_prev_full.reshape(1, -1, mb_h_prev_full.shape[-1])
 
-                # Evaluate actions
+                # P0 FIX: pass stored GRU hidden states + TICA window
+                mb_window = None
+                mb_wmask = None
+                if 'obs_window' in data:
+                    mb_window = data['obs_window'][mb_idx].to(self.device)
+                    # window_mask: check if buffer stores it
+                    if 'window_mask' in data:
+                        mb_wmask = data['window_mask'][mb_idx].to(self.device)
+
+                # Evaluate actions — obs can be (B, obs_dim) or (B, L, obs_dim)
                 new_log_probs, values, entropies, dp_means, _, comm_batch = agent.evaluate_actions(
-                    mb_obs, mb_gs, mb_actions_dp, mb_actions_role,
+                    mb_window if mb_window is not None else mb_obs,
+                    mb_gs, mb_actions_dp, mb_actions_role,
                     h_prev=mb_h_prev,
+                    window_mask=mb_wmask,
                 )
 
                 # PPO-clip loss
