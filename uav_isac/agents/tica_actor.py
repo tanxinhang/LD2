@@ -323,71 +323,59 @@ class TICAActor(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=g)
                 nn.init.constant_(m.bias, 0.0)
 
-    def forward(self, obs: torch.Tensor,
-                h_prev: torch.Tensor = None,
-                detach_h_new: bool = True):
-        """Forward pass with temporal window.
+    def encode_features(self, obs: torch.Tensor,
+                         window_mask: torch.Tensor = None) -> torch.Tensor:
+        """Encode observation window into feature vector (no output heads).
 
         Args:
-            obs: (B, obs_dim) for single-frame, or (B, L, obs_dim) for window.
-                 If 2D (single frame), temporal attn uses just that frame.
-            h_prev: unused (kept for interface compatibility with MAPPO trainer)
-            detach_h_new: unused (no GRU state)
+            obs: (B, obs_dim) or (B, L, obs_dim)
+            window_mask: (B, L) boolean, True = valid frame
 
         Returns:
-            dp_mean, log_std, role_logits, comm_msg, pd_pred, h_new (None)
+            h: (B, D) TICA feature vector
         """
         if obs.dim() == 2:
-            # Single frame: treat as window of length 1
             B = obs.shape[0]
-            obs_window = obs.unsqueeze(1)  # (B, 1, obs_dim)
+            obs_window = obs.unsqueeze(1)
             T = 1
             mask = None
         else:
             B, T, _ = obs.shape
             obs_window = obs
-            mask = None  # All frames valid
+            mask = window_mask
 
-        # Encode each frame
         all_self_tokens = []
         all_target_tokens = []
         all_neighbor_tokens = []
         for t in range(T):
             st, tt, nt = self.frame_encoder(obs_window[:, t, :])
-            # Per-frame target pooling: mean over target tokens for temporal SA
-            target_pool = tt.mean(dim=1)  # (B, D)
-            frame_token = st + target_pool  # self + aggregate target context
+            target_pool = tt.mean(dim=1)
+            frame_token = st + target_pool
             all_self_tokens.append(frame_token)
             all_target_tokens.append(tt)
             all_neighbor_tokens.append(nt)
 
-        # Stack across time
-        self_seq = torch.stack(all_self_tokens, dim=1)  # (B, T, D)
+        self_seq = torch.stack(all_self_tokens, dim=1)
+        z_time = self.temporal_attn(self_seq, mask)
+        target_tokens = all_target_tokens[-1]
+        delta_target = self.target_attn(z_time, target_tokens) - z_time
+        neighbor_tokens = all_neighbor_tokens[-1]
+        delta_agent = self.agent_attn(z_time, neighbor_tokens) - z_time
 
-        # Temporal self-attention → last-frame token
-        # Now encodes full UAV history including target belief/AoI/PD_hist trends
-        z_time = self.temporal_attn(self_seq, mask)  # (B, D)
-
-        # Target cross-attention (use last-frame targets for current competition)
-        target_tokens = all_target_tokens[-1]  # (B, Q, D)
-        delta_target = self.target_attn(z_time, target_tokens) - z_time  # residual
-
-        # Agent cross-attention (use last-frame neighbors)
-        neighbor_tokens = all_neighbor_tokens[-1]  # (B, K-1, D)
-        delta_agent = self.agent_attn(z_time, neighbor_tokens) - z_time  # residual
-
-        # Gated parallel fusion (learnable weights, init near zero for D1 compat)
         h = z_time + self.alpha_T * delta_target + self.alpha_A * delta_agent
-        h = self.output_norm(self.output_proj(h))
+        return self.output_norm(self.output_proj(h))
 
-        # Heads
+    def forward(self, obs: torch.Tensor,
+                h_prev: torch.Tensor = None,
+                detach_h_new: bool = True):
+        """Forward pass — single-frame or window input."""
+        h = self.encode_features(obs)
         dp_mean = self.dp_head(h)
         LOG_STD_MIN, LOG_STD_MAX = -1.0, 1.0
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (torch.tanh(self.dp_log_std) + 1.0)
         role_logits = self.role_head(h)
         comm_msg = torch.tanh(self.comm_head(h))
-        pd_pred = torch.sigmoid(torch.zeros_like(dp_mean[:, :1]))  # placeholder
-
+        pd_pred = torch.sigmoid(torch.zeros_like(dp_mean[:, :1]))
         return dp_mean, log_std, role_logits, comm_msg, pd_pred, None
 
     def forward_with_window(self, obs_window: torch.Tensor):
@@ -443,3 +431,88 @@ class TICAActor(nn.Module):
         self.load_state_dict(tica_state)
         print(f'[TICA] loaded {loaded} D1 parameters, zero-init adapter')
         return loaded
+
+
+# ═══════════════════════════════════════════════════════════════════
+# D1-TICA Residual Adapter
+# ═══════════════════════════════════════════════════════════════════
+
+class D1TICAResidualActor(nn.Module):
+    """Exact-preserving TICA adapter: freeze D1 base, zero-init delta heads.
+
+    π_0(a|o_window, h_prev) = π_D1(a|o_last, h_prev)  ← exact at init
+
+    Architecture:
+      D1 base (frozen) → base_dp, base_log_std, base_role, base_comm
+      TICA branch (trainable) → h_tica
+      delta_dp (zero-init) → residual added to base_dp
+      delta_role (zero-init) → residual added to base_role
+    """
+
+    def __init__(self, base_actor: nn.Module, tica_actor: TICAActor):
+        super().__init__()
+        self.base_actor = base_actor
+        self.tica_actor = tica_actor
+
+        # Freeze D1 base
+        for p in self.base_actor.parameters():
+            p.requires_grad_(False)
+
+        D = tica_actor.D
+        self.delta_dp = nn.Linear(D, 2)
+        self.delta_role = nn.Linear(D, 3)
+
+        # Zero-init: residual = 0 at initialization
+        nn.init.zeros_(self.delta_dp.weight)
+        nn.init.zeros_(self.delta_dp.bias)
+        nn.init.zeros_(self.delta_role.weight)
+        nn.init.zeros_(self.delta_role.bias)
+
+    @property
+    def D(self):
+        return self.tica_actor.D
+
+    def forward(self, obs: torch.Tensor,
+                h_prev: torch.Tensor = None,
+                detach_h_new: bool = True):
+        """Forward with D1 base + TICA residual.
+
+        Args:
+            obs: (B, obs_dim) single frame or (B, L, obs_dim) window.
+                 D1 base uses only the LAST frame.
+            h_prev: GRU hidden state for D1 base.
+            detach_h_new: passed to D1 base.
+
+        Returns:
+            dp_mean, log_std, role_logits, comm_msg, pd_pred, h_new
+        """
+        # D1 base: frozen forward on last observation frame
+        if obs.dim() == 3:
+            obs_last = obs[:, -1, :]  # (B, obs_dim)
+        else:
+            obs_last = obs
+
+        with torch.no_grad():
+            base_dp, base_log_std, base_role, base_comm, base_pd, h_new = \
+                self.base_actor(obs_last, h_prev=h_prev,
+                                detach_h_new=detach_h_new)
+
+        # TICA branch: encode full window (or single frame)
+        h_tica = self.tica_actor.encode_features(obs)
+
+        # Residual heads (zero-init → exact D1 at initialization)
+        dp_mean = base_dp + self.delta_dp(h_tica)
+        role_logits = base_role + self.delta_role(h_tica)
+
+        # Keep D1 comm, P_D, log_std unchanged (comm-off)
+        return dp_mean, base_log_std, role_logits, base_comm, base_pd, h_new
+
+    def trainable_parameters(self):
+        """Return trainable parameters for optimizer."""
+        for p in self.tica_actor.parameters():
+            if p.requires_grad:
+                yield p
+        for p in self.delta_dp.parameters():
+            yield p
+        for p in self.delta_role.parameters():
+            yield p
