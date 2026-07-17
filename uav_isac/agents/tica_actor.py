@@ -558,13 +558,3 @@ class D1TICAResidualActor(nn.Module):
 
         # Keep D1 comm, P_D, log_std unchanged (comm-off)
         return dp_mean, base_log_std, role_logits, base_comm, base_pd, h_new
-
-    def trainable_parameters(self):
-        """Return trainable parameters for optimizer."""
-        for p in self.tica_actor.parameters():
-            if p.requires_grad:
-                yield p
-        for p in self.delta_dp.parameters():
-            yield p
-        for p in self.delta_role.parameters():
-            yield p

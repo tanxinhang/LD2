@@ -62,8 +62,9 @@ class RolloutBuffer:
                 dtype=np.float32,
             )
 
-        # TICA observation window: (T, K, L, obs_dim)
+        # TICA observation window: (T, K, L, obs_dim) + mask
         self.obs_window = None
+        self.window_mask = None
         self._window_len = 0
 
         # Per-target storage (S3b: diagnostics)
@@ -95,6 +96,7 @@ class RolloutBuffer:
         per_target_values: np.ndarray = None,   # (K, Q) per-target V_q(s)
         h_prev: np.ndarray = None,  # (K, K-1, D) GRU hidden states
         obs_window: np.ndarray = None,  # (K, L, obs_dim) TICA window
+        window_mask: np.ndarray = None,  # (K, L) TICA mask
     ) -> None:
         """Store one transition for all agents.
 
@@ -138,15 +140,19 @@ class RolloutBuffer:
         if self._has_gru and h_prev is not None:
             self.h_prev[self.ptr] = h_prev  # (K, K-1, D)
 
-        # Store TICA observation window
+        # Store TICA observation window + mask
         if obs_window is not None:
             if self.obs_window is None:
                 L = obs_window.shape[-2] if obs_window.ndim >= 3 else 1
                 self.obs_window = np.zeros(
                     (self.buffer_size, self.num_agents, L, self.obs.shape[-1]),
                     dtype=np.float64)
+                self.window_mask = np.zeros(
+                    (self.buffer_size, self.num_agents, L), dtype=bool)
                 self._window_len = L
             self.obs_window[self.ptr] = obs_window
+            if window_mask is not None:
+                self.window_mask[self.ptr] = window_mask
 
         self.global_states[self.ptr] = global_state
         self.ptr += 1
@@ -332,6 +338,10 @@ class RolloutBuffer:
             w_flat = self.obs_window[:actual_size].reshape(-1, self._window_len,
                                                            self.obs.shape[-1])
             result['obs_window'] = torch.as_tensor(w_flat, dtype=torch.float32)
+        # TICA window mask: (T, K, L) → (T*K, L)
+        if self.window_mask is not None:
+            wm_flat = self.window_mask[:actual_size].reshape(-1, self._window_len)
+            result['window_mask'] = torch.as_tensor(wm_flat, dtype=torch.bool)
 
         # Per-target advantages and returns
         if self.per_target_advantages is not None:

@@ -205,8 +205,16 @@ class MAPPTrainer:
         freeze_attn = getattr(ma, 'freeze_attention', False)
         use_per_lr = getattr(ma, 'use_per_module_lr', False)
 
-        enc_params, head_params, attn_params = split_param_groups(
-            agents[0].actor.named_parameters())
+        # Prefer actor-provided parameter groups (e.g. TICA adapter).
+        # Fall back to name-based prefix matching for legacy actors.
+        if hasattr(agents[0].actor, 'parameter_groups'):
+            pg = agents[0].actor.parameter_groups()
+            enc_params = pg.get('encoder', [])
+            attn_params = pg.get('attention', [])
+            head_params = pg.get('head', [])
+        else:
+            enc_params, head_params, attn_params = split_param_groups(
+                agents[0].actor.named_parameters())
 
         if self._comm_off:
             # Freeze all communication-related heads
@@ -586,6 +594,8 @@ class MAPPTrainer:
                 # TICA window: save pre-action window for this env
                 env_window = (self._obs_ring[n].copy() if self._use_window
                               else None)
+                env_wmask = (self._window_mask[n].copy() if self._use_window
+                             else None)
                 self.buffer.store(
                     obs=obs_int,
                     global_state=gs_with_comm,
@@ -600,6 +610,7 @@ class MAPPTrainer:
                     per_target_values=pt_values,
                     h_prev=env_h_prev,
                     obs_window=env_window,
+                    window_mask=env_wmask,
                 )
                 self.total_frames += self.macro_interval
 
@@ -770,11 +781,14 @@ class MAPPTrainer:
             _check_wm = None
             if 'obs_window' in data:
                 _check_w = data['obs_window'][_check_idx].to(self.device)
+            if 'window_mask' in data:
+                _check_wm = data['window_mask'][_check_idx].to(self.device)
 
             passed, max_diff = agent.verify_old_log_prob_consistency(
                 _check_w if _check_w is not None else _check_obs,
                 _check_dp, _check_role, _check_old_lp,
                 h_prev=_check_h,
+                window_mask=_check_wm,
             )
             if not passed:
                 print(f'[PPO RATIO ERROR] old_log_prob != recomputed_log_prob: '
@@ -1054,16 +1068,31 @@ class MAPPTrainer:
             obs, _ = eval_env.reset(seed=int(ep_seed))
             pd_hist = []   # list of mean P_D_q per frame
             pd_per_target = []  # list of (Q,) per frame
-            # P0 FIX: maintain streaming GRU hidden state during eval.
-            # Previously eval called actor(obs) without h_prev → h=0 every frame,
-            # inconsistent with rollout (which uses cumulative GRU state).
-            eval_h_prev = None  # None → zero-init on first frame
+            # P0 FIX: streaming GRU + TICA window during eval
+            eval_h_prev = None
+            eval_ring = None
+            eval_wmask = None
+            if self._use_window:
+                eval_ring = np.zeros((K, self._window_len, obs_dim), dtype=np.float64)
+                eval_wmask = np.zeros((K, self._window_len), dtype=bool)
             while True:
                 ob = np.stack([obs[str(k)] for k in range(K)])
+                # Update window ring buffer
+                if self._use_window:
+                    eval_ring[:, :-1] = eval_ring[:, 1:]
+                    eval_ring[:, -1] = ob
+                    eval_wmask[:, :-1] = eval_wmask[:, 1:]
+                    eval_wmask[:, -1] = True
                 with torch.inference_mode():
-                    ob_t = torch.as_tensor(ob, dtype=torch.float32, device=self.device)
-                    dp_mean, dp_log_std, role_logits, _, _, h_new = actor(ob_t, eval_h_prev)
-                    # Save h_new for next frame (detach already in inference_mode)
+                    if self._use_window:
+                        ob_in = torch.as_tensor(eval_ring, dtype=torch.float32, device=self.device)
+                        wm_in = torch.as_tensor(eval_wmask, dtype=torch.bool, device=self.device)
+                        dp_mean, dp_log_std, role_logits, _, _, h_new = actor(
+                            ob_in, eval_h_prev, window_mask=wm_in)
+                    else:
+                        ob_t = torch.as_tensor(ob, dtype=torch.float32, device=self.device)
+                        dp_mean, dp_log_std, role_logits, _, _, h_new = actor(
+                            ob_t, eval_h_prev)
                     eval_h_prev = h_new
                 dpm = dp_mean.detach().cpu().numpy()
                 dps = dp_log_std.detach().cpu().numpy()
