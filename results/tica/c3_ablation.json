@@ -1,0 +1,102 @@
+{
+  "experiment": "C3 deployment-closure: D1 vs TICA-L1 vs TICA-L16",
+  "date": "2026-07-18",
+  "config": "p0_uses_belief=true, belief_detection_sampling=true",
+  "protocol": "3 seeds x 50 episodes, 20-ep fixed evaluation bank",
+  "results": {
+    "D1_frozen": {
+      "steady": 0.6982,
+      "weak3": 0.5985,
+      "note": "frozen D1-corrected"
+    },
+    "TICA_L1": {
+      "seeds": {
+        "42": [
+          0.6992,
+          0.6001
+        ],
+        "123": [
+          0.6928,
+          0.5918
+        ],
+        "456": [
+          0.6914,
+          0.5902
+        ]
+      },
+      "mean_steady": 0.6945,
+      "mean_weak3": 0.594
+    },
+    "TICA_L16": {
+      "seeds": {
+        "42": [
+          0.6931,
+          0.5918
+        ],
+        "123": [
+          0.7001,
+          0.6005
+        ],
+        "456": [
+          0.6881,
+          0.5846
+        ]
+      },
+      "mean_steady": 0.6937,
+      "mean_weak3": 0.5923
+    }
+  },
+  "deltas": {
+    "L1_vs_D1": {
+      "steady": -0.0038,
+      "weak3": -0.0044
+    },
+    "L16_vs_D1": {
+      "steady": -0.0045,
+      "weak3": -0.0062
+    },
+    "L16_vs_L1": {
+      "steady": -0.0007,
+      "weak3": -0.0018
+    }
+  },
+  "cross_condition_summary": {
+    "C0_oracle": {
+      "D1": [
+        0.7066,
+        0.6088
+      ]
+    },
+    "C1_belief": {
+      "D1": [
+        0.683,
+        0.5773
+      ],
+      "TICA-L1": [
+        0.6877,
+        0.5839
+      ],
+      "TICA-L16": [
+        0.6888,
+        0.5853
+      ]
+    },
+    "C3_deploy": {
+      "D1": [
+        0.6982,
+        0.5985
+      ],
+      "TICA-L1": [
+        0.6945,
+        0.594
+      ],
+      "TICA-L16": [
+        0.6937,
+        0.5923
+      ]
+    }
+  },
+  "conclusion": "Deployment loss is NOT trajectory-recoverable. TICA cannot restore C1/C3 performance. Bottleneck is belief-P0 coupling, not policy memory capacity. Next: uncertainty-aware P0, belief fusion improvement.",
+  "ppo_ratio": "all OK (max|diff| < 1e-5)",
+  "d1_frozen": "all OK"
+}

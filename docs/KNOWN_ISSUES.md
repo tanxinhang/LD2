@@ -88,6 +88,30 @@ Online eval (5-seed): Full weak3 0.3255 ± 0.0053, EH 0.3280 ± 0.0010。
 
 ---
 
+## Deployment Closure Audit + TICA (2026-07-18)
+
+**四级部署协议**：C0 (oracle+always) → C1 (belief+always) → C2 (oracle+sample) → C3 (belief+sample)。D1-corrected 冻结评估 (20 eps)：
+
+| Mode | steady | weak3 | Δ vs C0 |
+|------|:---:|:---:|:---:|
+| C0 oracle+always | 0.707 | 0.609 | — |
+| C1 belief+always | 0.683 | 0.577 | −0.024 / −0.032 |
+| C2 oracle+sample | 0.697 | 0.597 | −0.010 / −0.012 |
+| C3 belief+sample | 0.698 | 0.599 | −0.009 / −0.010 |
+
+C1 退化最大（P0 belief 调度），C3 出现补偿效应（detection sampling 部分抵消）。
+
+**TICA C1/C3 消融 (3 seeds × 50 eps)**：
+
+| | C1 D1 | C1 L16 | C3 D1 | C3 L16 |
+|---|:---:|:---:|:---:|:---:|
+| steady | 0.683 | 0.689 | 0.698 | 0.694 |
+| weak3 | 0.577 | 0.585 | 0.599 | 0.592 |
+
+**结论**：部署损失不是 trajectory-recoverable。TICA L1≈L16，长时序窗口无额外收益。瓶颈在 belief uncertainty 与 P0 调度之间的耦合，非策略记忆容量。下一步：uncertainty-aware P0 + belief fusion improvement。
+
+---
+
 ## S4 Target-wise Advantage (已实现, 2026-07-16)
 
 **实现** (commit `62d92a0`)：

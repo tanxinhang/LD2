@@ -1,0 +1,27 @@
+{
+  "C0_oracle+always": {
+    "steady": 0.7066,
+    "weak3": 0.6088,
+    "worst": 0.1303,
+    "ep_fail_030": 0.85
+  },
+  "C1_belief+always": {
+    "steady": 0.683,
+    "weak3": 0.5773,
+    "worst": 0.1036,
+    "ep_fail_030": 0.85
+  },
+  "C2_oracle+sample": {
+    "steady": 0.6974,
+    "weak3": 0.5965,
+    "worst": 0.0815,
+    "ep_fail_030": 0.85
+  },
+  "C3_belief+sample": {
+    "steady": 0.6982,
+    "weak3": 0.5985,
+    "worst": 0.1258,
+    "ep_fail_030": 0.8
+  },
+  "note": "C1\u2192C3 shows +0.015/+0.022 compensation effect from detection sampling"
+}
