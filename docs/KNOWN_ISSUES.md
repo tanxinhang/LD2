@@ -157,35 +157,41 @@ m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 
 ---
 
-## B3 Uncertainty-Aware P0 (2026-07-18) — CLOSED
+## B3 Uncertainty-Aware P0 (2026-07-18) — HEADROOM-DEPENDENT
 
-20-seed 评估 (D1 policy, C3)：AoI urgency bonus (η=0.005) 和 uncertainty penalty (β=0.01) 均未通过平均性能门槛。
+三档 Benchmark (Easy/Medium/Hard, 20 seeds, D1 policy)：
 
-| | steady | weak3 | worst |
+| | Easy (CV σ=0.5) | Medium (CV σ=3.0) | Hard (CA) |
 |---|---|:---:|:---:|
-| B0 baseline | 0.698 ± 0.124 | 0.599 ± 0.167 | 0.126 |
-| B3 η=0.005 | 0.691 (−0.008) | 0.589 (−0.010) | 0.135 (+0.009) |
-| B3 β=0.01 | 0.691 (−0.007) | 0.590 (−0.009) | 0.135 (+0.009) |
+| Oracle gap (steady) | 0.008 | 0.048 | 0.043 |
+| B3 recovery (steady) | −90% | **23%** | **60%** |
+| B3 recovery (weak3) | −97% | **24%** | **64%** |
 
-worst 略升可能反映 fairness trade-off，但平均性能无改善。
-**结论**：C3 baseline 距离 C0 oracle ceiling 仅 ~0.01，当前 benchmark 无可恢复 headroom。
-复杂算法无法在 sub-1% gap 上产生稳定收益。
+**结论**：B3 不是普遍无效，而是 headroom-dependent。
+- Easy (gap<0.01)：扰动大于收益，不推荐。
+- Medium (gap~0.05)：恢复 24% oracle gap，可靠主实验场景。
+- Hard (gap~0.04, model mismatch)：恢复 60%+，强信号但 seed 一致性待提升。
+
+配置文件：`config/bench_easy.yaml`, `bench_medium.yaml`, `bench_hard.yaml`
+结果：`results/tica/three_tier_results.json`
 
 ---
 
-## 最终收敛结论 (2026-07-18)
+## 最终收敛结论 (2026-07-18, 更新)
 
 ```
 ✅ P0-P2 基础设施修复：闭环
 ✅ DAgger D1：固定 PPO 初始化
-✅ Full/EH/ MAPPO≈IPPO：策略复杂度非瓶颈
-✅ TICA L16≈L1：时序窗口无增益
+✅ Full/EH/ MAPPO≈IPPO：策略复杂度非瓶颈（近饱和环境）
+✅ TICA L16≈L1：时序窗口无增益（近饱和环境）
 ✅ S4 target-wise advantage：稳定性失败
-✅ B1-B3 belief fusion + uncertainty P0：无收益
+✅ B3 uncertainty-aware P0：HEADROOM-DEPENDENT
+   - Easy: 无效（gap<0.01）
+   - Medium: 恢复 24% oracle gap（主结果）
+   - Hard: 恢复 60%+ oracle gap（鲁棒性验证）
 
-→ Baseline 接近当前模型的经验 oracle ceiling (Δ<0.01)
-→ 项目收敛：不再扩展算法复杂度
-→ 下一步：K=8/Q=8 可扩展性，或重设计有 headroom 的压力场景
+→ 核心发现：额外复杂度仅在 belief-model mismatch 足够大时产生价值
+→ 下一步：冻结三档配置，完成 B0-B5 多方法配对实验
 ```
 
 ---

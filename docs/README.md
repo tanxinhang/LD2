@@ -35,7 +35,7 @@
 - **Full/EH 3-seed 长期对照**：PPO 不再破坏 DAgger。Full 与 EH 不可区分（Δ<0.005）。GRU/PPO 状态一致性 bug 是此前崩塌的根因。
 - **S4 target-wise advantage**：distance-responsibility 未通过稳定性检验，已搁置。
 - **TICA (Temporal-Inter-Agent Attention)**：工程稳定性验证通过（exact-preserving D1 adapter, L=16 window PPO, 3-seed）。C1/C3 部署消融：L16 相比 L1 无时序增益（Δ<0.002）。部署损失非 trajectory-recoverable。
-- **最终收敛 (2026-07-18)**：C3 baseline 距离 C0 oracle ceiling 仅 ~0.01。B1-B3 (belief fusion, uncertainty-aware P0) 均未通过 20-seed 性能门槛。Actor/TICA/S4/B1-B3 全部关闭。项目收敛：不再扩展算法复杂度。下一步 K=8/Q=8 可扩展性或重设计压力场景。
+- **三档 Benchmark (2026-07-18)**：Easy (CV σ=0.5, gap<0.01) / Medium (CV σ=3.0, gap~0.05) / Hard (CA, gap~0.04)。B3 uncertainty-aware P0 在 Medium 恢复 24%、Hard 恢复 60%+ oracle gap。Easy 不推荐。结论：额外复杂度在近饱和环境无效，在 belief-model mismatch 足够大时产生价值。配置文件：`config/bench_{easy,medium,hard}.yaml`。
 
 **当前已知问题(详见 `KNOWN_ISSUES.md`)。** 已修复:GRU/PPO 循环状态一致性(P0,2026-07-14)、Attention 冻结补全(P0)、Q 硬编码移除(P0)、PD_hist 接入 Actor(P1)、Per-target GAE 管道(P2)、角色 argmax 崩溃、动作存储/执行一致性、critic value-clip、优势重复归一化、奖励权重、状态快照漏 RNG 流。开放(影响科学可信度):**P0 用目标真值(oracle 调度)**、**belief 选中即成功观测(乐观)**、**效用非凹 → 贪心无近似保证**、动作投影概率密度未严格建模、二值 Lagrangian、角色标量序数编码。Scalar MAPPO 为当前稳定主线（3-seed 长期稳定性已验证）。
 
