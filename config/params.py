@@ -30,8 +30,8 @@ class UAVParams:
 
 @dataclass
 class TargetParams:
-    motion_model: str = "CV"
-    # Stage-1 curriculum: slow targets [0,5] so UAV (v_max=25) can hold a tight
+    motion_model: str = "CV"   # "CV" | "CT" | "CA"
+    ct_turn_rate: float = 0.3   # rad/s, only for CT model
     # bistatic pair -> task is learnable, P_D can approach the ~1.0 ceiling.
     # Ramp up to (0,20) only after MAPPO reaches high P_D on slow targets.
     speed_range: Tuple[float, float] = (0.0, 5.0)

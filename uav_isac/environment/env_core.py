@@ -247,6 +247,8 @@ class EnvironmentCore:
                 dt=self.dt,
                 area_size=self.area_size,
                 rng=self.rng,
+                motion_model=getattr(self.cfg.target, 'motion_model', 'CV'),
+                turn_rate=getattr(self.cfg.target, 'ct_turn_rate', 0.3),
             )
             self.targets.append(target)
 
