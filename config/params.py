@@ -174,6 +174,9 @@ class MARLParams:
     use_per_module_lr: bool = False
     # Neighbor belief fusion via multi-head attention + CI.
     neighbor_belief_fusion: bool = False
+    # B3: Uncertainty-aware P0 scoring weights.
+    p0_beta_uncertainty: float = 0.0   # uncertainty penalty (0=off)
+    p0_eta_aoi: float = 0.0           # AoI urgency bonus (0=off)
     # Freeze attention (attn.* + attn_norm.*) — EH mode.
     # Only meaningful when use_per_module_lr=True.
     freeze_attention: bool = False

@@ -157,6 +157,9 @@ class EnvironmentCore:
         self.belief_detection_sampling = bool(getattr(self.cfg.marl, 'belief_detection_sampling', False))
         # B8: neighbor belief fusion via multi-head attention + CI.
         self.neighbor_belief_fusion = bool(getattr(self.cfg.marl, 'neighbor_belief_fusion', False))
+        # B3: Uncertainty-aware P0 scoring
+        self.p0_beta_uncertainty = float(getattr(self.cfg.marl, 'p0_beta_uncertainty', 0.0))
+        self.p0_eta_aoi = float(getattr(self.cfg.marl, 'p0_eta_aoi', 0.0))
         self._belief_fusion_module = None
         if self.neighbor_belief_fusion:
             import torch as _torch
@@ -359,9 +362,32 @@ class EnvironmentCore:
                           self.t % hold_frames == 0 or
                           self._cached_p0_solution is None)
         if should_resolve:
+            # B3: build uncertainty inputs for P0
+            p0_cov = None; p0_aoi = None
+            if self.p0_beta_uncertainty > 0 or self.p0_eta_aoi > 0:
+                if self.p0_uses_belief and self.neighbor_belief_fusion:
+                    fused_belief = self._fuse_beliefs_attention()
+                else:
+                    fused_belief = self.belief_mgr.mean.mean(axis=0)
+                # Average covariance diagonal per target
+                p0_cov = np.array([
+                    np.mean([np.abs(self.belief_mgr.get_belief(k, q).cov_diag)
+                             for k in range(self.K)], axis=0)
+                    for q in range(self.Q)
+                ])  # (Q, 4)
+                p0_aoi = np.array([
+                    np.mean([self.belief_mgr.get_belief(k, q).aoi
+                             for k in range(self.K)])
+                    for q in range(self.Q)
+                ])  # (Q,)
+
             p0_solution = self.inner_solver.solve(
                 ranking_entries, Q=self.Q, K=self.K,
                 enforce_single_role=role_agnostic,
+                belief_cov_diag=p0_cov,
+                belief_aoi=p0_aoi,
+                beta_uncertainty=self.p0_beta_uncertainty,
+                eta_aoi=self.p0_eta_aoi,
             )
             self._cached_p0_solution = p0_solution
             self._assignment_switched = True

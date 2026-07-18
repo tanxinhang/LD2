@@ -73,6 +73,11 @@ class InnerSolver:
         Q: Optional[int] = None,
         K: Optional[int] = None,
         enforce_single_role: bool = False,
+        # B3: Uncertainty-aware scoring (all optional, default off)
+        belief_cov_diag: Optional[np.ndarray] = None,  # (Q, 4) fused cov diagonal
+        belief_aoi: Optional[np.ndarray] = None,        # (Q,) age of information
+        beta_uncertainty: float = 0.0,                   # uncertainty penalty weight
+        eta_aoi: float = 0.0,                            # AoI urgency weight
     ) -> P0Solution:
         """HEURISTIC greedy assignment by marginal detection utility.
 
@@ -178,6 +183,20 @@ class InnerSolver:
                 # Compute marginal gain
                 gain = marginal_utility_gain(D_q[e.q], e.d_eff, self.P_FA)
                 weighted_gain = omega[e.q] * gain
+
+                # B3: Uncertainty-aware scoring.
+                # Covariance is in raw units (m² for position, (m/s)² for velocity).
+                # Normalize by scenario scale so β works across different area sizes.
+                if beta_uncertainty > 0 and belief_cov_diag is not None:
+                    cov_mean = float(np.mean(np.abs(belief_cov_diag[e.q])))
+                    # Use sqrt(cov_mean) normalized by a reference scale (~100m)
+                    uncertainty = np.sqrt(max(cov_mean, 1e-8)) / 100.0
+                    weighted_gain -= beta_uncertainty * uncertainty
+
+                if eta_aoi > 0 and belief_aoi is not None:
+                    # Reward freshness proportional to AoI (higher AoI = more urgent)
+                    aoi_val = float(belief_aoi[e.q])
+                    weighted_gain += eta_aoi * aoi_val
 
                 if weighted_gain > best_gain:
                     best_gain = weighted_gain
