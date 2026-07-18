@@ -177,21 +177,42 @@ m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 
 ---
 
-## 最终收敛结论 (2026-07-18, 更新)
+## 最终收敛结论 (2026-07-18)
+
+### B0-B4 方法矩阵 (Medium, CV σ=3.0, 20 seeds)
+
+| 方法 | steady | weak3 | Δ vs B0 | Recovery |
+|------|:---:|:---:|:---:|:---:|
+| Oracle (truth P0) | 0.725 | 0.633 | +0.048 | — |
+| B0 baseline | 0.677 | 0.569 | — | — |
+| B2 CI fusion | 0.543 | 0.415 | −0.134 | −277% |
+| **B3 P0 η=0.005** | **0.688** | **0.584** | **+0.011** | **23%** |
+| B4 fusion+P0 | 0.401 | 0.315 | −0.275 | −571% |
+
+### 三档适用边界
+
+| 场景 | B3 结论 |
+|------|------|
+| Easy (gap<0.01) | 不推荐，扰动大于收益 |
+| Medium (gap~0.05) | **恢复 23% oracle gap，主结果** |
+| Hard (gap~0.04) | 恢复潜力强 (60%+)，seed 一致性待提升 |
+
+### 核心发现
+
+1. B3 是唯一同时改善 steady 和 weak3 的方法
+2. B2/B4 的 CI fusion 因 covariance 失准而严重退化
+3. 错误 belief + 更敏感的 P0 = 更严重的退化 (B4)
+4. 额外复杂度仅在 belief-model mismatch 足够大时产生价值
+5. belief calibration 是融合和风险调度的前置条件
 
 ```
-✅ P0-P2 基础设施修复：闭环
-✅ DAgger D1：固定 PPO 初始化
-✅ Full/EH/ MAPPO≈IPPO：策略复杂度非瓶颈（近饱和环境）
-✅ TICA L16≈L1：时序窗口无增益（近饱和环境）
-✅ S4 target-wise advantage：稳定性失败
-✅ B3 uncertainty-aware P0：HEADROOM-DEPENDENT
-   - Easy: 无效（gap<0.01）
-   - Medium: 恢复 24% oracle gap（主结果）
-   - Hard: 恢复 60%+ oracle gap（鲁棒性验证）
-
-→ 核心发现：额外复杂度仅在 belief-model mismatch 足够大时产生价值
-→ 下一步：冻结三档配置，完成 B0-B5 多方法配对实验
+✅ 基础设施修复：闭环
+✅ 策略复杂度探索：关闭（近饱和环境无价值）
+✅ B3 AoI-aware P0：HEADROOM-DEPENDENT
+   Medium: 23% recovery（主结果）
+   Hard: 60%+ recovery（鲁棒性验证）
+⏹ B2/B4 CI fusion：需 covariance calibration
+⏹ Actor/TICA/S4：不再扩展
 ```
 
 ---
