@@ -60,7 +60,8 @@ class PerTargetBeliefEncoder(nn.Module):
 class MultiHeadNeighborAttention(nn.Module):
     """Multi-head cross-attention: one query, multiple neighbor keys/values."""
 
-    def __init__(self, D: int = 64, num_heads: int = 4):
+    def __init__(self, D: int = 64, num_heads: int = 4,
+                 uniform_init: bool = True):
         super().__init__()
         assert D % num_heads == 0
         self.D = D
@@ -72,11 +73,23 @@ class MultiHeadNeighborAttention(nn.Module):
         self.W_V = nn.Linear(D, D, bias=False)
         self.W_O = nn.Linear(D, D, bias=False)
 
-        self._init_weights()
+        if uniform_init:
+            self._init_uniform()
+        else:
+            self._init_weights()
 
     def _init_weights(self):
         for m in [self.W_Q, self.W_K, self.W_V, self.W_O]:
             nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+
+    def _init_uniform(self):
+        """Zero-init Q/K → uniform attention weights at initialization.
+        V and O kept small-random so context is non-zero but untrained.
+        This ensures attention fusion = uniform mean at init (safe fallback)."""
+        nn.init.zeros_(self.W_Q.weight)
+        nn.init.zeros_(self.W_K.weight)
+        nn.init.orthogonal_(self.W_V.weight, gain=0.01)
+        nn.init.orthogonal_(self.W_O.weight, gain=0.01)
 
     def forward(self, query: torch.Tensor,
                 neighbor_tokens: torch.Tensor,
@@ -106,8 +119,10 @@ class MultiHeadNeighborAttention(nn.Module):
         attn_logits = (Q @ K.transpose(-2, -1)) / scale  # (B, H, 1, N)
 
         if neighbor_mask is not None:
+            # mask: (B, N) → (B, 1, 1, N) for broadcasting with (B, H, 1, N)
+            mask_expanded = neighbor_mask.unsqueeze(1).unsqueeze(2)
             attn_logits = attn_logits.masked_fill(
-                ~neighbor_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+                ~mask_expanded, float('-inf'))
 
         attn_weights = torch.softmax(attn_logits, dim=-1)  # (B, H, 1, N)
 
@@ -129,12 +144,14 @@ class NeighborBeliefFusion(nn.Module):
       - Conservative belief fusion (Covariance Intersection)
     """
 
-    def __init__(self, Q: int, D: int = 64, num_heads: int = 4):
+    def __init__(self, Q: int, D: int = 64, num_heads: int = 4,
+                 uniform_init: bool = True):
         super().__init__()
         self.Q = Q
         self.query_encoder = PerTargetBeliefEncoder(D)
         self.neighbor_encoder = PerTargetBeliefEncoder(D)
-        self.attention = MultiHeadNeighborAttention(D, num_heads)
+        self.attention = MultiHeadNeighborAttention(D, num_heads,
+                                                     uniform_init=uniform_init)
 
     def forward(self,
                 local_belief_mean,   # (B, Q, 4)

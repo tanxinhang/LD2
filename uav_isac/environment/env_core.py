@@ -155,6 +155,15 @@ class EnvironmentCore:
         self.p0_uses_belief = bool(getattr(self.cfg.marl, 'p0_uses_belief', False))
         # B7: gate belief update by a Bernoulli(P_D) detection event.
         self.belief_detection_sampling = bool(getattr(self.cfg.marl, 'belief_detection_sampling', False))
+        # B8: neighbor belief fusion via multi-head attention + CI.
+        self.neighbor_belief_fusion = bool(getattr(self.cfg.marl, 'neighbor_belief_fusion', False))
+        self._belief_fusion_module = None
+        if self.neighbor_belief_fusion:
+            import torch as _torch
+            from uav_isac.agents.neighbor_attention import NeighborBeliefFusion
+            self._belief_fusion_module = NeighborBeliefFusion(
+                Q=self.Q, D=64, num_heads=4)
+            # Will be moved to device later if needed; for now CPU is fine for env
 
         # State objects (created in reset)
         self.uavs: List[UAV] = []
@@ -329,7 +338,10 @@ class EnvironmentCore:
         # = fused belief estimate (P0 cannot see true targets at deployment). The
         # realized D_q*/P_D below always come from the TRUE deflection of the picks.
         if self.p0_uses_belief:
-            fused = self.belief_mgr.mean.mean(axis=0)  # (Q,4) uniform fusion over UAVs' beliefs
+            if self.neighbor_belief_fusion and self._belief_fusion_module is not None:
+                fused = self._fuse_beliefs_attention()  # attention-weighted CI fusion
+            else:
+                fused = self.belief_mgr.mean.mean(axis=0)  # uniform mean (legacy)
             est_pos = np.stack([fused[:, 0], fused[:, 1], np.zeros(self.Q)], axis=1)
             est_vel = np.stack([fused[:, 2], fused[:, 3], np.zeros(self.Q)], axis=1)
             ranking_entries = self.deflection_computer.compute(
@@ -589,6 +601,68 @@ class EnvironmentCore:
         for (i, j, q) in selected_set:
             D_q[q] += entry_map.get((i, j, q), 0.0)
         return D_q
+
+    def _fuse_beliefs_attention(self) -> np.ndarray:
+        """Fuse per-UAV beliefs via multi-head neighbor attention + CI.
+
+        Returns:
+            fused_mean: (Q, 4) fused belief mean per target
+        """
+        import torch
+        Q, K = self.Q, self.K
+        D = 4  # belief mean dimension
+
+        # Extract per-agent per-target belief summaries
+        loc_mean = np.zeros((K, Q, D), dtype=np.float64)
+        loc_cov = np.zeros((K, Q, D), dtype=np.float64)
+        loc_aoi = np.zeros((K, Q, 1), dtype=np.float64)
+        loc_pd = np.zeros((K, Q, 1), dtype=np.float64)
+
+        for k in range(K):
+            for q in range(Q):
+                b = self.belief_mgr.get_belief(k, q)
+                loc_mean[k, q] = b.mean
+                loc_cov[k, q] = np.abs(b.cov_diag)
+                loc_aoi[k, q, 0] = float(b.aoi)
+            if hasattr(self, 'prev_P_D_local') and k in self.prev_P_D_local:
+                loc_pd[k, :, 0] = self.prev_P_D_local[k]
+
+        # Use raw belief values (meters, meters^2) — CI needs consistent units
+        loc_mean_t = torch.as_tensor(loc_mean, dtype=torch.float32)
+        loc_cov_t = torch.as_tensor(np.abs(loc_cov), dtype=torch.float32)
+        loc_aoi_t = torch.as_tensor(loc_aoi, dtype=torch.float32)
+        loc_pd_t = torch.as_tensor(loc_pd, dtype=torch.float32)
+
+        # For each agent as query, other agents as neighbors
+        all_fused = np.zeros((Q, D), dtype=np.float64)
+        for k in range(K):
+            # Query: agent k
+            q_mean = loc_mean_t[k:k+1]  # (1, Q, D)
+            q_cov = loc_cov_t[k:k+1]
+            q_aoi = loc_aoi_t[k:k+1]
+            q_pd = loc_pd_t[k:k+1]
+
+            # Neighbors: all other agents → (1, Q, N, D)
+            nb_idx = [j for j in range(K) if j != k]
+            nb_mean = loc_mean_t[nb_idx].permute(1, 0, 2).unsqueeze(0)  # (N,Q,D)→(Q,N,D)→(1,Q,N,D)
+            nb_cov = loc_cov_t[nb_idx].permute(1, 0, 2).unsqueeze(0)
+            nb_aoi = loc_aoi_t[nb_idx].permute(1, 0, 2).unsqueeze(0)
+            nb_pd = loc_pd_t[nb_idx].permute(1, 0, 2).unsqueeze(0)
+            nb_mask = torch.ones(1, K-1, dtype=torch.bool)
+
+            with torch.no_grad():
+                fw, _, _ = self._belief_fusion_module(
+                    q_mean, q_cov, q_aoi, q_pd,
+                    nb_mean, nb_cov, nb_aoi, nb_pd,
+                    nb_mask)
+                fused_m, _ = self._belief_fusion_module.covariance_intersection_fusion(
+                    q_mean, q_cov, nb_mean, nb_cov, fw, local_weight=0.25)
+
+            fused_m_np = fused_m[0].cpu().numpy()  # already in raw coordinates
+            all_fused += fused_m_np
+
+        # Average over all agents' fused beliefs
+        return all_fused / K
 
     def _build_observations(self) -> Dict[int, np.ndarray]:
         """Build local observations for all UAVs."""
