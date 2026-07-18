@@ -243,6 +243,102 @@ class NeighborBeliefFusion(nn.Module):
             torch.stack(all_contexts, dim=1),         # (B, Q, D)
         )
 
+    @staticmethod
+    def robust_mixture_fusion(
+        local_mean, local_cov,       # (B, Q, D)
+        neighbor_mean, neighbor_cov, # (B, Q, N, D)
+        weights=None,                # (B, Q, N) or None for uniform
+        local_weight=0.25,
+        epsilon=1e-4,
+    ):
+        """B1: Moment-matched mixture with robust covariance.
+
+        x̄ = Σ w_j x_j
+        P = Σ w_j [P_j + (x_j − x̄)(x_j − x̄)^T]
+
+        The outer-product term captures disagreement between estimates,
+        preventing false confidence when estimates diverge.
+        """
+        B, Q, N = neighbor_mean.shape[:3]
+        device = local_mean.device
+
+        if weights is None:
+            w_neighbors = torch.full((B, Q, N), (1.0 - local_weight) / N,
+                                     device=device)
+        else:
+            w_neighbors = weights * (1.0 - local_weight)
+
+        w_local = torch.full((B, Q, 1), local_weight, device=device)
+        all_w = torch.cat([w_local, w_neighbors], dim=2)  # (B, Q, 1+N)
+
+        all_m = torch.cat([local_mean.unsqueeze(2), neighbor_mean], dim=2)  # (B,Q,1+N,D)
+
+        # Weighted mean
+        fused_mean = (all_w.unsqueeze(-1) * all_m).sum(dim=2)  # (B, Q, D)
+
+        # Moment-matched covariance
+        diff = all_m - fused_mean.unsqueeze(2)  # (B, Q, 1+N, D)
+        outer = diff.unsqueeze(-1) @ diff.unsqueeze(-2)  # (B, Q, 1+N, D, D)
+        all_cov = torch.cat([
+            local_cov.unsqueeze(2),
+            neighbor_cov,
+        ], dim=2)  # (B, Q, 1+N, D) — diagonal cov
+        # For diagonal covariance, mixture cov is:
+        # P = Σ w_j [diag(σ²_j) + (x_j−x̄)²]
+        fused_cov = (all_w.unsqueeze(-1) * (all_cov + diff ** 2)).sum(dim=2)
+        fused_cov = fused_cov.clamp(min=epsilon)
+
+        return fused_mean, fused_cov
+
+    @staticmethod
+    def regularized_ci_fusion(
+        local_mean, local_cov,       # (B, Q, D)
+        neighbor_mean, neighbor_cov, # (B, Q, N, D)
+        weights=None,
+        local_weight=0.25,
+        lambda_min=0.01,
+        lambda_max=100.0,
+        epsilon=1e-4,
+    ):
+        """B2: Regularized Covariance Intersection.
+
+        1. Clip eigenvalues of each covariance to [λ_min, λ_max]
+        2. Add εI for numerical stability
+        3. CI: P_f^{-1} = Σ ω_j P_j^{-1}, x_f = P_f Σ ω_j P_j^{-1} x_j
+
+        This prevents any single overconfident estimate from dominating.
+        """
+        B, Q, N = neighbor_mean.shape[:3]
+        D = local_mean.shape[-1]
+        device = local_mean.device
+
+        if weights is None:
+            w_neighbors = torch.full((B, Q, N), (1.0 - local_weight) / N,
+                                     device=device)
+        else:
+            w_neighbors = weights * (1.0 - local_weight)
+
+        all_w = torch.cat([
+            torch.full((B, Q, 1), local_weight, device=device),
+            w_neighbors,
+        ], dim=2)  # (B, Q, 1+N)
+
+        all_m = torch.cat([local_mean.unsqueeze(2), neighbor_mean], dim=2)
+        all_cov = torch.cat([local_cov.unsqueeze(2), neighbor_cov], dim=2)
+
+        # Regularize: clip diagonal values to [λ_min, λ_max] + ε
+        all_cov_reg = all_cov.clamp(min=lambda_min, max=lambda_max) + epsilon
+
+        # CI with regularized precision
+        precision = all_w.unsqueeze(-1) / all_cov_reg  # (B, Q, 1+N, D)
+        fused_precision = precision.sum(dim=2)  # (B, Q, D)
+        fused_cov = 1.0 / (fused_precision + epsilon)
+
+        weighted_mean = (all_w.unsqueeze(-1) * precision * all_m).sum(dim=2)
+        fused_mean = weighted_mean / (fused_precision + epsilon)
+
+        return fused_mean, fused_cov
+
     def covariance_intersection_fusion(
         self,
         local_belief_mean,      # (B, Q, 4)
