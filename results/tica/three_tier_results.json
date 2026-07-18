@@ -1,0 +1,44 @@
+{
+  "Easy": {
+    "baseline_steady": 0.6982385580686571,
+    "baseline_weak3": 0.5984659153320828,
+    "b3_steady": 0.6906937256419752,
+    "b3_weak3": 0.5884677767417911,
+    "oracle_steady": 0.7065843479982487,
+    "oracle_weak3": 0.6087791306643374,
+    "gap_steady": 0.008345789929591563,
+    "gap_weak3": 0.0103132153322546,
+    "recovery_steady_pct": -90.40285569530447,
+    "recovery_weak3_pct": -96.94492229811739,
+    "paired_delta_steady_mean": -0.007544832426681811,
+    "paired_positive_frac": 0.5
+  },
+  "Medium": {
+    "baseline_steady": 0.6764592382023904,
+    "baseline_weak3": 0.5686154669427064,
+    "b3_steady": 0.6875140631413466,
+    "b3_weak3": 0.5841902706082222,
+    "oracle_steady": 0.7246658037585665,
+    "oracle_weak3": 0.6329041267148484,
+    "gap_steady": 0.048206565556176084,
+    "gap_weak3": 0.06428865977214204,
+    "recovery_steady_pct": 22.93219774404742,
+    "recovery_weak3_pct": 24.226362348690227,
+    "paired_delta_steady_mean": 0.011054824938956135,
+    "paired_positive_frac": 0.5
+  },
+  "Hard": {
+    "baseline_steady": 0.5412179644567542,
+    "baseline_weak3": 0.3965246981793896,
+    "b3_steady": 0.5672750789960191,
+    "b3_weak3": 0.4286266334140099,
+    "oracle_steady": 0.5846376294058238,
+    "oracle_weak3": 0.44650799634130794,
+    "gap_steady": 0.04341966494906957,
+    "gap_weak3": 0.04998329816191832,
+    "recovery_steady_pct": 60.012242309629634,
+    "recovery_weak3_pct": 64.22532408851399,
+    "paired_delta_steady_mean": 0.026057114539264858,
+    "paired_positive_frac": 0.5
+  }
+}
