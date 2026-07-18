@@ -157,6 +157,39 @@ m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 
 ---
 
+## B3 Uncertainty-Aware P0 (2026-07-18) — CLOSED
+
+20-seed 评估 (D1 policy, C3)：AoI urgency bonus (η=0.005) 和 uncertainty penalty (β=0.01) 均未通过平均性能门槛。
+
+| | steady | weak3 | worst |
+|---|---|:---:|:---:|
+| B0 baseline | 0.698 ± 0.124 | 0.599 ± 0.167 | 0.126 |
+| B3 η=0.005 | 0.691 (−0.008) | 0.589 (−0.010) | 0.135 (+0.009) |
+| B3 β=0.01 | 0.691 (−0.007) | 0.590 (−0.009) | 0.135 (+0.009) |
+
+worst 略升可能反映 fairness trade-off，但平均性能无改善。
+**结论**：C3 baseline 距离 C0 oracle ceiling 仅 ~0.01，当前 benchmark 无可恢复 headroom。
+复杂算法无法在 sub-1% gap 上产生稳定收益。
+
+---
+
+## 最终收敛结论 (2026-07-18)
+
+```
+✅ P0-P2 基础设施修复：闭环
+✅ DAgger D1：固定 PPO 初始化
+✅ Full/EH/ MAPPO≈IPPO：策略复杂度非瓶颈
+✅ TICA L16≈L1：时序窗口无增益
+✅ S4 target-wise advantage：稳定性失败
+✅ B1-B3 belief fusion + uncertainty P0：无收益
+
+→ Baseline 接近当前模型的经验 oracle ceiling (Δ<0.01)
+→ 项目收敛：不再扩展算法复杂度
+→ 下一步：K=8/Q=8 可扩展性，或重设计有 headroom 的压力场景
+```
+
+---
+
 ## 训练崩塌归因(诊断闭环,2026-06; 2026-07-14 更正)
 
 **现象**:MAPPO 训练后 eval `steady_P_D`≈0.018、`avg_P_D`≈0.12(**低于随机 0.16、低于静止 0.20**);`entropy` Ep50 塌到下限、`kl`→0(策略冻结);训练日志显示 `avg_P_D` 从 Ep0 的 0.21 随熵塌缩**一路下降**。无论 400/800、oracle/belief 都同样崩。
