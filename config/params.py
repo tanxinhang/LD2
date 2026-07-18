@@ -172,6 +172,10 @@ class MARLParams:
     # Per-module LR: encoder=1e-5, attention=1e-5, head=5e-5 (Full).
     # When freeze_attention=True: attention LR→0. False = single LR for all.
     use_per_module_lr: bool = False
+    # B1: Covariance regularization (clip Kalman eigenvalues).
+    belief_cov_regularization: bool = False
+    belief_cov_lambda_min: float = 0.01
+    belief_cov_lambda_max: float = 100.0
     # Neighbor belief fusion via multi-head attention + CI.
     neighbor_belief_fusion: bool = False
     # B3: Uncertainty-aware P0 scoring weights.
