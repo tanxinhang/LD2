@@ -1,0 +1,161 @@
+channel:
+  NF: 4.0
+  eta_los_dB: 0.1
+  eta_nlos_dB: 21.0
+  kT: 4.0e-21
+  los_a: 4.88
+  los_b: 0.43
+  ric_K: 6.0
+  use_los_prob: true
+  use_swerling: false
+detection:
+  B_q: 64
+  K_q_max: 3
+  P_D_min: 0.2
+  P_FA: 0.001
+  T_report: 0.005
+  g_min: 0.5
+marl:
+  active_probe_aoi_weight: 0.5
+  active_probe_enabled: false
+  active_probe_interval: 5
+  active_probe_nis_weight: 0.2
+  active_probe_uncertainty_weight: 0.3
+  actor_decision_interval: 5
+  advantage_mode: scalar
+  alpha_pd: 0.5
+  assignment_hold_frames: 5
+  bc_beta_init: 0.05
+  belief_cov_floor_pos: 25.0
+  belief_cov_floor_vel: 1.0
+  belief_cov_lambda_max: 100.0
+  belief_cov_lambda_min: 0.01
+  belief_cov_regularization: false
+  belief_detection_sampling: true
+  belief_nis_deflate_rate: 0.95
+  belief_nis_enabled: false
+  belief_nis_inflate_k: 2.0
+  belief_nis_lambda_max: 5.0
+  belief_nis_window: 0.05
+  centralized_actor: false
+  centralized_critic: true
+  comm_cost_weight: 0.001
+  critic_lr_mult: 5.0
+  diff_weight: 0.3
+  early_stop: true
+  early_stop_min_delta: 0.005
+  early_stop_patience: 12
+  entropy_decay_frames: 500000
+  entropy_final: 0.005
+  entropy_init: 0.03
+  eta_mc: 0.5
+  eta_sense: 0.0
+  eval_episodes: 5
+  eval_interval: 50
+  eval_seeds:
+  - 10001
+  - 10002
+  - 10003
+  - 10004
+  - 10005
+  freeze_actor_after: 0
+  freeze_attention: false
+  gae_lambda: 0.95
+  gamma: 0.99
+  hidden_layers:
+  - 256
+  - 256
+  lagrangian_lr: 0.002
+  lagrangian_max: 1.0
+  lambda_report: 1.0e-05
+  lambda_tail: 0.0
+  learn_roles: false
+  learned_comm_mode: 'off'
+  lr: 0.0003
+  max_grad_norm: 0.5
+  max_violation_rate: 0.1
+  minibatch_size: 256
+  neighbor_belief_fusion: false
+  num_envs: 8
+  num_episodes: 300
+  obs_history_frames: 1
+  oracle_obs: false
+  p0_beta_uncertainty: 0.0
+  p0_eta_aoi: 0.0
+  p0_fusion_confidence_min: 0.3
+  p0_fusion_correction_delta: 0.05
+  p0_safe_fallback: false
+  p0_uses_belief: true
+  ppo_clip: 0.1
+  ppo_epochs: 2
+  rel_features: true
+  rollout_steps: 2048
+  shape_w: 0.01
+  structured_actor: true
+  target_kl: 0.02
+  target_responsibility_tau_m: 50.0
+  team_weight: 0.7
+  trust_aoi_max: 50.0
+  trust_disagreement_threshold: 6.0
+  trust_ema_rho: 0.1
+  trust_gate_enabled: false
+  trust_local_weight_min: 0.25
+  trust_quarantine_duration: 10
+  trust_quarantine_nis_ratio: 1.5
+  trust_weight_max: 0.6
+  use_centered_marginal: false
+  use_difference_reward: true
+  use_distance_shaping: false
+  use_p0_sinr_gated: false
+  use_per_module_lr: true
+  vf_coef: 0.5
+otfs:
+  B: 1000000.0
+  M: 64
+  N: 16
+  T_sym: 6.4e-05
+  delta_f: 15625.0
+  fc: 28000000000.0
+  g_rx_dBi: 16.0
+  g_tx_dBi: 16.0
+  n_cpi: 128
+p0_solver:
+  capacity_per_rx: 256
+  latency_max: 0.005
+scenario:
+  C: 1
+  K: 4
+  Q: 4
+  T: 150
+  dt: 0.1
+  height: 20
+  region_size:
+  - 800
+  - 800
+seeds:
+- 42
+- 123
+- 456
+- 789
+- 1024
+target:
+  ct_turn_rate: 0.3
+  motion_model: CA
+  omega_q:
+  - 0.25
+  - 0.25
+  - 0.25
+  - 0.25
+  rcs: 1.0
+  sigma_a: 0.5
+  speed_range:
+  - 0
+  - 5
+uav:
+  B_max: 50000
+  P_fly_coeff: 0.05
+  P_fly_static: 80
+  P_report: 0.25
+  P_sense: 0.0251
+  d_safe: 20
+  v_max: 25

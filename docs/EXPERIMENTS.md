@@ -153,6 +153,55 @@ pytest tests/ -q
 
 ---
 
-## 7. 复现产物建议
+## 7. 四档 Benchmark 与 CG-SR 安全系统 (2026-07-19)
+
+### 场景设计
+
+| 场景 | 配置 | B0 steady | Oracle gap | 角色 |
+|------|------|:------:|:------:|------|
+| **Matched-Easy** | K=6, Q=4, CV, 600m, σ_a=0.75 | **0.883** | 0.024 | 高性能能力证明 |
+| Easy | K=4, Q=4, CV, 800m, σ_a=0.5 | ~0.70 | <0.01 | 近饱和安全边界 |
+| Medium | K=4, Q=4, CV, 800m, σ_a=3.0 | 0.635 | ~0.05 | B3 主实验 |
+| Hard | K=4, Q=4, CA, 800m | 0.374 | ~0.04 | 鲁棒性/恢复 |
+
+### Matched-Easy (K=6, Q=4, CV matched, 20 seeds)
+
+| 方法 | steady | weak3 | oracle gap | gap recovery |
+|------|:------:|:------:|:------:|:------:|
+| Oracle | 0.907 | 0.876 | — | — |
+| B0 (belief, no B3) | 0.883 | 0.844 | 0.024 | — |
+| **B3** | **0.902** | 0.869 | **0.005** | **79%** |
+| CG-SR (CI) | 0.717 | 0.624 | — | — |
+
+### 收敛结论
+
+> **B3 提升正常调度，AQ 修复模型失配，CG-SR 防御异常传播；
+> CI 在完成统计校准前保持关闭。**
+
+| 模块 | 定位 | 有效场景 |
+|------|------|------|
+| B3 | 主调度方法 | Medium (23%), Matched-Easy (79%) |
+| AQ (Adaptive-Q) | 修复运动模型失配 | Hard |
+| CG-SR (Gate+SafeP0+Probe) | 异常融合防御与故障恢复 | Fault injection |
+| CI fusion | 默认关闭 | 待 covariance 校准 |
+
+### 运行
+
+```bash
+# Matched-Easy
+python scripts/run_benchmark_matrix.py --config config/bench_matched_easy.yaml --seeds 20
+
+# Medium
+python scripts/run_benchmark_matrix.py --config config/bench_medium.yaml --seeds 20
+
+# Hard
+python scripts/run_benchmark_matrix.py --config config/bench_hard_clean.yaml --seeds 20
+
+# 故障注入
+python scripts/fault_injection_test.py --fault all --seeds 10 --hard
+
+---
+
+## 8. 复现产物建议
 
 当前 `run_experiments` 把聚合结果写 `results/experiments.json`。建议每次正式 run 额外保存完整配置快照,便于复现:`results/run_<tag>/config.yaml`(可在 `run_experiments.main` 里把 `cfg` dump 出来)。这样他人仅凭该目录即可重建场景与超参。

@@ -217,6 +217,125 @@ m_{kq} = P_D(all)_q − P_D(without k)_q, ρ = softmax(m/τ)。
 
 ---
 
+## Calibrate–Gate–Schedule–Recover (CG-SR) 安全系统 (2026-07-19)
+
+### 收敛结论
+
+> **B3 提升正常调度，AQ 修复模型失配，CG-SR 防御异常传播；
+> CI 在完成统计校准前保持关闭。**
+
+### 四档 Benchmark 全景
+
+| 场景 | 配置 | B0 steady | Oracle gap | 角色 |
+|------|------|:------:|:------:|------|
+| **Matched-Easy** | K=6, Q=4, CV, 600m, σ_a=0.75 | **0.883** | 0.024 | 高性能能力证明 |
+| Easy | K=4, Q=4, CV, 800m, σ_a=0.5 | ~0.70 | <0.01 | 近饱和安全边界 |
+| Medium | K=4, Q=4, CV, 800m, σ_a=3.0 | 0.635 | ~0.05 | B3 主实验 |
+| Hard | K=4, Q=4, CA, 800m | 0.374 | ~0.04 | 鲁棒性/恢复 |
+
+### Matched-Easy 结果 (K=6, Q=4, CV matched, 600m, homing policy, 20 seeds)
+
+| 方法 | steady | weak3 | oracle gap | gap recovery |
+|------|:------:|:------:|:------:|:------:|
+| Oracle (truth P0) | 0.907 | 0.876 | — | — |
+| B0 (belief, no B3) | 0.883 | 0.844 | 0.024 | — |
+| **B3 (belief + B3)** | **0.902** | 0.869 | **0.005** | **79%** |
+| CG-SR (CI+gate+safe) | 0.717 | 0.624 | — | — |
+
+**注意**：B3 的有效性具有策略依赖性。Homing policy 下 B3 在所有场景均 ≤ B0（Medium: B3=0.614 < B0=0.647），但 D1 trained policy 下 B3 恢复 23% oracle gap（已发布结果）且在 Matched-Easy 恢复 79%。B3 修改的是 P0 调度偏好——homing policy 不响应 P0 变化，因此无法体现 B3 价值。评估 B3 必须使用与 P0 交互的训练策略。
+
+### P0 Rank Inversion 因果审计 (2026-07-19)
+
+审计验证了 "belief 误差 → 决策歧义 → P0 排序翻转 → P_D 下降" 的因果链：
+
+| 关系 | Medium ρ | Hard ρ | 判定 |
+|------|:---:|:---:|:---:|
+| H1: ambiguity → rank inversion | 0.41 | 0.23 | 成立 |
+| H2: rank inversion → P0 regret | 0.43 | 0.29 | 成立 |
+| H3: P0 regret → P_D | −0.37 | −0.25 | 成立 |
+| H*: ambiguity → P_D (直接) | **−0.82** | **−0.72** | 强关联 |
+
+binned 梯度 (Medium): Q1(低歧义) P_D=0.76 → Q4(高歧义) P_D=0.30。
+
+**关键发现**：ambiguity 不是效用项（加入 utility 会破坏排序），而是**模式切换信号**——高歧义时应切换为信息获取模式，而非在不确定状态下做更激进的决策。
+
+**DU-P0 简单 bonus 失败**：`bonus × ambiguity × d_eff` 在 Medium/Hard 均显著差于 B0（Medium: DU=0.504 < B0=0.647）。连续加权不能解决排序歧义。正确方向是离散两模式：低歧义→正常调度，高歧义→选择最大化预期信息增益的观测。
+
+### 各模块定位
+
+| 模块 | 定位 | 有效场景 |
+|------|------|------|
+| **B3** | 主调度方法——策略依赖，需与 trained policy 配合 | Medium (23%, D1 policy), Matched-Easy (79%, D1 policy) |
+| **AQ (Adaptive-Q)** | 修复运动模型失配产生的滤波误差 | Hard |
+| **CG-SR (Gate+SafeP0+Probe)** | 异常融合防御与故障恢复 | Fault injection |
+| **CI fusion** | **默认关闭**——在所有场景均未证明净收益 | 待 covariance 校准后再评估 |
+| **DU-P0** | 审计成立，简单 bonus 关闭。正确方向：decision-space information gain + 离散模式切换 | 待实现 |
+
+### 推荐默认配置
+
+```yaml
+neighbor_belief_fusion: false     # CI fusion OFF
+belief_nis_enabled: true          # NIS state machine ON (for AQ + monitoring)
+trust_gate_enabled: false         # gate OFF (only needed with CI)
+p0_safe_fallback: true            # safe P0 ON (harmless when CI off)
+active_probe_enabled: true        # event-triggered probe ON
+p0_beta_uncertainty: 0.005        # B3 ON
+p0_eta_aoi: 0.005                 # B3 ON
+belief_motion_model: CV           # or CA for Hard
+```
+
+### P0 级修复 (2026-07-19)
+
+| # | 问题 | 修复 | 文件 |
+|---|------|------|------|
+| P0.2 | CI weight cap 归一化后可超上限 | 归一化后再次 clamp + renormalize | `neighbor_attention.py` |
+| P0.3 | Kalman 更新用简化形式 | Joseph form: `(I-KH)P(I-KH)^T + KRK^T` | `belief.py` |
+| P0.4 | Safe P0 仅关 B3，fused belief 仍进 P0 几何 | 低置信度时 ranking_entries 改用 local belief mean | `env_core.py` |
+
+### 新增能力
+
+- **NIS 状态机** (L1): NORMAL→SUSPECT→RECOVERING，滞回 τ_enter=1.3
+- **Adaptive-Q** (L1): Q_scale 随 NIS 状态自适应
+- **CA Kalman** (L1): 支持 `belief_motion_model: CA`，6D 状态
+- **TrustManager** (L2): Mahalanobis gate + weight cap + quarantine
+- **Dual-score Safe P0** (L3): 低置信度→local belief 几何完整回退
+- **Event-triggered Probe** (L4): score > threshold 才触发
+
+### 运行命令
+
+```bash
+# Matched-Easy (高性能展示)
+python scripts/run_benchmark_matrix.py --config config/bench_matched_easy.yaml --seeds 20
+
+# Medium (B3 主实验)
+python scripts/run_benchmark_matrix.py --config config/bench_medium.yaml --seeds 20
+
+# Hard (鲁棒性)
+python scripts/run_benchmark_matrix.py --config config/bench_hard_clean.yaml --seeds 20
+
+# 故障注入
+python scripts/fault_injection_test.py --fault all --seeds 10 --hard
+
+# NIS 诊断
+python scripts/diagnose_nis.py
+```
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `uav_isac/environment/trust_manager.py` | TrustManager |
+| `scripts/run_benchmark_matrix.py` | R0-R4 矩阵运行器 |
+| `scripts/fault_injection_test.py` | 故障注入测试 |
+| `scripts/diagnose_nis.py` | NIS 诊断 |
+| `config/bench_matched_easy.yaml` | Matched-Easy 场景 |
+| `config/bench_hard_clean.yaml` | Hard 场景 (CA) |
+| `tests/test_belief_calibration.py` | 14 项 |
+| `tests/test_trust_manager.py` | 17 项 |
+| `tests/test_safe_p0.py` | 5 项 |
+
+---
+
 ## 训练崩塌归因(诊断闭环,2026-06; 2026-07-14 更正)
 
 **现象**:MAPPO 训练后 eval `steady_P_D`≈0.018、`avg_P_D`≈0.12(**低于随机 0.16、低于静止 0.20**);`entropy` Ep50 塌到下限、`kl`→0(策略冻结);训练日志显示 `avg_P_D` 从 Ep0 的 0.21 随熵塌缩**一路下降**。无论 400/800、oracle/belief 都同样崩。

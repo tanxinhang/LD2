@@ -181,6 +181,44 @@ class MARLParams:
     # B3: Uncertainty-aware P0 scoring weights.
     p0_beta_uncertainty: float = 0.0   # uncertainty penalty (0=off)
     p0_eta_aoi: float = 0.0           # AoI urgency bonus (0=off)
+    # ── Calibrate–Gate–Schedule–Recover: belief fusion safety system ──
+    # Layer 1: NIS-driven covariance calibration.
+    belief_nis_enabled: bool = False        # master switch for NIS calibration
+    belief_nis_window: float = 0.1          # ρ for NIS EMA (0.1 ≈ 10-frame window)
+    belief_nis_inflate_k: float = 2.0       # k in λ = 1 + k·max(r̄−1, 0) (linear, gentle)
+    belief_nis_lambda_max: float = 5.0      # max inflation factor
+    belief_nis_deflate_rate: float = 0.95   # per-frame decay when r̄ ≤ 1
+    belief_cov_floor_pos: float = 25.0      # σ²_min for position (5 m σ)
+    belief_cov_floor_vel: float = 1.0       # σ²_min for velocity (1 m/s σ)
+    # NIS state machine hysteresis
+    belief_nis_enter_threshold: float = 1.3  # r̄ above this → suspect
+    belief_nis_exit_threshold: float = 1.2   # r̄ below this → recovering
+    belief_nis_enter_frames: int = 3         # consecutive frames to enter SUSPECT
+    belief_nis_exit_frames: int = 5          # consecutive frames to exit to NORMAL
+    # Layer 2: Disagreement-gated CI fusion.
+    trust_gate_enabled: bool = False        # master switch for trust gating
+    trust_disagreement_threshold: float = 6.0   # chi² 4-dof trigger threshold
+    trust_aoi_max: float = 50.0             # max AoI before age penalty
+    trust_weight_max: float = 0.6           # ω_max per neighbor in CI
+    trust_local_weight_min: float = 0.25    # minimum local belief weight
+    trust_ema_rho: float = 0.1              # EMA ρ for trust scores
+    trust_quarantine_nis_ratio: float = 1.5 # quarantine if NIS_fused > ratio × NIS_local
+    trust_quarantine_duration: int = 10     # frames to quarantine after trigger
+    # Layer 3: Safe P0 with bounded fusion correction.
+    p0_safe_fallback: bool = False          # master switch for safe P0
+    p0_fusion_correction_delta: float = 0.05   # δ_J max correction magnitude
+    p0_fusion_confidence_min: float = 0.3   # min fusion confidence to use correction
+    # DU-P0: Decision-Uncertainty-aware scheduling
+    du_enabled: bool = False                # master switch for DU-P0
+    du_ambiguity_threshold: float = 3.0     # A_q above this triggers probe mode
+    du_ambiguity_bonus: float = 0.1         # gamma: bonus weight per unit ambiguity
+    # Layer 4: Active probing + trust feedback recovery.
+    active_probe_enabled: bool = False      # master switch for active probing
+    active_probe_interval: int = 5          # (deprecated) probe every M frames
+    active_probe_threshold: float = 3.0     # event-triggered: min score to probe
+    active_probe_uncertainty_weight: float = 0.3  # c₁: covariance trace weight
+    active_probe_nis_weight: float = 0.2         # c₂: NIS anomaly weight
+    active_probe_aoi_weight: float = 0.5         # AoI urgency weight
     # Freeze attention (attn.* + attn_norm.*) — EH mode.
     # Only meaningful when use_per_module_lr=True.
     freeze_attention: bool = False

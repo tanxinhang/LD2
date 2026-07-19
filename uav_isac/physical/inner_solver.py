@@ -78,6 +78,13 @@ class InnerSolver:
         belief_aoi: Optional[np.ndarray] = None,        # (Q,) age of information
         beta_uncertainty: float = 0.0,                   # uncertainty penalty weight
         eta_aoi: float = 0.0,                            # AoI urgency weight
+        # ── Layer 3: Safe P0 with bounded fusion correction ──
+        fusion_confidence: Optional[np.ndarray] = None,  # (Q,) per-target trust [0,1]
+        fusion_confidence_min: float = 0.3,              # min confidence for B3
+        # ── DU-P0: Decision-Uncertainty-aware scheduling ──
+        du_enabled: bool = False,                        # enable DU-P0
+        du_ambiguity_threshold: float = 3.0,             # A_q above this → probe mode
+        du_ambiguity_bonus: float = 0.1,                 # γ: bonus weight for ambiguous targets
     ) -> P0Solution:
         """HEURISTIC greedy assignment by marginal detection utility.
 
@@ -149,6 +156,23 @@ class InnerSolver:
         # Build candidate index for fast lookup
         candidates = list(valid)
 
+        # ── DU-P0: compute per-target ambiguity A_q ──
+        du_ambiguity = np.zeros(Q, dtype=np.float64)
+        if du_enabled and belief_cov_diag is not None and len(candidates) > 0:
+            for q in range(Q):
+                q_gains = []
+                for e in candidates:
+                    if e.q == q:
+                        gain = marginal_utility_gain(0.0, e.d_eff, self.P_FA)
+                        q_gains.append((gain, e.d_eff, e))
+                q_gains.sort(key=lambda x: -x[0])
+                if len(q_gains) >= 2:
+                    delta_mu = abs(q_gains[0][0] - q_gains[1][0])
+                    cov_trace = float(np.mean(np.abs(belief_cov_diag[q, :4])))
+                    sigma_pos = np.sqrt(max(cov_trace, 1e-8))
+                    sigma_u = sigma_pos * (q_gains[0][0] / (q_gains[0][1] + 1e-6))
+                    du_ambiguity[q] = sigma_u / (delta_mu + 1e-8)
+
         while True:
             best_gain = -1.0
             best_entry = None
@@ -187,16 +211,26 @@ class InnerSolver:
                 # B3: Uncertainty-aware scoring.
                 # Covariance is in raw units (m² for position, (m/s)² for velocity).
                 # Normalize by scenario scale so β works across different area sizes.
-                if beta_uncertainty > 0 and belief_cov_diag is not None:
-                    cov_mean = float(np.mean(np.abs(belief_cov_diag[e.q])))
-                    # Use sqrt(cov_mean) normalized by a reference scale (~100m)
-                    uncertainty = np.sqrt(max(cov_mean, 1e-8)) / 100.0
-                    weighted_gain -= beta_uncertainty * uncertainty
+                # ── Layer 3: Safe P0 — only apply B3 when fusion is trusted ──
+                apply_b3 = True
+                if fusion_confidence is not None:
+                    apply_b3 = float(fusion_confidence[e.q]) >= fusion_confidence_min
 
-                if eta_aoi > 0 and belief_aoi is not None:
-                    # Reward freshness proportional to AoI (higher AoI = more urgent)
-                    aoi_val = float(belief_aoi[e.q])
-                    weighted_gain += eta_aoi * aoi_val
+                if apply_b3:
+                    if beta_uncertainty > 0 and belief_cov_diag is not None:
+                        cov_mean = float(np.mean(np.abs(belief_cov_diag[e.q])))
+                        # Use sqrt(cov_mean) normalized by a reference scale (~100m)
+                        uncertainty = np.sqrt(max(cov_mean, 1e-8)) / 100.0
+                        weighted_gain -= beta_uncertainty * uncertainty
+
+                    if eta_aoi > 0 and belief_aoi is not None:
+                        # Reward freshness proportional to AoI (higher AoI = more urgent)
+                        aoi_val = float(belief_aoi[e.q])
+                        weighted_gain += eta_aoi * aoi_val
+
+                # ── DU-P0: ambiguity bonus for uncertain targets ──
+                if du_enabled and du_ambiguity[e.q] > du_ambiguity_threshold:
+                    weighted_gain += du_ambiguity_bonus * du_ambiguity[e.q] * e.d_eff
 
                 if weighted_gain > best_gain:
                     best_gain = weighted_gain

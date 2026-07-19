@@ -29,6 +29,7 @@ from uav_isac.environment.constraints import ConstraintChecker
 from uav_isac.physical.deflection import DeflectionComputer
 from uav_isac.physical.inner_solver import InnerSolver
 from uav_isac.physical.detection import compute_detection_probabilities
+from uav_isac.environment.trust_manager import TrustManager
 
 
 @dataclass
@@ -168,6 +169,21 @@ class EnvironmentCore:
                 Q=self.Q, D=64, num_heads=4)
             # Will be moved to device later if needed; for now CPU is fine for env
 
+        # Layer 2: Trust manager for gated CI fusion
+        self.trust_gate_enabled = bool(getattr(self.cfg.marl, 'trust_gate_enabled', False))
+        self._trust_manager: Optional[TrustManager] = None
+        if self.trust_gate_enabled:
+            self._trust_manager = TrustManager(
+                K=self.K, Q=self.Q,
+                disagreement_threshold=float(getattr(self.cfg.marl, 'trust_disagreement_threshold', 6.0)),
+                aoi_max=float(getattr(self.cfg.marl, 'trust_aoi_max', 50.0)),
+                weight_max=float(getattr(self.cfg.marl, 'trust_weight_max', 0.6)),
+                local_weight_min=float(getattr(self.cfg.marl, 'trust_local_weight_min', 0.25)),
+                ema_rho=float(getattr(self.cfg.marl, 'trust_ema_rho', 0.1)),
+                quarantine_nis_ratio=float(getattr(self.cfg.marl, 'trust_quarantine_nis_ratio', 1.5)),
+                quarantine_duration=int(getattr(self.cfg.marl, 'trust_quarantine_duration', 10)),
+            )
+
         # State objects (created in reset)
         self.uavs: List[UAV] = []
         self.targets: List[Target] = []
@@ -199,6 +215,8 @@ class EnvironmentCore:
         self.prev_P_D = None
         self._prev_obs = {}  # clear history on reset
         self._gru_hidden = {}  # clear GRU state on reset
+        if self._trust_manager is not None:
+            self._trust_manager.reset()
 
         # Fusion center at center of area
         self.fc_position = np.array([
@@ -264,6 +282,19 @@ class EnvironmentCore:
             dt=self.dt,
             sigma_a=self.cfg.target.sigma_a,
             rng=self.rng,
+            motion_model=str(getattr(self.cfg.marl, 'belief_motion_model',
+                            getattr(self.cfg.target, 'motion_model', 'CV'))),
+            nis_enabled=bool(getattr(self.cfg.marl, 'belief_nis_enabled', False)),
+            nis_window=float(getattr(self.cfg.marl, 'belief_nis_window', 0.05)),
+            nis_inflate_k=float(getattr(self.cfg.marl, 'belief_nis_inflate_k', 2.0)),
+            nis_lambda_max=float(getattr(self.cfg.marl, 'belief_nis_lambda_max', 5.0)),
+            nis_deflate_rate=float(getattr(self.cfg.marl, 'belief_nis_deflate_rate', 0.95)),
+            cov_floor_pos=float(getattr(self.cfg.marl, 'belief_cov_floor_pos', 25.0)),
+            cov_floor_vel=float(getattr(self.cfg.marl, 'belief_cov_floor_vel', 1.0)),
+            nis_enter_threshold=float(getattr(self.cfg.marl, 'belief_nis_enter_threshold', 1.8)),
+            nis_exit_threshold=float(getattr(self.cfg.marl, 'belief_nis_exit_threshold', 1.2)),
+            nis_enter_frames=int(getattr(self.cfg.marl, 'belief_nis_enter_frames', 3)),
+            nis_exit_frames=int(getattr(self.cfg.marl, 'belief_nis_exit_frames', 5)),
         )
 
         # Build initial observations
@@ -340,13 +371,38 @@ class EnvironmentCore:
         self._last_deflection_entries = deflection_entries  # for obs coordination features
 
         # B6: choose what P0 RANKS candidates on. Oracle = true geometry; deployable
-        # = fused belief estimate (P0 cannot see true targets at deployment). The
+        # = belief estimate (P0 cannot see true targets at deployment). The
         # realized D_q*/P_D below always come from the TRUE deflection of the picks.
+        #
+        # Layer 3 (Safe P0): when fusion confidence is low, fall back to LOCAL
+        # belief for the ranking geometry (not just disable B3). This ensures
+        # P0's base deflection comes from safe local estimates, not corrupted
+        # fused beliefs. The fused belief is only used when it's trusted.
         if self.p0_uses_belief:
-            if self.neighbor_belief_fusion and self._belief_fusion_module is not None:
+            # Determine whether to use local or fused belief for ranking
+            use_fused_for_ranking = (
+                self.neighbor_belief_fusion
+                and self._belief_fusion_module is not None
+            )
+
+            # Safe P0: check fusion confidence — if any target is untrusted,
+            # fall back to local belief for ALL ranking entries (conservative).
+            safe_p0_active = bool(getattr(self.cfg.marl, 'p0_safe_fallback', False))
+            if use_fused_for_ranking and safe_p0_active and self._trust_manager is not None:
+                conf_min = float(getattr(self.cfg.marl, 'p0_fusion_confidence_min', 0.3))
+                # Per-target confidence: mean trust over all (k,j) pairs for each target
+                conf_q = np.zeros(self.Q, dtype=np.float64)
+                for q in range(self.Q):
+                    mask = ~np.eye(self.K, dtype=bool)
+                    conf_q[q] = float(np.mean(self._trust_manager.trust_score[:, :, q][mask]))
+                # If ANY target is below confidence threshold, use local belief
+                if np.any(conf_q < conf_min):
+                    use_fused_for_ranking = False
+
+            if use_fused_for_ranking:
                 fused = self._fuse_beliefs_attention()  # attention-weighted CI fusion
             else:
-                fused = self.belief_mgr.mean.mean(axis=0)  # uniform mean (legacy)
+                fused = self.belief_mgr.mean.mean(axis=0)  # uniform mean (local belief)
             est_pos = np.stack([fused[:, 0], fused[:, 1], np.zeros(self.Q)], axis=1)
             est_vel = np.stack([fused[:, 2], fused[:, 3], np.zeros(self.Q)], axis=1)
             ranking_entries = self.deflection_computer.compute(
@@ -365,13 +421,12 @@ class EnvironmentCore:
                           self._cached_p0_solution is None)
         if should_resolve:
             # B3: build uncertainty inputs for P0
+            # Note: cov and AoI always come from LOCAL beliefs (BeliefManager).
+            # The fused belief is NOT used here — B3 scoring is applied on top
+            # of local belief geometry, gated by fusion_confidence.
             p0_cov = None; p0_aoi = None
             if self.p0_beta_uncertainty > 0 or self.p0_eta_aoi > 0:
-                if self.p0_uses_belief and self.neighbor_belief_fusion:
-                    fused_belief = self._fuse_beliefs_attention()
-                else:
-                    fused_belief = self.belief_mgr.mean.mean(axis=0)
-                # Average covariance diagonal per target
+                # Average covariance diagonal per target (from local beliefs)
                 p0_cov = np.array([
                     np.mean([np.abs(self.belief_mgr.get_belief(k, q).cov_diag)
                              for k in range(self.K)], axis=0)
@@ -383,6 +438,19 @@ class EnvironmentCore:
                     for q in range(self.Q)
                 ])  # (Q,)
 
+            # ── Layer 3: Safe P0 — compute per-target fusion confidence ──
+            p0_fusion_conf = None
+            p0_conf_min = float(getattr(self.cfg.marl, 'p0_fusion_confidence_min', 0.3))
+            safe_p0 = bool(getattr(self.cfg.marl, 'p0_safe_fallback', False))
+            if safe_p0 and self._trust_manager is not None:
+                # Per-target trust: mean over all off-diagonal (k,j) pairs
+                tm = self._trust_manager
+                conf = np.zeros(self.Q, dtype=np.float64)
+                for q in range(self.Q):
+                    mask = ~np.eye(self.K, dtype=bool)
+                    conf[q] = float(np.mean(tm.trust_score[:, :, q][mask]))
+                p0_fusion_conf = conf
+
             p0_solution = self.inner_solver.solve(
                 ranking_entries, Q=self.Q, K=self.K,
                 enforce_single_role=role_agnostic,
@@ -390,6 +458,11 @@ class EnvironmentCore:
                 belief_aoi=p0_aoi,
                 beta_uncertainty=self.p0_beta_uncertainty,
                 eta_aoi=self.p0_eta_aoi,
+                fusion_confidence=p0_fusion_conf,
+                fusion_confidence_min=p0_conf_min,
+                du_enabled=bool(getattr(self.cfg.marl, 'du_enabled', False)),
+                du_ambiguity_threshold=float(getattr(self.cfg.marl, 'du_ambiguity_threshold', 3.0)),
+                du_ambiguity_bonus=float(getattr(self.cfg.marl, 'du_ambiguity_bonus', 0.1)),
             )
             self._cached_p0_solution = p0_solution
             self._assignment_switched = True
@@ -419,6 +492,78 @@ class EnvironmentCore:
             for k in range(self.K):
                 self.uavs[k].role = int(derived[k])
             roles = derived
+
+        # ── Layer 4: Event-triggered active probing ──
+        # Probe only when a target's accumulated risk score exceeds threshold.
+        # This avoids wasting sensing resources when all targets are well-served.
+        probe_triggered = False
+        probe_target = -1
+        if (bool(getattr(self.cfg.marl, 'active_probe_enabled', False))
+                and self.belief_mgr is not None
+                and self.belief_mgr.nis_enabled):
+            # Track consecutive miss count per target
+            if not hasattr(self, '_probe_miss_count'):
+                self._probe_miss_count = np.zeros(self.Q, dtype=np.int32)
+            selected_targets = {q for (_, _, q) in p0_solution.selected_set}
+            for q in range(self.Q):
+                if q in selected_targets:
+                    self._probe_miss_count[q] = 0
+                else:
+                    self._probe_miss_count[q] += 1
+
+            probe_aoi_w = float(getattr(self.cfg.marl, 'active_probe_aoi_weight', 0.5))
+            probe_unc_w = float(getattr(self.cfg.marl, 'active_probe_uncertainty_weight', 0.3))
+            probe_nis_w = float(getattr(self.cfg.marl, 'active_probe_nis_weight', 0.2))
+            probe_miss_w = 0.4   # penalty per consecutive miss
+            probe_threshold = float(getattr(self.cfg.marl, 'active_probe_threshold', 3.0))
+
+            probe_score = np.zeros(self.Q, dtype=np.float64)
+            for q in range(self.Q):
+                aoi_mean = float(np.mean(self.belief_mgr.aoi[:, q]))
+                cov_trace = float(np.mean([
+                    np.trace(self.belief_mgr.cov[k, q])
+                    for k in range(self.K)
+                ]))
+                nis_max = float(np.max(self.belief_mgr.nis_ema[:, q]))
+                miss_penalty = self._probe_miss_count[q]
+                # Disagreement bonus: high disagreement → needs independent verification
+                disagreement = 0.0
+                if self._trust_manager is not None:
+                    disagreement = float(np.mean(
+                        self._trust_manager.disagreement[:, :, q]))
+                probe_score[q] = (
+                    probe_aoi_w * aoi_mean
+                    + probe_unc_w * cov_trace
+                    + probe_nis_w * nis_max
+                    + probe_miss_w * miss_penalty
+                    + 0.1 * disagreement
+                )
+
+            # Event-triggered: only probe when max score exceeds threshold
+            if np.max(probe_score) > probe_threshold:
+                q_star = int(np.argmax(probe_score))
+                if q_star not in selected_targets:
+                    # Find best available (tx, rx) pair for q_star
+                    best_entry = None
+                    best_d = -1.0
+                    for e in deflection_entries:
+                        if e.q == q_star and e.d_eff > 0:
+                            if e.d_eff > best_d:
+                                best_d = e.d_eff
+                                best_entry = e
+                    if best_entry is not None:
+                        p0_solution.selected_set.append(
+                            (best_entry.i, best_entry.j, best_entry.q))
+                        D_q_star[q_star] += best_entry.d_eff
+                        if role_agnostic:
+                            derived[best_entry.i] = 0
+                            derived[best_entry.j] = 1
+                            for k in range(self.K):
+                                self.uavs[k].role = int(derived[k])
+                            roles = derived
+                        probe_triggered = True
+                        probe_target = q_star
+                        self._probe_miss_count[q_star] = 0
 
         # 5. Compute P_D per target (from REALIZED true-geometry deflection)
         P_D_q = compute_detection_probabilities(D_q_star, self.cfg.detection.P_FA)
@@ -525,6 +670,20 @@ class EnvironmentCore:
             ts = true_states[q]
             self.belief_mgr.update_after_observation(i, q, obs, ts)
             self.belief_mgr.update_after_observation(j, q, obs, ts)
+
+        # ── Layer 4: Trust feedback — update trust based on post-measurement NIS ──
+        if self.trust_gate_enabled and self._trust_manager is not None:
+            for (i, j, q) in p0_solution.selected_set:
+                if q in detected_q and detected_q[q]:
+                    # Use the NIS just computed in update_after_observation
+                    nis_i = float(self.belief_mgr._last_nis[i, q])
+                    nis_j = float(self.belief_mgr._last_nis[j, q])
+                    # Both tx and rx observed this target; update mutual trust
+                    self._trust_manager.update_trust_from_nis(i, j, q, nis_i, nis_j)
+                    self._trust_manager.update_trust_from_nis(j, i, q, nis_j, nis_i)
+                    # Check quarantine
+                    self._trust_manager.check_quarantine(i, j, q)
+                    self._trust_manager.check_quarantine(j, i, q)
 
         # 9. Compute previous P_D BEFORE building next observations.
         #    Fixes off-by-one: previously prev_P_D was updated AFTER
@@ -633,6 +792,9 @@ class EnvironmentCore:
     def _fuse_beliefs_attention(self) -> np.ndarray:
         """Fuse per-UAV beliefs via multi-head neighbor attention + CI.
 
+        When trust_gate_enabled, applies disagreement-based gating
+        and weight caps before CI fusion (Layer 2).
+
         Returns:
             fused_mean: (Q, 4) fused belief mean per target
         """
@@ -654,6 +816,26 @@ class EnvironmentCore:
                 loc_aoi[k, q, 0] = float(b.aoi)
             if hasattr(self, 'prev_P_D_local') and k in self.prev_P_D_local:
                 loc_pd[k, :, 0] = self.prev_P_D_local[k]
+
+        # ── Layer 2: Trust gate (numpy, before torch) ──
+        trust_enabled = (self.trust_gate_enabled and self._trust_manager is not None
+                         and self.belief_mgr is not None)
+        if trust_enabled:
+            # Get full covariance matrices for Mahalanobis computation
+            belief_cov_full = self.belief_mgr.get_calibrated_covariance()  # (K,Q,4,4)
+            belief_aoi_raw = self.belief_mgr.aoi.astype(np.float64)  # (K,Q)
+            nis_ema_raw = self.belief_mgr.nis_ema  # (K,Q)
+            trust_scores, _ = self._trust_manager.compute_gate_weights(
+                loc_mean, belief_cov_full, belief_aoi_raw, nis_ema_raw,
+            )  # trust_scores: (K, K, Q)
+            weight_max_val = self._trust_manager.weight_max
+            local_w_min = self._trust_manager.local_weight_min
+            # Also decay quarantines each frame
+            self._trust_manager.decay_quarantine()
+        else:
+            trust_scores = None
+            weight_max_val = 1.0
+            local_w_min = 0.25
 
         # Use raw belief values (meters, meters^2) — CI needs consistent units
         loc_mean_t = torch.as_tensor(loc_mean, dtype=torch.float32)
@@ -678,13 +860,26 @@ class EnvironmentCore:
             nb_pd = loc_pd_t[nb_idx].permute(1, 0, 2).unsqueeze(0)
             nb_mask = torch.ones(1, K-1, dtype=torch.bool)
 
+            # Build trust tensor for this agent's neighbors
+            # Trust is used as binary gate (quarantine only), not weight scaling.
+            # Weight scaling would kill useful but disagreeing neighbors.
+            # The weight cap (weight_max) is the primary safety mechanism.
+            ts_k = None
+            if trust_scores is not None:
+                ts_k_np = (trust_scores[k, nb_idx, :] > 0.01).astype(np.float64)  # (N, Q)
+                ts_k = ts_k_np.T[np.newaxis, :, :]     # (1, Q, N)
+
             with torch.no_grad():
                 fw, _, _ = self._belief_fusion_module(
                     q_mean, q_cov, q_aoi, q_pd,
                     nb_mean, nb_cov, nb_aoi, nb_pd,
                     nb_mask)
                 fused_m, _ = self._belief_fusion_module.covariance_intersection_fusion(
-                    q_mean, q_cov, nb_mean, nb_cov, fw, local_weight=0.25)
+                    q_mean, q_cov, nb_mean, nb_cov, fw,
+                    local_weight=local_w_min,
+                    trust_scores=ts_k,
+                    weight_max=weight_max_val,
+                )
 
             fused_m_np = fused_m[0].cpu().numpy()  # already in raw coordinates
             all_fused += fused_m_np

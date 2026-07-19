@@ -347,6 +347,8 @@ class NeighborBeliefFusion(nn.Module):
         neighbor_belief_cov,    # (B, Q, N, 4)
         fusion_weights,         # (B, Q, N)
         local_weight=0.3,       # minimum weight for local belief
+        trust_scores=None,      # (B, Q, N) optional trust gate τ ∈ [0,1]
+        weight_max=1.0,         # maximum CI weight per neighbor
     ):
         """Conservative belief fusion via Covariance Intersection.
 
@@ -369,8 +371,28 @@ class NeighborBeliefFusion(nn.Module):
         device = local_belief_mean.device
         eps = 1e-8
 
+        # Apply trust gate and weight cap (Layer 2)
+        if trust_scores is not None:
+            trust_t = torch.as_tensor(trust_scores, dtype=torch.float32, device=device)
+            fusion_weights = fusion_weights * trust_t
+
         # Scale neighbor weights to leave room for local
         scaled_weights = fusion_weights * (1.0 - local_weight)  # (B, Q, N)
+
+        # Renormalize: ensure sum ≤ 1 - local_weight
+        total = scaled_weights.sum(dim=-1, keepdim=True) + 1e-8
+        max_total = 1.0 - local_weight
+        scale = torch.clamp(max_total / total, max=1.0)
+        scaled_weights = scaled_weights * scale
+
+        # Cap AFTER normalization (normalization can push weights above cap)
+        scaled_weights = torch.clamp(scaled_weights, max=weight_max)
+
+        # Re-normalize after capping (caps may reduce total below budget)
+        total2 = scaled_weights.sum(dim=-1, keepdim=True) + 1e-8
+        scale2 = torch.clamp(max_total / total2, max=1.0)
+        scaled_weights = scaled_weights * scale2
+
         all_weights = torch.cat([
             torch.full((B, Q, 1), local_weight, device=device),
             scaled_weights,

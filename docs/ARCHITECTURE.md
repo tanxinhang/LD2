@@ -14,15 +14,17 @@ scripts/run_*          训练/评估入口:建 env、agents、trainer,跑循环
             └─ environment/env_core.py  EnvironmentCore:一帧主循环(见 §3)
                  ├─ environment/action.py     ActionSpace:decode / log_prob / entropy
                  ├─ environment/uav.py         apply_action(移动+角色+能耗)
-                 ├─ environment/target.py      CV 运动 + 过程噪声
+                 ├─ environment/target.py      CV/CA/CT 运动 + 过程噪声
                  ├─ physical/deflection.py     K×K×Q 双基地 deflection(role-agnostic 可选)
                  │    ├─ physical/geometry.py    τ/ν/α
                  │    └─ physical/channel.py     Rician + LoS/NLoS 上报可靠性(用 RNG)
-                 ├─ physical/inner_solver.py   P0 贪心选择配对(单角色约束可选)
+                 ├─ physical/inner_solver.py   P0 贪心选择配对(单角色约束 + B3 + Safe P0)
                  ├─ physical/detection.py      D_q* → P_D、U_q
                  ├─ environment/constraints.py 安全/能量/公平/边界检查
                  ├─ environment/reward.py      团队奖励 + 边际贡献 shaping
-                 └─ environment/belief.py      Kalman 预测 + 观测更新 + AoI
+                 ├─ environment/belief.py      Kalman 预测 + NIS 校准(CG-SR L1) + AoI
+                 ├─ environment/trust_manager.py TrustManager: gate + weight cap + quarantine (CG-SR L2/L4)
+                 └─ agents/neighbor_attention.py  Multi-Head Cross-Attention + CI fusion (CG-SR L2 门控)
 ```
 
 执行(CTDE):训练时 critic 看全局状态(MAPPO)或局部 obs(IPPO);执行时各 UAV 只用自己的局部 obs + 共享 actor。
@@ -254,3 +256,129 @@ episode: h=0
 3. 兜底：`obs_dim` 本身（单帧场景）
 
 这使得多帧 stacking 解析自动适配 K=4/8、Q=4/8、P0 有无等不同配置。
+
+### 4.12 NIS 校准 + 自适应 Q 数据流 (CG-SR Layer 1, 2026-07-19)
+
+`BeliefManager` 新增 NIS 状态机、自适应 Q、和协方差校准：
+
+```
+update_after_observation (Joseph form, PSD-preserving):
+  S = cov + R
+  ν = z − mean
+  nis = ν^T S^{-1} ν
+  r̄ ← (1−ρ)r̄ + ρ·(nis/d_z)              (d_z=4, ρ=0.1 ≈ 10帧窗口)
+
+  K = cov @ inv(S)
+  mean⁺ = mean + K @ ν
+  I_KH = I - K
+  cov⁺ = I_KH @ cov @ I_KH^T + K @ R @ K^T    // Joseph form
+  cov⁺ = 0.5 * (cov⁺ + cov⁺^T)                // symmetrize
+
+step (predict, with adaptive Q):
+  Q_eff = q_scale · Q_0
+  P_raw = F·P·F^T + Q_eff
+
+  // NIS state machine (hysteresis):
+  NORMAL  → SUSPECT    when r̄ ≥ 1.3 for 3 frames
+  SUSPECT → RECOVERING when r̄ <  1.1 for 5 frames
+  RECOVERING → NORMAL  when r̄ <  1.1 for 5 frames
+
+  // Adaptive-Q:
+  SUSPECT: q_scale → min(r̄, 100)     (EMA α=0.05)
+  NORMAL:  q_scale → 1.0            (slow decay)
+
+  // Linear multiplicative inflation:
+  λ = 1 + k·max(r̄−1, 0)    clamped to [1, 5.0]
+  P_cal = λ · P_raw + δI             // δI = diag[σ²_pos, σ²_pos, σ²_vel, σ²_vel]
+```
+
+关键设计：
+- **Joseph form** 保证 PSD：`(I-KH)P(I-KH)^T + KRK^T` 替代简化 `(I-KH)P`
+- λ 用**线性** (非指数) multiplicative：`1 + k·(r̄−1)` 防止过度膨胀
+- 下限用 `np.maximum(diag, floor)` 而非 `+=`
+- **自适应 Q** 从根源修正过程噪声（不只是修补协方差）
+- 滞回状态机防止单次异常反复触发
+
+### 4.13 TrustManager 门控数据流 (CG-SR Layer 2, 2026-07-19)
+
+纯 numpy 模块，在 `env_core._fuse_beliefs_attention()` 中调用：
+
+```
+compute_gate_weights:
+  g_nis(i) = exp(−max(0, nis_ema_i − 1))
+  d_ijq = (x̂_i−x̂_j)^T (P_i+P_j)^{-1} (x̂_i−x̂_j)    Mahalanobis
+  g_age(j) = max(0, 1 − aoi_j/aoi_max)
+  τ = g_nis(i)·g_nis(j)·exp(−d_ijq/2)·g_age(j)
+  τ ← (1−ρ)τ + ρ·τ_new
+
+门控策略（二值，非连续缩放）:
+  if quarantined: weight = 0
+  else:          weight = min(τ, ω_max)   (ω_max=0.6)
+  renormalize so Σω ≤ 1 − local_weight_min
+
+观测后信任反馈 (Layer 4):
+  T_new = exp(−nis_fused/(2·d_z))
+  τ ← (1−ρ)τ + ρ·T_new
+  if nis_fused > ratio·nis_local: quarantine(duration=10)
+```
+
+### 4.14 Safe P0 数据流 (CG-SR Layer 3, 2026-07-19)
+
+**Dual-score Safe P0** — 低置信度时完整回退 local belief 几何 (非仅关 B3)：
+
+```
+Step 1: 选择 ranking 几何源
+  conf_q = mean(τ_{kjq} over all k≠j)
+  if any(conf_q < 0.3):
+      ranking_entries = deflection_from(local_belief_mean)   // safe fallback
+  else:
+      ranking_entries = deflection_from(fused_belief_mean)   // trusted
+
+Step 2: B3 scoring (per candidate in greedy loop)
+  if fusion_confidence[e.q] ≥ confidence_min (0.3):
+      apply B3: gain −= β·√(cov)/100 + η·AoI
+  // else: B3 disabled, B0 baseline only
+```
+
+关键设计：
+- **几何回退优先**：低置信时 P0 的基础 deflection 来自 local belief，不依赖 fused
+- B3 bonus 是增量优化——仅在基础几何可信时开启
+- B3 的 cov/AoI 输入始终来自 local BeliefManager (非 fused)
+
+### 4.15 Event-Triggered Probe 数据流 (CG-SR Layer 4, 2026-07-19)
+
+`EnvironmentCore.step()` 在 P0 求解后、belief 更新前插入。**事件触发** (非固定周期)：
+
+```
+Per-frame probe score:
+  G_q = w_aoi·AoI_q + w_cov·tr(P_q) + w_nis·max(NIS_q)
+      + w_miss·consecutive_miss_count_q
+      + w_disagree·mean(disagreement[:,:,q])
+
+Event trigger:
+  if max(G_q) > threshold (3.0):
+      q* = argmax(G_q)
+      if q* not selected by P0:
+          force-pair: find best (tx,rx) with d_eff>0 for q*
+          reset miss_count[q*] = 0
+
+Miss tracking:
+  for each target q:
+      if q in P0 selected: miss_count[q] = 0
+      else:                miss_count[q] += 1
+```
+
+信任反馈 (观测后):
+```
+for each selected (i,j,q) where detected:
+  nis_i = belief_mgr._last_nis[i,q]
+  nis_j = belief_mgr._last_nis[j,q]
+  trust_manager.update_trust_from_nis(i,j,q, nis_i, nis_j)
+  trust_manager.check_quarantine(i,j,q)
+trust_manager.decay_quarantine()
+```
+
+关键设计：
+- **事件触发**: Easy/Medium 基本不触发，Hard 漂移累积后触发，不浪费正常 sensing 资源
+- **Miss count**: 连续漏检目标获得递增优先级，打破 "不被选→无观测→更不被选" 死循环
+- **Disagreement bonus**: 节点间争议大的目标更需独立验证
