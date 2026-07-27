@@ -1,0 +1,7 @@
+# Fully local execution probe: target rendezvous plus actor-selected TX/RX/idle
+# roles. Kept separate because the historical role head was excluded from PPO
+# and therefore needs its own adaptation stage.
+extends: exp_800_q4_u2u_distributed_rendezvous.yaml
+
+marl:
+  learn_roles: true

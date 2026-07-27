@@ -1,0 +1,7 @@
+# Stage 3: Stage 2 plus progress of the bottom-three target mean.
+extends: exp_800_q4_u2u_coord_s2_duplicate.yaml
+
+marl:
+  coord_reward_stage: 3
+  coord_reward_weak3_floor: 0.70
+  coord_reward_weak3_weight: 0.50

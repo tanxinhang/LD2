@@ -1,0 +1,12 @@
+# Fundamental credit-assignment probe: four PPO ratios/advantages for movement,
+# latent target-token content, rate and joint ISAC resources. Execution remains
+# decentralized; the extra value heads exist only in the centralized critic.
+extends: exp_800_q4_u2u_coord_s1_worst.yaml
+
+marl:
+  headwise_credit_enabled: true
+  headwise_credit_vf_coef: 0.5
+  headwise_movement_coef: 1.0
+  headwise_message_coef: 1.0
+  headwise_rate_coef: 1.0
+  headwise_resource_coef: 1.0

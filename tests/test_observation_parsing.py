@@ -58,6 +58,94 @@ def test_observation_slices_self_physics_pd_comm():
     assert np.allclose(slices.extract_comm(obs), 3.0)
 
 
+def test_local_channel_feedback_slice_and_rate_head_are_isolated():
+    """Local channel state must affect only the categorical rate decision."""
+    from uav_isac.agents.networks import StructuredActorNetwork
+
+    k = q = 4
+    token_dim = 22
+    slices = ObservationSlices.from_config(
+        K=k, Q=q, use_p0=False, use_rel_features=True,
+        use_comm_tokens=True, comm_token_dim=token_dim,
+        comm_tokens_per_sender=q, use_channel_feedback=True,
+        channel_feedback_dim=6)
+    actor = StructuredActorNetwork(
+        obs_dim=slices.total_dim, K=k, Q=q, entity_dim=64,
+        use_comm_cross_attention=True, comm_token_dim=token_dim,
+        comm_tokens_per_sender=q, comm_payload_dim=q * 16,
+        comm_target_token_enabled=True, comm_target_token_dim=16,
+        comm_channel_feedback_rate_enabled=True,
+        comm_channel_feedback_dim=6).cpu().eval()
+
+    nominal = torch.zeros(2, slices.total_dim)
+    stressed = nominal.clone()
+    stressed[:, slices.channel_feedback_start + 4] = -0.8
+    with torch.no_grad():
+        dp_nom, _, _, msg_nom, _, _ = actor(nominal)
+        _, logits_nom = actor.communication_parameters(msg_nom)
+        dp_stress, _, _, msg_stress, _, _ = actor(stressed)
+        _, logits_stress_zero = actor.communication_parameters(msg_stress)
+
+    # The zero-initialized feedback adapter is checkpoint-compatible.
+    torch.testing.assert_close(dp_nom, dp_stress, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(msg_nom, msg_stress, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        logits_nom, logits_stress_zero, rtol=0.0, atol=0.0)
+
+    with torch.no_grad():
+        actor.comm_rate_feedback_head.weight[1, 4] = -1.0
+        actor(stressed)
+        _, logits_stress_active = actor.communication_parameters(msg_stress)
+    assert torch.all(logits_stress_active[:, 1] > logits_stress_zero[:, 1])
+    np.testing.assert_allclose(
+        slices.extract_channel_feedback(stressed.numpy()),
+        stressed[:, slices.channel_feedback_start:
+                 slices.channel_feedback_start + 6].numpy())
+
+
+def test_environment_exposes_only_local_channel_feedback_summary():
+    from config.params import load_config
+    from uav_isac.environment.env_wrapper import UAVISACEnv
+
+    cfg = load_config(
+        'config/exp_800_q4_u2u_hierarchical_multistatic_'
+        'distributed_matching_hybrid50_paper_top1_u2u_evidence_'
+        'selection_calibrated_eval.yaml')
+    cfg.marl.comm_channel_feedback_rate_enabled = True
+    cfg.marl.comm_channel_feedback_dim = 6
+    env = UAVISACEnv(config=cfg, seed=42)
+    try:
+        obs, _ = env.reset(seed=42)
+        core = env.core
+        slices = ObservationSlices.from_config(
+            K=cfg.scenario.K, Q=cfg.scenario.Q, use_p0=False,
+            use_rel_features=True, use_comm_tokens=True,
+            comm_token_dim=cfg.marl.comm_target_token_dim + 6,
+            comm_tokens_per_sender=cfg.scenario.Q,
+            use_channel_feedback=True, channel_feedback_dim=6)
+        assert obs['0'].shape == (slices.total_dim,)
+        initial = slices.extract_channel_feedback(obs['0'])
+        assert initial[0] == 0.0  # no fabricated acknowledgement at reset
+        assert initial[3] == 1.0  # no received packet -> maximally stale
+        assert initial[4] == 0.0  # nominal configured deadline
+        assert initial[5] == 0.0  # nominal configured SNR threshold
+
+        core._active_comm_deadline_s = 8.0e-4
+        stressed = core._build_local_channel_feedback({
+            1: {
+                'age_frames': 0,
+                'snr_db': core._active_comm_snr_threshold_db + 10.0,
+                'latency_s': 4.0e-4,
+            },
+        })
+        assert stressed[0] == pytest.approx(1.0 / (cfg.scenario.K - 1))
+        assert stressed[1] > 0.0
+        assert stressed[2] == pytest.approx(0.5)
+        assert stressed[4] < 0.0
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("k,q,use_p0", [(4, 4, False), (4, 4, True), (8, 8, False), (8, 8, True)])
 def test_frame_encoder_target_isolation(k, q, use_p0):
     """Changing only target q must NOT affect other targets' tokens."""

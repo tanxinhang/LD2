@@ -1,0 +1,7 @@
+# Stage 4: complete QoS ladder, adding steady-mean progress last.
+extends: exp_800_q4_u2u_coord_s3_weak3.yaml
+
+marl:
+  coord_reward_stage: 4
+  coord_reward_steady_floor: 0.80
+  coord_reward_steady_weight: 0.25

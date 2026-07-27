@@ -1,0 +1,15 @@
+# PPO-native adaptive cardinality. The two active actions use the same 8-bit
+# quantization and expose one or two ranked target tokens. A legacy metadata
+# denominator of four keeps warm-started index 2 identical to old top-2.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_eval.yaml
+
+marl:
+  comm_rate_bits_per_dim: [0, 8, 8]
+  comm_rate_metadata_denominator: 4.0
+  sparse_claim_share_topk: 2
+  adaptive_topk_from_rate_enabled: true
+  adaptive_topk_rate_mapping: [0, 1, 2]
+  adaptive_topk_rate_only_training: true
+  # The old exploration auxiliary chooses the first rate that reaches 8 bits;
+  # with duplicated rates that would prescribe k=1 instead of learning it.
+  comm_rate_bonus_aux_coef: 0.0

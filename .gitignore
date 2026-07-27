@@ -21,3 +21,7 @@ Thumbs.db
 results/dagger_variants/
 results/dagger_variants_smoke/
 results/full_eh/
+
+# Generated checkpoints, logs, and experiment outputs.
+# Reproducible configurations and result summaries live in config/ and docs/.
+results/

@@ -1,0 +1,8 @@
+# Same physical channel, power budget and P0 constraints, but movement follows
+# a centralized minimum-distance assignment. This is an optimistic diagnostic,
+# not a deployable method or a training input.
+extends: exp_800_q4_u2u_sparse_claim_top2.yaml
+
+marl:
+  eval_centralized_assignment_movement: true
+  training_seed_replay_enabled: false

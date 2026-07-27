@@ -1,0 +1,6 @@
+# Robust-tail ablation: continuously rebid from pre-projection local target
+# preferences instead of rebroadcasting the consensus winner.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_eval.yaml
+
+marl:
+  movement_team_matching_intrinsic_bid_mix: 1.0

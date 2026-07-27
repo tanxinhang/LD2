@@ -1,0 +1,6 @@
+# High-rate ablation: encourage 16 bit/dim while QoS remains infeasible.
+# The matched probe raised traffic to 256 bit/frame but did not improve QoS.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  comm_rate_bonus_target_bits: 16

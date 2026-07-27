@@ -1,0 +1,9 @@
+# Matched causal ablation for exp_800_q4_u2u.yaml.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  # Keep the actor/observation dimensions identical and intervene only on the
+  # transmitted categorical rate during deterministic evaluation.
+  learned_comm_mode: cost_aware
+  comm_eval_force_silence: true
+  comm_encouragement_enabled: false

@@ -1,0 +1,54 @@
+# Gate 2D direction screen: freeze the established actor except for its
+# categorical communication-rate head. The target-token cardinality remains
+# Top-1 for every active rate; only silence/4/8/16/32 bit precision is learned.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_u2u_evidence_selection_calibrated_eval.yaml
+
+marl:
+  adaptive_topk_from_rate_enabled: true
+  adaptive_topk_rate_mapping: [0, 1, 1, 1, 1]
+  adaptive_topk_rate_only_training: true
+  adaptive_topk_reset_rate_head: true
+  adaptive_topk_worst_credit_coef: 1.0
+
+  # Remove the old auxiliary preference for 8 bit. Active communication still
+  # pays its exact bit/energy/delay cost and receives delayed sensing credit.
+  comm_rate_bonus_enabled: false
+  comm_rate_bonus_aux_coef: 0.0
+  comm_rate_bonus_aux_lr: 0.0
+
+  # Paired profiles span nominal, moderate/high SNR outage, and the validated
+  # latency boundary. Profile sampling uses a separate RNG stream and therefore
+  # leaves each geometry seed unchanged.
+  comm_channel_randomization_enabled: true
+  comm_channel_randomization_snr_threshold_db_values: [0.0, 30.0, 35.0, 0.0]
+  comm_channel_randomization_deadline_s_values: [0.005, 0.005, 0.005, 0.0008]
+  comm_channel_randomization_profile_weights: [0.35, 0.25, 0.15, 0.25]
+
+  # The selection-only threshold and codec stay fixed. Fewer Monte Carlo draws
+  # are used only for the short training screen; formal evaluation uses 2048.
+  evidence_packet_mc_draws: 256
+
+  # Load the calibrated binary QoS head with the warm-start checkpoint and
+  # continue it as a CTDE diagnostic. The uncalibrated quantile/CVaR loss is
+  # disabled and does not route actor gradients.
+  set_risk_critic_enabled: true
+  risk_critic_hidden_dim: 128
+  risk_critic_num_quantiles: 16
+  risk_critic_cvar_alpha: 0.20
+  risk_critic_monotonic_quantiles_enabled: false
+  risk_critic_qos_floor: 0.60
+  risk_critic_quantile_coef: 0.0
+  risk_critic_constraint_coef: 0.10
+  risk_critic_constraint_positive_weight: 0.0
+  risk_critic_only_training: false
+
+  rollout_steps: 512
+  num_envs: 4
+  minibatch_size: 128
+  ppo_epochs: 2
+  ppo_clip: 0.08
+  target_kl: 0.01
+  early_stop: false
+  eval_interval: 2
+  eval_episodes: 4
+  checkpoint_confirmation_enabled: false

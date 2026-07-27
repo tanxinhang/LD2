@@ -1,0 +1,6 @@
+# Causal content ablation for the consensus-bid token architecture. Link rate,
+# token mask, delivery, latency and RF allocation are held fixed.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_eval.yaml
+
+marl:
+  comm_eval_message_ablation: zero

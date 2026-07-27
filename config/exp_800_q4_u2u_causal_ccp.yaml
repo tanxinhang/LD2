@@ -1,0 +1,15 @@
+# Training-only paired virtual interventions supervise a lightweight causal
+# contribution predictor. The predictor shapes only the message PPO advantage;
+# deployed actors remain decentralized and incur no additional CCP inference.
+extends: exp_800_q4_u2u_headwise_credit.yaml
+
+marl:
+  causal_ccp_enabled: true
+  causal_ccp_hidden_dim: 128
+  causal_ccp_lr: 0.0003
+  causal_ccp_epochs: 6
+  causal_ccp_intervention_stride: 32
+  causal_ccp_tail_temperature: 0.10
+  causal_ccp_message_mix: 0.75
+  causal_ccp_min_samples: 24
+  causal_ccp_min_effect: 1.0e-5

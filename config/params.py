@@ -23,6 +23,9 @@ class UAVParams:
     d_safe: float = 20.0
     P_sense: float = 0.0251   # 14 dBm — Device-free MARL ISAC (TVT 2024)
     P_report: float = 0.25    # W — TVT 2024 comm power set {0.25..1 W}
+    # Per-UAV RF budget for joint U2U-ISAC allocation.  When enabled:
+    # P_comm[k] + sum_q P_sense[k,q] = P_isac_total in every frame.
+    P_isac_total: float = 1.0
     B_max: float = 50000.0
     P_fly_static: float = 80.0
     P_fly_coeff: float = 0.05
@@ -103,6 +106,28 @@ class MARLParams:
     entropy_decay_frames: int = 500_000  # faster decay
     eta_mc: float = 0.5
     eta_sense: float = 0.0  # per-agent sensing: 0=off (team-only baseline), 0.1=on
+    # Detection-evidence boundary:
+    # legacy_global preserves historical unconditional global fusion;
+    # central_oracle reconstructs it explicitly; local_only forbids
+    # cross-receiver fusion; u2u_distributed consumes delivered evidence.
+    detection_fusion_mode: str = "local_only"
+    # Structured receiver-evidence packet. Calibration values are deliberately
+    # unset by default; a u2u_distributed experiment must name an explicit
+    # calibration profile rather than inherit hidden stress-set constants.
+    evidence_packet_topk: int = 1
+    evidence_packet_owner_aware: bool = True
+    evidence_packet_llr_bits: int = 8
+    evidence_packet_confidence_bits: int = 2
+    evidence_packet_clip_max: float = 0.0
+    evidence_packet_standardized_threshold: float = 0.0
+    evidence_packet_confidence_log_boundaries: List[float] = field(
+        default_factory=list)
+    evidence_packet_confidence_representatives: List[float] = field(
+        default_factory=list)
+    evidence_packet_mc_draws: int = 2048
+    evidence_packet_mc_seed: int = 20260725
+    evidence_packet_content_mode: str = "normal"
+    evidence_packet_calibration_profile: str = ""
     use_centered_marginal: bool = False  # centered marginal contribution shaping
     use_difference_reward: bool = True   # fixed-assignment no-op difference reward
     team_weight: float = 0.7             # team reward weight (E3 baseline)
@@ -117,6 +142,40 @@ class MARLParams:
     lambda_report: float = 1.0e-5
     alpha_pd: float = 0.0                    # direct P_D reward weight (0=utility-only, 0.5=hybrid)
     lambda_tail: float = 0.0                 # bottom-3 bonus weight
+    # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
+    # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
+    # progress; 4 adds steady progress. Historical configs remain unchanged.
+    coord_reward_enabled: bool = False
+    coord_reward_stage: int = 0
+    coord_reward_ema_alpha: float = 0.20
+    coord_reward_steady_floor: float = 0.80
+    coord_reward_weak3_floor: float = 0.70
+    coord_reward_worst_floor: float = 0.60
+    coord_reward_worst_weight: float = 1.0
+    coord_reward_duplicate_weight: float = 0.01
+    coord_reward_weak3_weight: float = 0.50
+    coord_reward_steady_weight: float = 0.25
+    coord_reward_min_move_m: float = 1e-6
+    # CTDE-only action-head credit assignment. The deployed actor remains
+    # decentralized; separate advantages update movement, latent message,
+    # rate and joint-resource log-probabilities.
+    headwise_credit_enabled: bool = False
+    headwise_credit_vf_coef: float = 0.5
+    headwise_movement_coef: float = 1.0
+    headwise_message_coef: float = 1.0
+    headwise_rate_coef: float = 1.0
+    headwise_resource_coef: float = 1.0
+    # Training-only paired virtual interventions and amortized token credit.
+    # The predictor is discarded for decentralized execution.
+    causal_ccp_enabled: bool = False
+    causal_ccp_hidden_dim: int = 128
+    causal_ccp_lr: float = 3e-4
+    causal_ccp_epochs: int = 6
+    causal_ccp_intervention_stride: int = 32
+    causal_ccp_tail_temperature: float = 0.10
+    causal_ccp_message_mix: float = 0.75
+    causal_ccp_min_samples: int = 24
+    causal_ccp_min_effect: float = 1e-5
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     lagrangian_lr: float = 0.002     # lowered: binary any_violation made λ climb monotonically -> non-stationary returns -> critic blow-up
@@ -127,11 +186,23 @@ class MARLParams:
     num_envs: int = 8  # parallel envs for GPU batching (tuned; stable MAPPO)
     assignment_hold_frames: int = 1  # 1=every frame; 5=hold P0 for 5 frames
     actor_decision_interval: int = 1  # 1=per-frame; 5=macro-action (hold action 5 frames)
+    # Decouple slow physical motion from fast U2U negotiation.  The actor and
+    # communication/resource heads still run every actor decision; only the
+    # movement/role action is held for this many simulator frames.
+    movement_decision_interval: int = 1
     obs_history_frames: int = 1  # 1=current only; 2=stack prev+current frame obs
     oracle_obs: bool = False  # diagnostic: feed true target pos (not beliefs) to actor
     rel_features: bool = True  # explicit per-target (dx,dy,dist,bearing) in actor obs
     structured_actor: bool = True  # entity-attention actor (vs flat MLP)
     centralized_actor: bool = False  # diagnostic: actor sees global state (upper bound)
+    # Tracking-free sensing mode. When False, targets are fixed sensing objects
+    # whose locations are mission-known; the actor receives their current
+    # coordinates directly and the Kalman predict/update loop is bypassed.
+    tracking_enabled: bool = True
+    # Current paper scope uses only UAV-to-UAV links. When disabled, the old
+    # receiver-to-ground-fusion reporting link, its energy, bit penalty and
+    # capacity/latency constraints are removed from the sensing pipeline.
+    ground_communication_enabled: bool = True
     critic_lr_mult: float = 5.0  # critic LR = lr * this (critic needs to track moving returns)
     bc_beta_init: float = 0.05  # BC anchor strength; sweet spot: prevents collapse, allows improvement
     use_p0_sinr_gated: bool = False  # gate P0 features by SINR threshold
@@ -144,6 +215,24 @@ class MARLParams:
     # role argmax -> 95% frames single role -> zero tx-rx pairing -> P_D collapse).
     # learn_roles=True restores the original learned-role behavior (for comparison).
     learn_roles: bool = False
+    # Time-slotted multistatic endpoint scheduling.  When enabled together with
+    # learn_roles=False, a UAV may transmit a sensing waveform in one sub-slot
+    # and receive a peer echo in another sub-slot of the same simulator frame.
+    # The per-frame communication+sensing power budget is unchanged; only the
+    # mutually-exclusive endpoint-role constraint in P0 is removed.
+    multistatic_subslot_enabled: bool = False
+    # Hard connection between decentralized per-target sensing decisions and
+    # the physical P0 assignment. P0 may rank only targets inside each local
+    # top-k commitment; optionally both bistatic endpoints must agree.
+    distributed_target_commitment_enabled: bool = False
+    distributed_target_commitment_topk: int = 1
+    distributed_target_commitment_require_receiver: bool = True
+    # ``hard`` deletes every off-claim bistatic edge. ``soft`` retains the
+    # physical graph and confidence-weights its ranking score; uncertain local
+    # claims automatically defer toward geometry instead of starving targets.
+    distributed_target_commitment_mode: str = "hard"
+    distributed_target_commitment_soft_floor: float = 0.25
+    distributed_target_commitment_uncertainty_relief: float = 1.0
     # P0 information source (B6). False (default) = ORACLE inner scheduler: P0 ranks
     # candidates on TRUE target geometry (upper bound). True = DEPLOYABLE: P0 ranks on
     # the fused belief estimate, while the realized deflection/P_D of the selected
@@ -156,6 +245,26 @@ class MARLParams:
     belief_detection_sampling: bool = False
     # Fixed evaluation scenarios (reused every eval + across decode modes).
     eval_seeds: List[int] = field(default_factory=lambda: [10001, 10002, 10003, 10004, 10005])
+    # Optional versioned geometry-stratified bank. When set, ``eval_seed_split``
+    # replaces eval_seeds and eval_episodes for checkpoint evaluation.
+    eval_seed_bank_path: str = ""
+    eval_seed_split: str = "selection"
+    final_eval_seed_split: str = "test"
+    checkpoint_confidence_alpha: float = 0.05
+    checkpoint_bootstrap_samples: int = 2000
+    checkpoint_cvar_fraction: float = 0.20
+    checkpoint_confirmation_enabled: bool = False
+    checkpoint_confirmation_split: str = "confirmation"
+    # Training-only prioritized replay over the geometry seed bank. Evaluation
+    # splits are excluded automatically to prevent selection/test leakage.
+    training_seed_replay_enabled: bool = False
+    training_seed_bank_path: str = ""
+    training_seed_uniform_mix: float = 0.20
+    training_seed_priority_alpha: float = 0.70
+    training_seed_priority_ema: float = 0.20
+    training_seed_min_curriculum_fraction: float = 0.30
+    training_seed_curriculum_frames: int = 300000
+    training_seed_max_nearest_m: float = 350.0
     # Convergence-based early stopping (deterministic eval on a plateau)
     early_stop: bool = True
     eval_interval: int = 50          # run a deterministic eval every N episodes
@@ -165,10 +274,283 @@ class MARLParams:
     # CTDE centralized critic (MAPPO, critic sees global state) vs decentralized
     # critic (IPPO, critic sees only local obs). de Witt et al. 2020 / Yu et al. 2022.
     centralized_critic: bool = True
-    # Communication mode. 'off' = zero comm messages, freeze comm-related heads,
-    # no comm loss / intent loss. Used for Full/EH isolation experiments.
-    # 'on' (default) = learned communication.
+    # Communication mode:
+    #   off        -> no learned messages (historical Full/EH isolation)
+    #   on         -> legacy free continuous messages
+    #   cost_aware -> stochastic learned message + learned silence/rate action,
+    #                 quantized and transported through the inter-UAV channel.
     learned_comm_mode: str = 'on'
+    # Prevent free access to neighbour position/velocity/role/intent in the
+    # actor observation. The feature slots remain (zero-filled) so learned U2U
+    # messages are the only inter-node information channel without changing
+    # observation dimensions or invalidating existing network parsers.
+    comm_only_neighbor_information: bool = False
+    # Preserve every delivered sender message as an independent token and let
+    # each target entity query the inbox with masked cross-attention.
+    comm_cross_attention_enabled: bool = False
+    comm_message_ttl_frames: int = 5
+    # Cost-aware emergent inter-UAV communication. A rate action chooses the
+    # number of quantization bits per one of the 16 learned message components;
+    # zero bits is the learned silence action. The payload is broadcast once
+    # and may be received by multiple UAV neighbours.
+    # Dataclass fallback retains the historical four-level action for old YAML
+    # files; default.yaml explicitly enables the optional 32-bit fifth level.
+    comm_rate_bits_per_dim: List[int] = field(
+        default_factory=lambda: [0, 4, 8, 16])
+    comm_header_bits: int = 64
+    comm_bandwidth_hz: float = 1.0e5
+    comm_tx_power_w: float = 0.25
+    comm_deadline_s: float = 0.005
+    comm_processing_delay_s: float = 2.0e-4
+    comm_snr_threshold_db: float = 0.0
+    comm_antenna_gain_dbi: float = 0.0
+    # Optional episode-level channel-domain randomization.  The two lists
+    # define paired (SNR threshold, deadline) profiles and must have equal
+    # length.  Sampling happens only at reset and is reproducible from the
+    # environment RNG.  Keeping this disabled preserves every legacy run.
+    comm_channel_randomization_enabled: bool = False
+    comm_channel_randomization_snr_threshold_db_values: List[float] = field(
+        default_factory=list)
+    comm_channel_randomization_deadline_s_values: List[float] = field(
+        default_factory=list)
+    comm_channel_randomization_profile_weights: List[float] = field(
+        default_factory=list)
+    comm_message_log_std_init: float = -1.0
+    comm_entropy_scale: float = 1.0
+    # Payload representation. "aggregate" keeps one 16-D latent vector per
+    # UAV. "target_tokens" sends Q independent network tokens; their values
+    # are unconstrained and consumed directly by receiver cross-attention.
+    comm_payload_mode: str = 'aggregate'
+    comm_target_token_dim: int = 16
+    # Continuous communication power plus a learned multi-target sensing split.
+    # Silence assigns zero communication power and the full budget to sensing.
+    joint_isac_power_enabled: bool = False
+    comm_power_fraction_min: float = 0.0
+    comm_power_fraction_max: float = 1.0
+    isac_power_log_std_init: float = -1.0
+    sensing_allocation_log_std_init: float = -1.0
+    # Explicit environment costs. P0 reporting bits retain lambda_report;
+    # these weights apply only to learned UAV-to-UAV messages.
+    comm_bit_cost_weight: float = 1.0e-5
+    comm_energy_cost_weight: float = 1.0
+    comm_delay_cost_weight: float = 10.0
+    # Minimise U2U resource use subject to sensing-quality constraints. The
+    # trainer adapts one dual multiplier per metric: multipliers rise while a
+    # rollout is below its floor and decay once the floor is satisfied.
+    comm_qos_constrained: bool = False
+    comm_qos_steady_min: float = 0.80
+    comm_qos_weak3_min: float = 0.70
+    comm_qos_worst_min: float = 0.60
+    comm_qos_dual_lr: float = 0.05
+    comm_qos_lambda_init: float = 0.5
+    comm_qos_lambda_max: float = 5.0
+    comm_qos_reward_scale: float = 1.0
+    # Soft, directly attributable exploration reward for the discrete rate
+    # action. Successful active senders receive a QoS-deficit-gated bonus;
+    # explicit bit/energy/delay costs still discourage waste. The floor keeps
+    # a small exploration signal after feasibility without prescribing a rate.
+    comm_encouragement_enabled: bool = True
+    comm_encouragement_weight: float = 0.05
+    comm_encouragement_floor_ratio: float = 0.10
+    # QoS-gated soft precision exploration. Credit rises from 4 to the target
+    # bits/dimension and then saturates, so higher precision is not mandatory.
+    comm_rate_bonus_enabled: bool = True
+    comm_rate_bonus_weight: float = 0.03
+    comm_rate_bonus_target_bits: int = 8
+    comm_rate_bonus_aux_coef: float = 1.0
+    comm_rate_bonus_aux_lr: float = 0.01
+    # Communication liveness regularizer. Silence is allowed for a short grace
+    # window; every additional silent policy decision incurs a growing,
+    # capped sender-specific penalty and any active rate resets the streak.
+    comm_silence_penalty_enabled: bool = True
+    comm_silence_grace_decisions: int = 3
+    comm_silence_penalty_per_decision: float = 0.01
+    comm_silence_penalty_max: float = 0.05
+    # Evaluation-only causal ablation: preserve the cost-aware observation and
+    # actor architecture, but replace every sampled rate with silence.
+    comm_eval_force_silence: bool = False
+    # Evaluation-only rate diagnostic. A non-negative value must match one
+    # entry in comm_rate_bits_per_dim and overrides only the deterministic
+    # rate action.
+    comm_eval_force_rate_bits: int = -1
+    # Evaluation-only content intervention with identical rate/cost/metadata:
+    # "none" | "zero" | "permute" (cyclic sender-content permutation).
+    comm_eval_message_ablation: str = "none"
+    # Evaluation-only movement intervention: centralized minimum-distance
+    # one-to-one UAV/target assignment; actor roles and communication unchanged.
+    eval_centralized_assignment_movement: bool = False
+    # Evaluation-only diagnostic for the QoS-aware slow-layer teacher.  The
+    # centralized teacher directly controls movement while the actor still
+    # controls communication, sensing resources and roles.  This isolates
+    # teacher quality from decentralized distillation error.
+    eval_qos_bistatic_assignment_movement: bool = False
+    # Optional hard rate barrier retained only for ablation/reproduction. It is
+    # disabled by default because forcing 8 bit increased traffic without
+    # improving the fixed-seed sensing probe.
+    comm_qos_min_rate_bits: int = 0
+    comm_qos_rate_shortfall_penalty: float = 0.0
+    comm_qos_rate_aux_coef: float = 0.0
+    # Communication-aware decentralized target allocation. Each UAV produces
+    # a target-responsibility distribution from local target entities and its
+    # delivered-message context. Training regularizes team coverage without
+    # fixing the semantic content of the messages.
+    target_allocation_enabled: bool = False
+    target_allocation_balance_coef: float = 0.20
+    target_allocation_commit_coef: float = 0.01
+    # End-to-end decentralized commitment options.  The payload remains a
+    # learned latent vector; these controls only regularize the resulting team
+    # allocation and connect it to the movement head.
+    target_allocation_temperature: float = 1.0
+    target_allocation_straight_through: bool = False
+    target_allocation_movement_blend: float = 0.0
+    # Confidence-gated physical authority for the discrete movement
+    # commitment.  The top-1/top-2 probability margin suppresses uncertain
+    # hard choices, while confident commitments retain the configured blend.
+    target_allocation_movement_confidence_gating_enabled: bool = False
+    target_allocation_movement_confidence_floor: float = 0.0
+    target_allocation_movement_confidence_power: float = 2.0
+    # Optional rollout-boundary schedule for the physical authority of the
+    # slow target commitment.  A positive anneal length overrides the fixed
+    # blend above and preserves PPO likelihood consistency within a rollout.
+    target_allocation_movement_blend_start: float = 0.0
+    target_allocation_movement_blend_end: float = 0.0
+    target_allocation_movement_blend_anneal_frames: int = 0
+    # Keep a one-target kinematic commitment separate from the capacitated
+    # two-endpoint sensing assignment.  This removes the contradictory row-sum
+    # constraints that otherwise make the commitment teacher diverge.
+    hierarchical_dual_assignment_enabled: bool = False
+    # Distributed one-to-one optimal-transport projection for the slow
+    # movement responsibility. Every UAV reconstructs the same team bid graph
+    # from received target tokens; sensing endpoints keep their independent
+    # capacity-two projection.
+    movement_team_matching_enabled: bool = False
+    movement_team_matching_temperature: float = 0.35
+    movement_team_matching_iterations: int = 16
+    movement_team_matching_blend: float = 0.0
+    movement_team_matching_intrinsic_bid_mix: float = 0.0
+    # Map locally negotiated responsibilities into physical sensing logits.
+    # Zero keeps the historical auxiliary-only path.
+    target_allocation_resource_blend: float = 0.0
+    target_allocation_differentiable_comm: bool = False
+    target_allocation_comm_delay_decisions: int = 1
+    target_allocation_temporal_coef: float = 0.0
+    target_allocation_aux_epochs: int = 1
+    target_allocation_aux_lr: float = 0.0
+    # Two-stage local negotiation.  Each UAV knows only the shared frame phase
+    # (proposal/response), its own entities and delivered peer tokens.  Peer
+    # claims are decoded from latent tokens and used as a local exclusion term.
+    round_negotiation_enabled: bool = False
+    round_negotiation_strength: float = 0.5
+    round_negotiation_temperature: float = 0.5
+    # Sparse neighborhood claim exchange. Only the locally preferred target
+    # tokens are transported; delivered token masks act as peer claims. The
+    # desired load is two endpoints per target for bistatic sensing.
+    sparse_claim_enabled: bool = False
+    sparse_claim_share_topk: int = 2
+    sparse_claim_commit_topk: int = 2
+    sparse_claim_desired_endpoints: int = 2
+    sparse_claim_full_penalty: float = 2.0
+    sparse_claim_vacant_bonus: float = 0.5
+    sparse_claim_temperature: float = 0.25
+    sparse_claim_underload_coef: float = 4.0
+    sparse_claim_overload_coef: float = 1.0
+    # Reuse the PPO categorical communication-rate action as a joint
+    # cardinality action. Duplicate bit-rate levels may map to different k,
+    # e.g. [0,8,8] with mapping [0,1,2].
+    adaptive_topk_from_rate_enabled: bool = False
+    adaptive_topk_rate_mapping: List[int] = field(
+        default_factory=lambda: [0, 1, 2])
+    adaptive_topk_rate_only_training: bool = False
+    adaptive_topk_reset_rate_head: bool = False
+    adaptive_topk_worst_credit_coef: float = 0.0
+    comm_rate_metadata_denominator: Optional[float] = None
+    # Strictly local reciprocal-link summary exposed only to the rate head.
+    # It contains delivered-packet quality/AoI plus the receiver's configured
+    # deadline and SNR threshold; no fusion-centre or free ACK is introduced.
+    comm_channel_feedback_rate_enabled: bool = False
+    comm_channel_feedback_dim: int = 6
+    # Training-only, sender-specific transport constraint. Failed outgoing
+    # links penalize only the sampled sender rate head; execution still uses
+    # local reciprocal-link observations and has no free acknowledgement.
+    comm_sender_delivery_penalty_enabled: bool = False
+    comm_sender_delivery_penalty_weight: float = 0.05
+    # Explicit message-to-sensing path. Received target tokens alter executed
+    # sensing logits, while an auxiliary counterfactual teaches useful changes.
+    comm_aided_sensing_enabled: bool = False
+    comm_aided_sensing_blend: float = 1.0
+    comm_aided_sensing_aux_coef: float = 1.0
+    comm_aided_sensing_counterfactual_coef: float = 0.5
+    comm_aided_sensing_temperature: float = 0.25
+    comm_aided_sensing_margin: float = 0.02
+    # Diagnostic/deployable decoder for the latent portion of each target
+    # token. Dimension 0 remains the explicit movement bid; dimensions 1..D-1
+    # are decoded into sender-evidence validity and conditional local P_D.
+    # The decoder is observational only until a separately gated CA-CSR path
+    # is enabled, preserving legacy policy behaviour exactly.
+    comm_semantic_decoder_enabled: bool = False
+    # Decoded peer endpoint quality refines sparse neighbor bids immediately
+    # before capacity-two projection. The row-centred correction is opt-in and
+    # has no direct path to movement or the total power split.
+    comm_semantic_capacity_bid_enabled: bool = False
+    comm_semantic_capacity_bid_gain: float = 0.0
+    # Keep the stable top-k contract and allow at most one extra target token
+    # when decoded peer quality indicates endpoint underload and local geometry
+    # provides useful sensing capability.
+    comm_semantic_extra_token_enabled: bool = False
+    comm_semantic_extra_token_threshold: float = 0.10
+    # Frozen-policy structural probe for CA-CSR. This evaluation-only switch
+    # lets a pretrained observational decoder alter sensing logits after a
+    # local temporal crisis gate; it is never enabled during PPO collection.
+    comm_semantic_cacsr_eval_enabled: bool = False
+    comm_semantic_cacsr_eval_gain: float = 0.0
+    comm_semantic_cacsr_quality_threshold: float = 0.9704283028841019
+    comm_semantic_cacsr_stagnation_frames: int = 5
+    comm_semantic_cacsr_improvement_epsilon: float = 0.01
+    comm_semantic_cacsr_ema_alpha: float = 0.30
+    # Endpoint-Deficit Semantic Kinematic Field (ED-SKF). Delivered sparse
+    # target claims attract assistance only while a bistatic target lacks an
+    # endpoint. Full targets exert zero physical force; their competition is
+    # handled by the target-assignment logits.
+    semantic_kinematic_field_enabled: bool = False
+    semantic_kinematic_field_gain: float = 0.15
+    # Learnable communication-conditioned target movement (CTMH). Each target
+    # token produces radial/tangential motion coefficients; negotiated local
+    # responsibilities combine the candidates. The final layer is zero-init so
+    # old checkpoints remain behaviorally identical until PPO learns the path.
+    target_conditioned_movement_enabled: bool = False
+    target_conditioned_movement_gain: float = 0.15
+    target_allocation_movement_only: bool = False
+    # CTDE-only balanced-coverage teacher.  During training, the centralized
+    # state supplies a minimum-distance one-to-one UAV/target assignment; at
+    # execution the actor still receives only its local observation and U2U
+    # inbox.  The message payload itself remains a learned 16-D representation.
+    target_allocation_teacher_enabled: bool = False
+    target_allocation_teacher_label_coef: float = 0.20
+    target_allocation_teacher_movement_coef: float = 0.50
+    target_allocation_teacher_message_coef: float = 0.05
+    target_allocation_teacher_epochs: int = 1
+    target_allocation_teacher_differentiable_comm: bool = False
+    target_allocation_teacher_switching_penalty_m: float = 0.0
+    # Slow-layer teacher: "distance" retains the historical Hungarian label;
+    # "qos_bistatic" assigns the best reachable bistatic geometry to targets
+    # with the largest P_D deficit, with no teacher input exposed at execution.
+    target_allocation_teacher_mode: str = "distance"
+    target_allocation_teacher_qos_floor: float = 0.60
+    target_allocation_teacher_qos_weight: float = 2.0
+    target_allocation_teacher_commitment_frames: int = 5
+    target_allocation_teacher_height_m: float = 20.0
+    target_allocation_sinkhorn_enabled: bool = False
+    # Capacitated decentralized matching. Sparse physical target tokens form
+    # local rows of a UAV-target bid graph; alternating Sinkhorn projection
+    # enforces endpoint loads. Coupling is annealed to avoid one-shot collapse.
+    capacity_matching_enabled: bool = False
+    capacity_matching_row_capacity: int = 2
+    capacity_matching_column_capacity: int = 2
+    capacity_matching_temperature: float = 0.35
+    capacity_matching_iterations: int = 32
+    capacity_matching_blend_start: float = 0.0
+    capacity_matching_blend_end: float = 1.0
+    capacity_matching_anneal_frames: int = 100000
     # Per-module LR: encoder=1e-5, attention=1e-5, head=5e-5 (Full).
     # When freeze_attention=True: attention LR→0. False = single LR for all.
     use_per_module_lr: bool = False
@@ -222,13 +604,47 @@ class MARLParams:
     # Freeze attention (attn.* + attn_norm.*) — EH mode.
     # Only meaningful when use_per_module_lr=True.
     freeze_attention: bool = False
-    # Advantage mode: 'scalar' (default) or 'target_wise' (S4).
+    # Advantage mode: 'scalar', 'target_wise', or 'bottleneck_risk'.
     # target_wise: per-target advantages aggregated via UAV-target
     # responsibility weights (inverse-distance softmax, detached).
     advantage_mode: str = 'scalar'
     # Temperature for inverse-distance target responsibility (meters).
     # Only used when advantage_mode='target_wise'.
     target_responsibility_tau_m: float = 50.0
+    # Bottleneck-risk mode uses the current bottom target tail to route
+    # per-target GAE, while retaining a scalar-advantage mixture for stability.
+    risk_tail_fraction: float = 0.50
+    risk_target_temperature: float = 0.10
+    risk_target_floor: float = 0.60
+    risk_scalar_mix: float = 0.25
+    # Safe warm-start adaptation: freeze the foundation actor and train only a
+    # bounded, locally gated movement residual.
+    risk_residual_delta_max: float = 0.06
+    risk_residual_hidden_dim: int = 32
+    risk_residual_gate_bias: float = -2.0
+    risk_residual_learning_rate: float = 3.0e-5
+    risk_residual_directional_basis_enabled: bool = False
+    # Cardinality-independent local communication decisions. The set pooling
+    # consumes only one UAV's own outgoing per-target tokens.
+    scale_equivariant_comm_heads_enabled: bool = False
+    # Replace K-long agent one-hot input in round negotiation with the shared
+    # proposal/response phase, preserving permutation equivariance.
+    permutation_equivariant_round_encoding_enabled: bool = False
+    # CTDE-only set/distributional risk critic.  Shared UAV/target encoders
+    # remove absolute node identities; the module is absent from deployment.
+    set_risk_critic_enabled: bool = False
+    risk_critic_hidden_dim: int = 128
+    risk_critic_num_quantiles: int = 16
+    risk_critic_cvar_alpha: float = 0.20
+    risk_critic_monotonic_quantiles_enabled: bool = False
+    risk_critic_qos_floor: float = 0.60
+    risk_critic_quantile_coef: float = 0.25
+    risk_critic_constraint_coef: float = 0.10
+    # <=0 selects an automatic negative/positive ratio per minibatch.
+    risk_critic_constraint_positive_weight: float = 0.0
+    # Freeze the actor and legacy scalar/target critics; fit only the set-risk
+    # branch on trajectories from the fixed behaviour policy.
+    risk_critic_only_training: bool = False
 
 
 @dataclass
@@ -276,11 +692,43 @@ def _dict_to_dataclass(cls, d: dict):
     return cls(**kwargs)
 
 
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    """Recursively merge config dictionaries without mutating either input."""
+    merged = dict(base)
+    for key, value in override.items():
+        if (key in merged and isinstance(merged[key], dict)
+                and isinstance(value, dict)):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_raw_config(path: str, seen: set) -> dict:
+    resolved = os.path.abspath(path)
+    if resolved in seen:
+        raise ValueError(f'cyclic config inheritance involving {resolved}')
+    seen.add(resolved)
+    with open(resolved, 'r', encoding='utf-8') as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f'config root must be a mapping: {resolved}')
+    parent = raw.pop('extends', None)
+    if parent is None:
+        seen.remove(resolved)
+        return raw
+    if not isinstance(parent, str):
+        raise ValueError('config extends must be a relative or absolute path')
+    parent_path = (parent if os.path.isabs(parent) else
+                   os.path.join(os.path.dirname(resolved), parent))
+    base = _load_raw_config(parent_path, seen)
+    seen.remove(resolved)
+    return _deep_merge_dict(base, raw)
+
+
 def load_config(path: str) -> MasterConfig:
-    """Load configuration from YAML file."""
-    with open(path, 'r', encoding='utf-8') as f:
-        raw = yaml.safe_load(f)
-    return _dict_to_dataclass(MasterConfig, raw)
+    """Load YAML, optionally inheriting another file via ``extends``."""
+    return _dict_to_dataclass(MasterConfig, _load_raw_config(path, set()))
 
 
 def get_default_config() -> MasterConfig:

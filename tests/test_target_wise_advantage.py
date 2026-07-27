@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import pytest
 
+from uav_isac.agents.trainer import compute_bottleneck_risk_advantage
+
 
 def test_distance_index_reads_dist_not_d_s1():
     """Offset must point to 'dist' (3rd geom field), not 'd_s1' (6th)."""
@@ -188,3 +190,32 @@ def test_dynamic_Q(Q):
         an[:, q] = (pt_adv[:, q] - m) / s
     tw = (rho * an).sum(dim=-1)
     assert tw.shape == (B,)
+
+
+def test_bottleneck_risk_advantage_ignores_healthy_target_spike():
+    """A high advantage on a healthy target must not dominate tail credit."""
+    pd = torch.tensor([
+        [0.10, 0.20, 0.80, 0.90],
+        [0.12, 0.22, 0.82, 0.92],
+        [0.14, 0.24, 0.84, 0.94],
+        [0.16, 0.26, 0.86, 0.96],
+    ])
+    per_target_adv = torch.tensor([
+        [-2.0, -1.0, 100.0, 100.0],
+        [-1.0,  0.0, -100.0, -100.0],
+        [ 1.0,  0.5, 100.0, 100.0],
+        [ 2.0,  1.0, -100.0, -100.0],
+    ])
+    scalar = torch.zeros(4)
+    first = compute_bottleneck_risk_advantage(
+        per_target_adv, pd, scalar, tail_fraction=0.5,
+        target_floor=0.6, scalar_mix=0.0)
+
+    changed_healthy = per_target_adv.clone()
+    changed_healthy[:, 2:] *= -1000.0
+    second = compute_bottleneck_risk_advantage(
+        changed_healthy, pd, scalar, tail_fraction=0.5,
+        target_floor=0.6, scalar_mix=0.0)
+    torch.testing.assert_close(first, second)
+    assert torch.isfinite(first).all()
+    assert first.mean().abs() < 1e-6

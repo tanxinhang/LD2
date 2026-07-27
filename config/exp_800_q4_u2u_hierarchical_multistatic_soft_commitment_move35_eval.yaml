@@ -1,0 +1,7 @@
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_eval.yaml
+
+marl:
+  target_allocation_movement_blend: 0.35
+  target_allocation_movement_blend_start: 0.35
+  target_allocation_movement_blend_end: 0.35
+  target_allocation_movement_blend_anneal_frames: 0

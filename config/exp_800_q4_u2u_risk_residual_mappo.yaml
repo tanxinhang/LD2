@@ -1,0 +1,30 @@
+# Safe movement-only fine-tuning of the strongest frozen Top-1 policy.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_eval.yaml
+
+marl:
+  advantage_mode: bottleneck_risk
+  risk_tail_fraction: 0.50
+  risk_target_temperature: 0.10
+  risk_target_floor: 0.60
+  risk_scalar_mix: 0.15
+
+  risk_residual_delta_max: 0.06
+  risk_residual_hidden_dim: 32
+  risk_residual_gate_bias: -2.0
+  risk_residual_learning_rate: 3.0e-5
+  risk_residual_directional_basis_enabled: false
+
+  # One PPO pass and a tight update clip. Communication, resource, commitment
+  # and matching parameters are frozen inside the residual wrapper.
+  ppo_clip: 0.05
+  ppo_epochs: 1
+  target_kl: 0.005
+  target_allocation_aux_lr: 0.0
+  comm_rate_bonus_aux_lr: 0.0
+  use_per_module_lr: false
+  freeze_attention: false
+
+  early_stop: false
+  eval_interval: 2
+  eval_episodes: 5
+  checkpoint_confirmation_enabled: false

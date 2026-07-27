@@ -1,0 +1,24 @@
+# End-to-end distributed ISAC: delayed latent target tokens drive a local
+# proposal/response allocation, and that allocation directly biases the
+# physical per-target sensing-power action used by constrained P0.
+extends: exp_800_q4_u2u_distributed_rendezvous.yaml
+
+marl:
+  target_allocation_enabled: true
+  target_allocation_teacher_enabled: false
+  target_allocation_sinkhorn_enabled: false
+  target_allocation_temperature: 0.50
+  target_allocation_straight_through: false
+  target_allocation_movement_blend: 0.0
+  target_allocation_resource_blend: 2.0
+  target_allocation_differentiable_comm: true
+  target_allocation_comm_delay_decisions: 1
+  target_allocation_balance_coef: 1.0
+  target_allocation_commit_coef: 0.05
+  target_allocation_temporal_coef: 0.02
+  target_allocation_aux_epochs: 8
+  target_allocation_aux_lr: 0.0003
+
+  round_negotiation_enabled: true
+  round_negotiation_strength: 1.0
+  round_negotiation_temperature: 0.5

@@ -1,0 +1,62 @@
+# Hierarchical Time-Slotted Multistatic Graph-MAPPO (HTM-GMAPPO).
+#
+# Slow layer: a straight-through one-target movement commitment is learned
+# with a CTDE assignment teacher, but executed from local geometry and received
+# latent target tokens only.  Its physical authority is annealed at PPO rollout
+# boundaries.
+#
+# Fast layer: communication rate/content, communication power and Q-way sensing
+# allocation are updated every frame under the exact 1 W per-UAV RF budget.
+# Sparse capacity matching retains two sensing endpoint bids per UAV/target.
+# A node may be a transmitter and a receiver in different sensing sub-slots,
+# eliminating the old power-before-role mismatch without adding RF energy.
+extends: exp_800_q4_u2u_brh_gmappo.yaml
+
+marl:
+  multistatic_subslot_enabled: true
+
+  # Confidence-calibrated distributed graph: local token/sensing claims bias
+  # pairing, but an uncertain or wrong claim cannot delete every physical edge
+  # of a target.  This replaces the brittle hard top-2 rendezvous filter.
+  distributed_target_commitment_mode: soft
+  # Locked on the confirmation split with worst/LCB-first selection.
+  distributed_target_commitment_soft_floor: 0.50
+  distributed_target_commitment_uncertainty_relief: 1.0
+
+  # Five token/resource negotiations per slow movement commitment.
+  movement_decision_interval: 5
+
+  # Disentangle one-target kinematic commitment from two-endpoint sensing bids.
+  target_allocation_straight_through: true
+  hierarchical_dual_assignment_enabled: true
+  target_allocation_teacher_enabled: true
+  target_allocation_teacher_label_coef: 0.50
+  target_allocation_teacher_movement_coef: 1.00
+  target_allocation_teacher_message_coef: 0.10
+  target_allocation_teacher_epochs: 4
+  target_allocation_teacher_differentiable_comm: true
+  target_allocation_teacher_switching_penalty_m: 75.0
+  target_allocation_teacher_mode: qos_bistatic
+  target_allocation_teacher_qos_floor: 0.60
+  target_allocation_teacher_qos_weight: 2.0
+  target_allocation_teacher_commitment_frames: 5
+
+  # Avoid a one-shot policy-map change for a warm-started actor.
+  target_allocation_movement_blend: 0.0
+  target_allocation_movement_blend_start: 0.05
+  target_allocation_movement_blend_end: 0.25
+  target_allocation_movement_blend_anneal_frames: 150000
+
+  # The paired smoke test found a clear over-coupling point above roughly
+  # 0.35 endpoint authority; retain the robust side of that boundary.
+  capacity_matching_blend_end: 0.35
+
+  # Communication remains learned and costly, while at least half of the
+  # instantaneous RF budget is always available for sensing.
+  comm_power_fraction_min: 0.0
+  comm_power_fraction_max: 0.50
+
+  # Conservative PPO adaptation around the geometry warm start.
+  ppo_clip: 0.08
+  ppo_epochs: 2
+  target_kl: 0.01

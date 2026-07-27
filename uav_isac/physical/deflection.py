@@ -85,6 +85,7 @@ class DeflectionComputer:
         eta_los_dB: float = 0.1,
         eta_nlos_dB: float = 21.0,
         use_swerling: bool = False,
+        use_report_link: bool = True,
     ):
         self.fc = fc
         self.delta_f = delta_f
@@ -106,6 +107,7 @@ class DeflectionComputer:
         self.los_a, self.los_b = los_a, los_b
         self.eta_los_dB, self.eta_nlos_dB = eta_los_dB, eta_nlos_dB
         self.use_swerling = use_swerling
+        self.use_report_link = bool(use_report_link)
 
     def compute(
         self,
@@ -116,6 +118,7 @@ class DeflectionComputer:
         roles: np.ndarray,             # (K,) int: 0=tx, 1=rx, 2=idle
         fc_position: np.ndarray,       # (3,) fusion center position
         role_agnostic: bool = False,   # if True, any UAV may tx/rx (P0 assigns roles)
+        sensing_power_w: Optional[np.ndarray] = None,  # (K,Q) target-wise TX power
     ) -> List[DeflectionEntry]:
         """Compute Deflection entries for all valid bistatic pairs.
 
@@ -139,6 +142,14 @@ class DeflectionComputer:
         """
         K = uav_positions.shape[0]
         Q = target_positions.shape[0]
+        if sensing_power_w is not None:
+            sensing_power_w = np.asarray(sensing_power_w, dtype=np.float64)
+            if sensing_power_w.shape != (K, Q):
+                raise ValueError(
+                    f'sensing_power_w must have shape {(K, Q)}, got '
+                    f'{sensing_power_w.shape}')
+            if np.any(sensing_power_w < -1e-12):
+                raise ValueError('sensing_power_w must be non-negative')
 
         # Step 1: Compute geometry
         tau, nu, alpha = compute_all_bistatic_params(
@@ -162,22 +173,31 @@ class DeflectionComputer:
 
                 # Reporting link reliability for rx UAV j → FC
                 # (low-altitude blockage via Al-Hourani LoS/NLoS if enabled)
-                chi_rep = compute_report_link_reliability(
-                    uav_positions[j], fc_position,
-                    self.fc, self.ric_K, self.noise_power,
-                    self.P_report, self.rng,
-                    use_los_prob=self.use_los_prob,
-                    los_a=self.los_a, los_b=self.los_b,
-                    eta_los_dB=self.eta_los_dB, eta_nlos_dB=self.eta_nlos_dB,
-                )
+                if self.use_report_link:
+                    chi_rep = compute_report_link_reliability(
+                        uav_positions[j], fc_position,
+                        self.fc, self.ric_K, self.noise_power,
+                        self.P_report, self.rng,
+                        use_los_prob=self.use_los_prob,
+                        los_a=self.los_a, los_b=self.los_b,
+                        eta_los_dB=self.eta_los_dB, eta_nlos_dB=self.eta_nlos_dB,
+                    )
+                else:
+                    # U2U-only study: sensing quality is determined by the
+                    # bistatic echo, not by a non-existent ground-report link.
+                    chi_rep = 1.0
 
                 for q in range(Q):
                     if np.isinf(tau[i, j, q]):
                         continue
 
                     # Step 2: Raw Deflection
+                    target_power_w = (
+                        self.P_sense if sensing_power_w is None
+                        else max(float(sensing_power_w[i, q]), 0.0)
+                    )
                     d_raw = compute_raw_deflection(
-                        alpha[i, j, q], self.P_sense,
+                        alpha[i, j, q], target_power_w,
                         self.T_sym, self.M, self.N, self.noise_power,
                         antenna_gain=self.antenna_gain, n_cpi=self.n_cpi
                     )

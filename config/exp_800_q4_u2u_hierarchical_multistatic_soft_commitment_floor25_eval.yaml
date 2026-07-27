@@ -1,0 +1,4 @@
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_eval.yaml
+
+marl:
+  distributed_target_commitment_soft_floor: 0.25

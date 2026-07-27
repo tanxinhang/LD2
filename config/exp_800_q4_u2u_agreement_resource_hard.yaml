@@ -1,0 +1,11 @@
+# Symmetry-breaking continuation: use straight-through hard commitments in the
+# team-balance loss and a small commitment-guided movement residual. The
+# physical resource adapter and top-2 endpoint rendezvous remain unchanged.
+extends: exp_800_q4_u2u_agreement_resource.yaml
+
+marl:
+  target_allocation_straight_through: true
+  target_allocation_balance_coef: 4.0
+  target_allocation_commit_coef: 0.10
+  target_allocation_movement_blend: 0.05
+  target_allocation_aux_epochs: 16

@@ -1,0 +1,34 @@
+# Distributed sparse target proposals for two-endpoint bistatic sensing.
+# Each UAV broadcasts only its local top-2 target tokens.  Four UAVs therefore
+# advertise exactly the eight endpoints required by four bistatic targets.
+# Received proposal
+# masks suppress already-full targets and add a small bonus to vacant targets.
+extends: exp_800_q4_u2u_agreement_resource.yaml
+
+marl:
+  sparse_claim_enabled: true
+  sparse_claim_share_topk: 2
+  sparse_claim_commit_topk: 2
+  sparse_claim_desired_endpoints: 2
+  sparse_claim_full_penalty: 2.0
+  sparse_claim_vacant_bonus: 0.5
+  sparse_claim_temperature: 0.25
+  sparse_claim_underload_coef: 4.0
+  sparse_claim_overload_coef: 1.0
+
+  # The receiver uses cross-attended peer tokens as a direct residual on the
+  # executed target-sensing power logits. A no-message counterfactual teaches
+  # the residual to increase power on locally weak targets.
+  comm_aided_sensing_enabled: true
+  comm_aided_sensing_blend: 1.0
+  comm_aided_sensing_aux_coef: 1.0
+  comm_aided_sensing_counterfactual_coef: 0.5
+  comm_aided_sensing_temperature: 0.25
+  comm_aided_sensing_margin: 0.02
+
+  # The one-to-one regularizer conflicts with two sensing endpoints per target.
+  target_allocation_balance_coef: 0.0
+  target_allocation_commit_coef: 0.0
+  target_allocation_temporal_coef: 0.02
+  target_allocation_aux_epochs: 16
+  target_allocation_aux_lr: 0.0003

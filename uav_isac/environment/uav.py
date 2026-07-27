@@ -68,6 +68,7 @@ class UAV:
         self,
         delta_p: np.ndarray,  # (2,) position increment [dx, dy]
         role: int,             # 0=tx, 1=rx, 2=idle
+        account_radio_energy: bool = True,
     ) -> None:
         """Apply one frame's action: move and set role.
 
@@ -108,10 +109,11 @@ class UAV:
         flight_energy = self._compute_flight_energy(delta_p)
         self.battery -= flight_energy
 
-        if self.role == 0:  # tx
-            self.battery -= self.P_sense * self.dt
-        elif self.role == 1:  # rx
-            self.battery -= self.P_report * self.dt
+        if account_radio_energy:
+            if self.role == 0:  # tx
+                self.battery -= self.P_sense * self.dt
+            elif self.role == 1:  # rx
+                self.battery -= self.P_report * self.dt
         # idle: no extra energy beyond flight
 
         # Floor battery at 0

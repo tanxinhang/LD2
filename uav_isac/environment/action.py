@@ -45,7 +45,10 @@ class ActionSpace:
         self.dp_scale = self.max_dp
         self.num_roles = num_roles
         self.rng = rng if rng is not None else np.random.default_rng()
-        self.structured_actor = True  # flag for MAPPOAgent
+        # Backward-compatible default. Relational MAPPO/IPPO entry points opt in
+        # explicitly after constructing the action space; lightweight agents
+        # and legacy unit tests retain the flat ActorNetwork interface.
+        self.structured_actor = False  # flag for MAPPOAgent
         self.num_targets = 0  # overridden by run script / MAPPOAgent config
 
     @property
@@ -213,8 +216,12 @@ class ActionSpace:
 
         dp_std_pos = np.exp(np.clip(dp_std, -20, 2))
 
-        from scipy.stats import norm
-        log_prob_dp = np.sum(norm.logpdf(delta_p_raw, dp_mean, dp_std_pos))
+        standardized = (delta_p_raw - dp_mean) / np.maximum(
+            dp_std_pos, 1e-12)
+        log_prob_dp = np.sum(
+            -0.5 * standardized ** 2
+            - np.log(np.maximum(dp_std_pos, 1e-12))
+            - 0.5 * np.log(2.0 * np.pi))
         log_prob_dp -= np.sum(np.log(1.0 - dp_norm ** 2 + 1e-6))
 
         if not self.learn_roles:

@@ -1,0 +1,52 @@
+# Bottleneck-aware Risk-constrained Hierarchical Graph MAPPO.
+#
+# The fast actor keeps frame-level latent communication and 1 W joint ISAC
+# resource allocation.  Three physical message rounds occur per movement
+# commitment.  Sparse target tokens form a local UAV-target bid graph whose
+# soft matching has two endpoint slots per UAV and per sensing target.
+extends: exp_800_q4_u2u_sparse_claim_top2.yaml
+
+marl:
+  movement_decision_interval: 3
+
+  # Capacity-aware slow coordination. Start almost neutral for warm-started
+  # policies and anneal physical authority instead of switching it on at once.
+  target_allocation_sinkhorn_enabled: false
+  capacity_matching_enabled: true
+  capacity_matching_row_capacity: 2
+  capacity_matching_column_capacity: 2
+  capacity_matching_temperature: 0.35
+  # Eight alternating projections are sufficient for the 4x4, capacity-2
+  # marginals and keep the slow coordination layer deployable.
+  capacity_matching_iterations: 8
+  capacity_matching_blend_start: 0.05
+  capacity_matching_blend_end: 1.0
+  capacity_matching_anneal_frames: 100000
+  target_allocation_resource_blend: 0.50
+  target_allocation_temporal_coef: 0.05
+  target_allocation_aux_epochs: 4
+  target_allocation_aux_lr: 0.0001
+
+  # Directly route PPO credit through the bottom two targets while retaining
+  # one quarter of the original scalar advantage for training stability.
+  advantage_mode: bottleneck_risk
+  risk_tail_fraction: 0.50
+  risk_target_temperature: 0.10
+  risk_target_floor: 0.60
+  risk_scalar_mix: 0.25
+
+  # Geometry curriculum and policy-adaptive seed replay. Selection,
+  # confirmation, test and stress splits are excluded from the training pool.
+  training_seed_replay_enabled: true
+  training_seed_bank_path: config/stratified_seeds_800_q4.json
+  training_seed_uniform_mix: 0.20
+  training_seed_priority_alpha: 0.70
+  training_seed_priority_ema: 0.20
+  training_seed_min_curriculum_fraction: 0.30
+  training_seed_curriculum_frames: 300000
+  training_seed_max_nearest_m: 350.0
+
+  # Conservative warm-start adaptation.
+  ppo_clip: 0.08
+  ppo_epochs: 2
+  target_kl: 0.01

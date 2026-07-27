@@ -1,0 +1,5 @@
+# Matched 6/6 no-U2U ablation.
+extends: exp_800_k6q6_dcb_top1_scale.yaml
+
+marl:
+  comm_eval_force_silence: true

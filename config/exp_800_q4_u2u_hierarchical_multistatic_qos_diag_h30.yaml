@@ -1,0 +1,9 @@
+# Longer-range evaluation-only teacher audit.  A 30-frame look-ahead matches
+# 75 m of maximum horizontal travel and tests whether the five-frame proxy was
+# too myopic for Medium geometry.
+extends: exp_800_q4_u2u_hierarchical_multistatic_stable_eval.yaml
+
+marl:
+  eval_qos_bistatic_assignment_movement: true
+  target_allocation_teacher_commitment_frames: 30
+  target_allocation_teacher_qos_weight: 2.0

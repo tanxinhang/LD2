@@ -1,0 +1,6 @@
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_move50_eval.yaml
+
+marl:
+  target_allocation_movement_confidence_gating_enabled: true
+  target_allocation_movement_confidence_floor: 0.0
+  target_allocation_movement_confidence_power: 2.0

@@ -29,6 +29,15 @@ class ObservationBuilder:
         height: float = 100.0,
         use_relative_features: bool = False,
         use_p0_info: bool = False,
+        expose_neighbor_state: bool = True,
+        use_comm_tokens: bool = False,
+        comm_num_rate_levels: int = 4,
+        comm_rate_metadata_denominator: Optional[float] = None,
+        comm_deadline_s: float = 0.005,
+        comm_payload_mode: str = 'aggregate',
+        comm_target_token_dim: int = 16,
+        use_channel_feedback: bool = False,
+        channel_feedback_dim: int = 6,
     ):
         """
         Args:
@@ -42,6 +51,36 @@ class ObservationBuilder:
         self.area_w, self.area_h = area_size
         self.height = height
         self.use_relative_features = use_relative_features
+        self.expose_neighbor_state = bool(expose_neighbor_state)
+        self.use_comm_tokens = bool(use_comm_tokens)
+        self.comm_num_rate_levels = max(1, int(comm_num_rate_levels))
+        default_rate_denominator = max(self.comm_num_rate_levels - 1, 1)
+        self.comm_rate_metadata_denominator = max(
+            float(comm_rate_metadata_denominator)
+            if comm_rate_metadata_denominator is not None
+            else float(default_rate_denominator),
+            1.0,
+        )
+        self.comm_deadline_s = max(float(comm_deadline_s), 1e-9)
+        self.comm_payload_mode = str(comm_payload_mode).lower()
+        if self.comm_payload_mode not in {'aggregate', 'target_tokens'}:
+            raise ValueError('comm_payload_mode must be aggregate/target_tokens')
+        self.comm_target_token_dim = max(1, int(comm_target_token_dim))
+        self.comm_tokens_per_sender = (
+            self.Q if self.comm_payload_mode == 'target_tokens' else 1)
+        self.comm_payload_dim = (
+            self.Q * self.comm_target_token_dim
+            if self.comm_payload_mode == 'target_tokens' else 16)
+        # Target-token metadata adds target id to the historical transport
+        # descriptors: sender/target/rate/delay/SNR/AoI.
+        metadata_dim = 6 if self.comm_payload_mode == 'target_tokens' else 5
+        token_payload_dim = (
+            self.comm_target_token_dim
+            if self.comm_payload_mode == 'target_tokens' else 16)
+        self.comm_token_dim = token_payload_dim + metadata_dim
+        self.comm_token_count = (K - 1) * self.comm_tokens_per_sender
+        self.use_channel_feedback = bool(use_channel_feedback)
+        self.channel_feedback_dim = max(1, int(channel_feedback_dim))
         self.use_history = False  # set True to stack previous frame features
         self._prev_rel = {}       # agent_id -> previous relative features array
         # God-view features: P0 solution info (SINR-gated for v2-physical)
@@ -69,6 +108,11 @@ class ObservationBuilder:
             self.obs_dim += Q           # per-target coverage count (from P0)
             self.obs_dim += (K - 1)     # per-neighbor pairing feasibility
         self.obs_dim += 16       # attention-aggregated neighbor comm messages
+        if self.use_comm_tokens:
+            self.obs_dim += self.comm_token_count * self.comm_token_dim
+            self.obs_dim += self.comm_token_count  # validity mask
+        if self.use_channel_feedback:
+            self.obs_dim += self.channel_feedback_dim
         self.obs_dim += 3        # explicit physics: nearest_target_dist(1) + bearing_sin+cos(2)
 
     def build_local_obs(
@@ -81,6 +125,10 @@ class ObservationBuilder:
         selected_set: Optional[list] = None,  # P0 selected (i,j,q) triples
         deflection_entries: Optional[list] = None,  # for pairing feasibility
         comm_msgs: Optional[Dict[int, np.ndarray]] = None,  # per-agent comm messages
+        comm_metadata: Optional[Dict[int, dict]] = None,
+        own_token_mask: Optional[np.ndarray] = None,
+        own_target_claims: Optional[np.ndarray] = None,
+        channel_feedback: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Build local observation for one agent.
 
@@ -237,6 +285,12 @@ class ObservationBuilder:
 
         for k in range(self.K):
             if k == agent_id: continue
+            if not self.expose_neighbor_state:
+                # Keep the historical feature layout stable, but close the
+                # zero-cost inter-agent side channel. Coordination information
+                # must arrive through the learned communication inbox below.
+                obs_parts.append(np.zeros(self.neighbor_dim, dtype=np.float64))
+                continue
             n_state = uav_states[k]
             rel_pos = (n_state.pos[:2] - self_state.pos[:2]) / np.array([self.area_w, self.area_h])
             rel_vel = (n_state.vel[:2] - self_state.vel[:2]) / 25.0
@@ -262,7 +316,8 @@ class ObservationBuilder:
             obs_parts.append(np.zeros(self.Q, dtype=np.float64))
 
         # --- Distance-weighted neighbor communication messages ---
-        if comm_msgs is not None and len(comm_msgs) > 0:
+        if (not self.use_comm_tokens
+                and comm_msgs is not None and len(comm_msgs) > 0):
             my_p = self_state.pos[:2]
             weights = []
             msgs = []
@@ -276,13 +331,117 @@ class ObservationBuilder:
                     msgs.append(comm_msgs[k])
             if msgs:
                 w_arr = np.array(weights)
-                w_arr = w_arr / (w_arr.sum() + 1e-6)
+                w_arr = w_arr / w_arr.sum()
                 agg_msg = np.sum([w * m for w, m in zip(w_arr, msgs)], axis=0)  # (16,)
             else:
                 agg_msg = np.zeros(16)
         else:
             agg_msg = np.zeros(16)
+            # In target-token mode the legacy aggregate block is otherwise
+            # unused. Reuse it for the UAV's own most recent physically
+            # transmitted target bids and claim mask. This is local memory (not
+            # free inter-UAV information) and preserves observation dimensions.
+            if (self.comm_payload_mode == 'target_tokens'
+                    and own_token_mask is not None):
+                own_mask = np.asarray(
+                    own_token_mask, dtype=np.float64).reshape(-1)
+                if own_mask.shape != (self.Q,):
+                    raise ValueError(
+                        f'own token mask must have shape {(self.Q,)}')
+                if own_target_claims is None:
+                    own_claims = np.zeros(self.Q, dtype=np.float64)
+                else:
+                    own_claims = np.asarray(
+                        own_target_claims, dtype=np.float64).reshape(-1)
+                    if own_claims.shape != (self.Q,):
+                        raise ValueError(
+                            f'own target claims must have shape {(self.Q,)}')
+                agg_msg[:self.Q] = own_claims
+                agg_msg[self.Q:2 * self.Q] = (
+                    own_mask > 0.5).astype(np.float64)
         obs_parts.append(agg_msg)  # 16 dims
+
+        # --- Received network tokens for masked cross-attention ---
+        if self.use_comm_tokens:
+            token_rows = []
+            token_mask = []
+            metadata = comm_metadata or {}
+            for sender in range(self.K):
+                if sender == agent_id:
+                    continue
+                valid = comm_msgs is not None and sender in comm_msgs
+                if valid:
+                    msg = np.asarray(comm_msgs[sender], dtype=np.float64).reshape(-1)
+                    if msg.size != self.comm_payload_dim:
+                        raise ValueError(
+                            f'expected {self.comm_payload_dim}-D payload from '
+                            f'UAV {sender}, got {msg.size}')
+                    md = metadata.get(sender, {})
+                    sender_norm = sender / max(self.K - 1, 1)
+                    rate_norm = (
+                        float(md.get('rate_index', 0))
+                        / self.comm_rate_metadata_denominator)
+                    latency_norm = np.clip(
+                        float(md.get('latency_s', 0.0)) / self.comm_deadline_s,
+                        0.0, 2.0)
+                    snr_norm = np.tanh(float(md.get('snr_db', 0.0)) / 20.0)
+                    aoi_norm = np.clip(
+                        float(md.get('age_frames', 0.0)) / 10.0, 0.0, 1.0)
+                    if self.comm_payload_mode == 'target_tokens':
+                        target_tokens = msg.reshape(
+                            self.Q, self.comm_target_token_dim)
+                        delivered_token_mask = np.asarray(
+                            md.get('token_mask', np.ones(self.Q)),
+                            dtype=np.float64).reshape(-1)
+                        if delivered_token_mask.shape != (self.Q,):
+                            raise ValueError(
+                                f'expected {(self.Q,)} token mask from UAV '
+                                f'{sender}, got {delivered_token_mask.shape}')
+                        for q in range(self.Q):
+                            if delivered_token_mask[q] <= 0.5:
+                                token_rows.append(np.zeros(
+                                    self.comm_token_dim, dtype=np.float64))
+                                token_mask.append(0.0)
+                                continue
+                            target_norm = q / max(self.Q - 1, 1)
+                            token_rows.append(np.concatenate([
+                                target_tokens[q],
+                                np.array([
+                                    sender_norm, target_norm, rate_norm,
+                                    latency_norm, snr_norm, aoi_norm,
+                                ], dtype=np.float64),
+                            ]))
+                            token_mask.append(1.0)
+                        continue
+                    token = np.concatenate([
+                        msg,
+                        np.array([sender_norm, rate_norm, latency_norm,
+                                  snr_norm, aoi_norm], dtype=np.float64),
+                    ])
+                    token_mask.append(1.0)
+                else:
+                    for _ in range(self.comm_tokens_per_sender):
+                        token_rows.append(np.zeros(
+                            self.comm_token_dim, dtype=np.float64))
+                        token_mask.append(0.0)
+                    continue
+                token_rows.append(token)
+            obs_parts.append(np.concatenate(token_rows) if token_rows else np.zeros(0))
+            obs_parts.append(np.asarray(token_mask, dtype=np.float64))
+
+        if self.use_channel_feedback:
+            if channel_feedback is None:
+                feedback = np.zeros(
+                    self.channel_feedback_dim, dtype=np.float64)
+            else:
+                feedback = np.asarray(
+                    channel_feedback, dtype=np.float64).reshape(-1)
+                if feedback.shape != (self.channel_feedback_dim,):
+                    raise ValueError(
+                        'channel feedback must have shape '
+                        f'{(self.channel_feedback_dim,)}, got '
+                        f'{feedback.shape}')
+            obs_parts.append(feedback)
 
         obs = np.concatenate([np.atleast_1d(p).ravel() for p in obs_parts])
         return obs.astype(np.float64)

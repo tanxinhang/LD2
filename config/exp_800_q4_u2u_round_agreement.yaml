@@ -1,0 +1,30 @@
+# Fully decentralized two-round proposal/response agreement probe.
+# Payload values remain latent target tokens.  A shared local clock identifies
+# the proposal and response rounds; no global state or central assignment is
+# exposed to the deployed actor.
+extends: exp_800_q4_u2u_joint_isac.yaml
+
+marl:
+  round_negotiation_enabled: true
+  round_negotiation_strength: 0.5
+  round_negotiation_temperature: 0.5
+
+  # Local target commitment is inferred from own target entities and delivered
+  # peer tokens.  Training knows only the team grouping for an unlabeled
+  # mutual-exclusion loss; it never prescribes token contents or target labels.
+  target_allocation_enabled: true
+  target_allocation_teacher_enabled: false
+  target_allocation_sinkhorn_enabled: false
+  target_allocation_temperature: 0.35
+  target_allocation_straight_through: true
+  # Open the movement residual conservatively while the shared claim scale is
+  # learned; larger one-shot blends caused excessive PPO drift.
+  target_allocation_movement_blend: 0.05
+  target_allocation_differentiable_comm: true
+  target_allocation_comm_delay_decisions: 1
+  target_allocation_balance_coef: 1.00
+  target_allocation_commit_coef: 0.05
+  target_allocation_temporal_coef: 0.02
+  target_allocation_aux_epochs: 16
+  target_allocation_aux_lr: 0.0003
+  target_allocation_movement_only: true

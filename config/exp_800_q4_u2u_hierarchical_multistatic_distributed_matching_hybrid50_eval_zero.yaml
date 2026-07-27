@@ -1,0 +1,4 @@
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_eval.yaml
+
+marl:
+  comm_eval_message_ablation: zero

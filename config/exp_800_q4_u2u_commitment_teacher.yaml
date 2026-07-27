@@ -1,0 +1,15 @@
+# CTDE teacher variant: the one-to-one assignment is supervised only during
+# training. The 16-D quantized payload representation and receiver decoding are
+# still learned end to end; no teacher/global state is available at execution.
+extends: exp_800_q4_u2u_commitment.yaml
+
+marl:
+  target_allocation_enabled: true
+  target_allocation_teacher_enabled: true
+  target_allocation_teacher_differentiable_comm: true
+  target_allocation_sinkhorn_enabled: false
+  target_allocation_teacher_label_coef: 1.0
+  target_allocation_teacher_movement_coef: 1.0
+  target_allocation_teacher_message_coef: 0.20
+  target_allocation_teacher_epochs: 4
+  target_allocation_aux_lr: 0.001

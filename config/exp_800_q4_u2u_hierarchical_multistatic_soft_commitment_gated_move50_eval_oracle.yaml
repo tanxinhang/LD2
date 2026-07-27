@@ -1,0 +1,7 @@
+# Centralized minimum-distance movement upper bound under the matched physical
+# channel, sensing scheduler and 1 W joint RF budget. This is a diagnostic
+# ceiling, not a deployable baseline and not a training input.
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_gated_move50_eval.yaml
+
+marl:
+  eval_centralized_assignment_movement: true

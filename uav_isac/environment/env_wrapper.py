@@ -163,10 +163,28 @@ class UAVISACEnv(gymnasium.Env):
             'n_tx': step_info.n_tx,
             'n_rx': step_info.n_rx,
             'n_selected': step_info.n_selected,
+            'n_duplex': step_info.n_duplex,
+            'multistatic_subslot_enabled': bool(
+                self.core._multistatic_subslot_enabled),
             'valid_pair': step_info.valid_pair,
             'no_tx': step_info.no_tx,
             'all_same_role': step_info.all_same_role,
         }
+        if step_info.learned_comm:
+            info.update(step_info.learned_comm)
+            info['total_bits_all'] = (
+                float(step_info.p0_solution.total_bits)
+                + float(step_info.learned_comm.get('learned_comm_bits', 0.0))
+                + float(step_info.learned_comm.get('evidence_comm_bits', 0.0))
+            )
+        if step_info.reward_components:
+            # Keep both the structured dictionary and flat scalar keys. The
+            # latter flow directly into rollout CSVs without special parsing.
+            info['reward_components'] = dict(step_info.reward_components)
+            info.update({
+                f'reward_{name}': float(value)
+                for name, value in step_info.reward_components.items()
+            })
 
         self.current_obs = next_obs
         self.current_step_info = step_info

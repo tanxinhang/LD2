@@ -1,0 +1,6 @@
+# Stage-2 observational probe.  The decoder reads quantized latent token
+# dimensions but has no action path, so the frozen legacy policy is preserved.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_eval.yaml
+
+marl:
+  comm_semantic_decoder_enabled: true

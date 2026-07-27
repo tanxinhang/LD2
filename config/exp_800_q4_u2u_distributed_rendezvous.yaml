@@ -1,0 +1,7 @@
+# Stronger distributed probe: both bistatic endpoints must independently place
+# a target in their local top-2 set. P0 only resolves this agreement subgraph.
+extends: exp_800_q4_u2u_distributed_commitment.yaml
+
+marl:
+  distributed_target_commitment_topk: 2
+  distributed_target_commitment_require_receiver: true

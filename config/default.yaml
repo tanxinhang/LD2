@@ -6,7 +6,7 @@ scenario:
   height: 20                   # m UAV altitude — Device-free MARL (TVT 2024): H=20 m
   K: 4                         # number of UAVs
   Q: 2                         # number of moving targets
-  T: 150                       # frames per episode (mobility 2.5*150=375m > half-diag 283m -> traversable)
+  T: 150                       # frames per episode (targets are fixed in the default tracking-free study)
   dt: 0.1                      # frame duration (seconds)
   C: 1                         # number of regions (Phase 1: no federation)
 
@@ -15,13 +15,14 @@ uav:
   d_safe: 20                   # m safe separation distance
   P_sense: 0.0251              # W = 14 dBm sensing power — Device-free MARL (TVT 2024): P^(r)=14 dBm
   P_report: 0.25               # W reporting power — Device-free MARL comm power set {0.25..1 W}
+  P_isac_total: 1.0            # W per-UAV hard RF budget: P_comm + sum_q P_sense,q
   B_max: 50000                 # J initial battery energy
   P_fly_static: 80             # W hover power (rotorcraft)
   P_fly_coeff: 0.05            # speed-dependent coefficient (P_fly ∝ v^2)
 
 target:
-  motion_model: "CV"           # Constant Velocity
-  speed_range: [0, 5]          # Stage-1 curriculum: slow targets (was [0,20]) so task is learnable; ramp up later
+  motion_model: "CV"           # used only when marl.tracking_enabled=true
+  speed_range: [0, 5]          # ignored by the default tracking-free sensing experiment
   sigma_a: 0.5                 # m/s^2 process noise std
   rcs: 1.0                     # m^2 radar cross section
   omega_q: [0.5, 0.5]          # target priorities (equal by default)
@@ -63,6 +64,190 @@ p0_solver:
 
 marl:
   hidden_layers: [256, 256]    # actor/critic MLP architecture
+  movement_decision_interval: 1 # hold only movement; communication/resources still update each frame
+  # Permit transmit/receive endpoint roles in different sensing sub-slots of
+  # one frame. Disabled for exact backwards compatibility.
+  multistatic_subslot_enabled: false
+  # Constrain P0 by local sensing-power top-k decisions. Receiver agreement
+  # creates a hard rendezvous with no central/oracle fallback.
+  distributed_target_commitment_enabled: false
+  distributed_target_commitment_topk: 1
+  distributed_target_commitment_require_receiver: true
+  distributed_target_commitment_mode: hard
+  distributed_target_commitment_soft_floor: 0.25
+  distributed_target_commitment_uncertainty_relief: 1.0
+  tracking_enabled: false      # fixed mission-known sensing targets; no Kalman tracking loop
+  detection_fusion_mode: local_only # legacy_global | central_oracle | local_only | u2u_distributed
+  evidence_packet_topk: 1
+  evidence_packet_owner_aware: true
+  evidence_packet_llr_bits: 8
+  evidence_packet_confidence_bits: 2
+  evidence_packet_clip_max: 0.0
+  evidence_packet_standardized_threshold: 0.0
+  evidence_packet_confidence_log_boundaries: []
+  evidence_packet_confidence_representatives: []
+  evidence_packet_mc_draws: 2048
+  evidence_packet_mc_seed: 20260725
+  evidence_packet_content_mode: normal
+  evidence_packet_calibration_profile: ""
+  ground_communication_enabled: false  # paper scope: U2U only, no UAV-ground reporting link
+  learned_comm_mode: cost_aware        # learned content + learned silence/rate action
+  comm_only_neighbor_information: true # no free neighbour state/intent side channel
+  comm_cross_attention_enabled: true   # target queries individual sender-message tokens
+  comm_message_ttl_frames: 5           # retain last delivered token with increasing AoI
+  comm_rate_bits_per_dim: [0, 4, 8, 16, 32] # retain low-cost rates; add optional high-precision rate
+  comm_header_bits: 64
+  comm_bandwidth_hz: 100000
+  comm_tx_power_w: 0.25
+  comm_deadline_s: 0.005
+  comm_processing_delay_s: 0.0002
+  comm_snr_threshold_db: 0.0
+  comm_antenna_gain_dbi: 0.0
+  # Episode-level paired channel profiles for robust-policy training.
+  # Disabled by default, so formal fixed-channel evaluation is unchanged.
+  comm_channel_randomization_enabled: false
+  comm_channel_randomization_snr_threshold_db_values: []
+  comm_channel_randomization_deadline_s_values: []
+  comm_channel_randomization_profile_weights: []
+  comm_message_log_std_init: -1.0
+  comm_entropy_scale: 0.1       # let rate decisions commit while movement still explores
+  comm_payload_mode: aggregate  # aggregate | target_tokens
+  comm_target_token_dim: 16
+  joint_isac_power_enabled: false # opt-in learned P_comm + multi-target sensing split
+  comm_power_fraction_min: 0.0
+  comm_power_fraction_max: 1.0
+  isac_power_log_std_init: -1.0
+  sensing_allocation_log_std_init: -1.0
+  comm_bit_cost_weight: 0.00001
+  comm_energy_cost_weight: 1.0
+  comm_delay_cost_weight: 10.0
+  comm_qos_constrained: true
+  comm_qos_steady_min: 0.80
+  comm_qos_weak3_min: 0.70
+  comm_qos_worst_min: 0.60
+  comm_qos_dual_lr: 0.05
+  comm_qos_lambda_init: 0.5
+  comm_qos_lambda_max: 5.0
+  comm_qos_reward_scale: 1.0
+  # Encourage successful participation while QoS is poor, but keep transport
+  # costly so the policy must learn when communication is actually worthwhile.
+  # The bonus is rate-neutral: 4/8/16/32 bit packets receive the same bonus.
+  comm_encouragement_enabled: true
+  comm_encouragement_weight: 0.05
+  comm_encouragement_floor_ratio: 0.10
+  # While QoS is infeasible, softly encourage precision up to 8 bit/dim.
+  # Higher rates remain available but must justify their additional cost.
+  comm_rate_bonus_enabled: true
+  comm_rate_bonus_weight: 0.03
+  comm_rate_bonus_target_bits: 8
+  comm_rate_bonus_aux_coef: 1.0
+  comm_rate_bonus_aux_lr: 0.01
+  # Permit three consecutive silent policy decisions (15 simulator frames in
+  # the Medium config's 5-frame decision interval), then charge 0.01 per
+  # additional decision up to a 0.05 cap.
+  comm_silence_penalty_enabled: true
+  comm_silence_grace_decisions: 3
+  comm_silence_penalty_per_decision: 0.01
+  comm_silence_penalty_max: 0.05
+  comm_eval_force_silence: false
+  comm_eval_force_rate_bits: -1
+  comm_eval_message_ablation: none
+  eval_centralized_assignment_movement: false
+  eval_qos_bistatic_assignment_movement: false
+  # Hard minimum-rate forcing is retained only as an ablation and is OFF.
+  comm_qos_min_rate_bits: 0
+  comm_qos_rate_shortfall_penalty: 0.0
+  comm_qos_rate_aux_coef: 0.0
+  # Experimental soft assignment is disabled by default: symmetric training can
+  # collapse to a uniform assignment and degraded the Medium worst-case score.
+  target_allocation_enabled: false
+  target_allocation_balance_coef: 0.20
+  target_allocation_commit_coef: 0.01
+  target_allocation_temperature: 1.0
+  target_allocation_straight_through: false
+  target_allocation_movement_blend: 0.0
+  target_allocation_movement_confidence_gating_enabled: false
+  target_allocation_movement_confidence_floor: 0.0
+  target_allocation_movement_confidence_power: 2.0
+  target_allocation_movement_blend_start: 0.0
+  target_allocation_movement_blend_end: 0.0
+  target_allocation_movement_blend_anneal_frames: 0
+  hierarchical_dual_assignment_enabled: false
+  movement_team_matching_enabled: false
+  movement_team_matching_temperature: 0.35
+  movement_team_matching_iterations: 16
+  movement_team_matching_blend: 0.0
+  movement_team_matching_intrinsic_bid_mix: 0.0
+  target_allocation_resource_blend: 0.0
+  target_allocation_differentiable_comm: false
+  target_allocation_comm_delay_decisions: 1
+  target_allocation_temporal_coef: 0.0
+  target_allocation_aux_epochs: 1
+  target_allocation_aux_lr: 0.0
+  round_negotiation_enabled: false
+  round_negotiation_strength: 0.5
+  round_negotiation_temperature: 0.5
+  sparse_claim_enabled: false
+  sparse_claim_share_topk: 2
+  sparse_claim_commit_topk: 2
+  sparse_claim_desired_endpoints: 2
+  sparse_claim_full_penalty: 2.0
+  sparse_claim_vacant_bonus: 0.5
+  sparse_claim_temperature: 0.25
+  sparse_claim_underload_coef: 4.0
+  sparse_claim_overload_coef: 1.0
+  adaptive_topk_from_rate_enabled: false
+  adaptive_topk_rate_mapping: [0, 1, 2]
+  adaptive_topk_rate_only_training: false
+  adaptive_topk_reset_rate_head: false
+  adaptive_topk_worst_credit_coef: 0.0
+  comm_rate_metadata_denominator: null
+  comm_channel_feedback_rate_enabled: false
+  comm_channel_feedback_dim: 6
+  comm_sender_delivery_penalty_enabled: false
+  comm_sender_delivery_penalty_weight: 0.05
+  comm_aided_sensing_enabled: false
+  comm_aided_sensing_blend: 1.0
+  comm_aided_sensing_aux_coef: 1.0
+  comm_aided_sensing_counterfactual_coef: 0.5
+  comm_aided_sensing_temperature: 0.25
+  comm_aided_sensing_margin: 0.02
+  comm_semantic_decoder_enabled: false
+  comm_semantic_capacity_bid_enabled: false
+  comm_semantic_capacity_bid_gain: 0.0
+  comm_semantic_extra_token_enabled: false
+  comm_semantic_extra_token_threshold: 0.10
+  # Communication-induced motion is opt-in. The endpoint-deficit field uses
+  # only physically delivered sparse claims and remains exactly zero in silence.
+  semantic_kinematic_field_enabled: false
+  semantic_kinematic_field_gain: 0.15
+  target_conditioned_movement_enabled: false
+  target_conditioned_movement_gain: 0.15
+  target_allocation_movement_only: false
+  # Optional CTDE distillation of a balanced one-UAV/one-target coverage
+  # assignment. Disabled until the learned-policy probe passes; the oracle
+  # itself reaches 0.905/0.873/0.731 on the fixed Medium validation bank.
+  target_allocation_teacher_enabled: false
+  target_allocation_teacher_label_coef: 0.20
+  target_allocation_teacher_movement_coef: 0.50
+  target_allocation_teacher_message_coef: 0.05
+  target_allocation_teacher_epochs: 1
+  target_allocation_teacher_differentiable_comm: false
+  target_allocation_teacher_switching_penalty_m: 0.0
+  target_allocation_teacher_mode: distance
+  target_allocation_teacher_qos_floor: 0.60
+  target_allocation_teacher_qos_weight: 2.0
+  target_allocation_teacher_commitment_frames: 5
+  target_allocation_teacher_height_m: 20.0
+  target_allocation_sinkhorn_enabled: false
+  capacity_matching_enabled: false
+  capacity_matching_row_capacity: 2
+  capacity_matching_column_capacity: 2
+  capacity_matching_temperature: 0.35
+  capacity_matching_iterations: 32
+  capacity_matching_blend_start: 0.0
+  capacity_matching_blend_end: 1.0
+  capacity_matching_anneal_frames: 100000
   lr: 0.0003                   # Adam learning rate
   gamma: 0.99                  # discount factor
   gae_lambda: 0.95             # GAE λ
@@ -78,6 +263,38 @@ marl:
                                # the coverage-distance proxy was misaligned with bistatic P_D (hurt last run)
   shape_w: 0.01                # distance-shaping weight (only used if enabled)
   lambda_report: 1.0e-5        # comms-cost weight; small vs detection utility (was 1e-3 -> P_D collapse)
+  # Auditable coordination reward. Keep stage 0 by default so legacy training
+  # is numerically unchanged; staged experiment YAMLs enable one term at a time.
+  coord_reward_enabled: false
+  coord_reward_stage: 0         # 0=log, 1=worst, 2=+duplicate, 3=+weak3, 4=+steady
+  coord_reward_ema_alpha: 0.20
+  coord_reward_steady_floor: 0.80
+  coord_reward_weak3_floor: 0.70
+  coord_reward_worst_floor: 0.60
+  coord_reward_worst_weight: 1.00
+  coord_reward_duplicate_weight: 0.01
+  coord_reward_weak3_weight: 0.50
+  coord_reward_steady_weight: 0.25
+  coord_reward_min_move_m: 1.0e-6
+  # Experimental CTDE credit decomposition; opt-in to preserve old runs.
+  headwise_credit_enabled: false
+  headwise_credit_vf_coef: 0.5
+  headwise_movement_coef: 1.0
+  headwise_message_coef: 1.0
+  headwise_rate_coef: 1.0
+  headwise_resource_coef: 1.0
+  # Training-only causal token attribution. A sampled sender is removed from
+  # every receiver inbox in a cloned next-step simulator; a small CCP amortizes
+  # those paired intervention labels over unsampled senders.
+  causal_ccp_enabled: false
+  causal_ccp_hidden_dim: 128
+  causal_ccp_lr: 0.0003
+  causal_ccp_epochs: 6
+  causal_ccp_intervention_stride: 32
+  causal_ccp_tail_temperature: 0.10
+  causal_ccp_message_mix: 0.75
+  causal_ccp_min_samples: 24
+  causal_ccp_min_effect: 1.0e-5
   vf_coef: 0.5                 # value function loss coefficient
   max_grad_norm: 0.5           # gradient clipping max norm
   lagrangian_lr: 0.002         # lowered: avoids monotonic λ climb -> non-stationary returns
@@ -88,6 +305,47 @@ marl:
   early_stop: true             # stop at convergence (plateau on deterministic eval)
   eval_interval: 50            # deterministic eval every N episodes
   eval_episodes: 3             # eval episodes averaged
+  eval_seed_bank_path: ""
+  eval_seed_split: selection
+  final_eval_seed_split: test
+  checkpoint_confidence_alpha: 0.05
+  checkpoint_bootstrap_samples: 2000
+  checkpoint_cvar_fraction: 0.20
+  checkpoint_confirmation_enabled: false
+  checkpoint_confirmation_split: confirmation
+  training_seed_replay_enabled: false
+  training_seed_bank_path: ""
+  training_seed_uniform_mix: 0.20
+  training_seed_priority_alpha: 0.70
+  training_seed_priority_ema: 0.20
+  training_seed_min_curriculum_fraction: 0.30
+  training_seed_curriculum_frames: 300000
+  training_seed_max_nearest_m: 350.0
+  advantage_mode: scalar
+  target_responsibility_tau_m: 50.0
+  risk_tail_fraction: 0.50
+  risk_target_temperature: 0.10
+  risk_target_floor: 0.60
+  risk_scalar_mix: 0.25
+  risk_residual_delta_max: 0.06
+  risk_residual_hidden_dim: 32
+  risk_residual_gate_bias: -2.0
+  risk_residual_learning_rate: 3.0e-5
+  risk_residual_directional_basis_enabled: false
+  scale_equivariant_comm_heads_enabled: false
+  permutation_equivariant_round_encoding_enabled: false
+  # Training-only set/distributional CVaR and QoS-constraint critic.
+  # It ignores the appended absolute UAV identity and is not deployed.
+  set_risk_critic_enabled: false
+  risk_critic_hidden_dim: 128
+  risk_critic_num_quantiles: 16
+  risk_critic_cvar_alpha: 0.20
+  risk_critic_monotonic_quantiles_enabled: false
+  risk_critic_qos_floor: 0.60
+  risk_critic_quantile_coef: 0.25
+  risk_critic_constraint_coef: 0.10
+  risk_critic_constraint_positive_weight: 0.0
+  risk_critic_only_training: false
   early_stop_patience: 12      # stop after N evals w/o steady_P_D improvement
   early_stop_min_delta: 0.005  # min improvement counted
   centralized_critic: true     # MAPPO (CTDE, global-state critic); set false for IPPO (local-obs critic)

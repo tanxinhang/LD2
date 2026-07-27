@@ -1,0 +1,8 @@
+# Evaluation/ablation: apply the learned capacitated projection at full
+# strength without PPO adaptation. This isolates architectural execution.
+extends: exp_800_q4_u2u_brh_gmappo.yaml
+
+marl:
+  capacity_matching_blend_start: 1.0
+  capacity_matching_blend_end: 1.0
+  training_seed_replay_enabled: false

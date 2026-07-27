@@ -51,18 +51,41 @@ class ObservationSlices:
     comm_start: int = 0
     comm_len: int = 16
 
+    # Optional cost-aware communication tokens. Aggregate mode has one token
+    # per sender. Target-token mode has Q tokens per sender.
+    comm_token_start: int = 0
+    comm_token_per_sender: int = 21
+    comm_tokens_per_sender: int = 1
+    comm_mask_start: int = 0
+    comm_mask_len: int = 0
+
+    # Optional six-dimensional, strictly local channel feedback summary:
+    # fresh-delivery ratio, received-SNR margin, latency slack, AoI,
+    # configured deadline ratio, and configured SNR-threshold shift.
+    channel_feedback_start: int = 0
+    channel_feedback_len: int = 0
+
     # Derived
     K: int = 4
     Q: int = 4
     has_p0: bool = False
     has_rel_features: bool = True
+    has_comm_tokens: bool = False
+    has_channel_feedback: bool = False
 
     @staticmethod
     def from_config(K: int, Q: int, use_p0: bool = False,
-                    use_rel_features: bool = True) -> "ObservationSlices":
+                    use_rel_features: bool = True,
+                    use_comm_tokens: bool = False,
+                    comm_token_dim: int = 21,
+                    comm_tokens_per_sender: int = 1,
+                    use_channel_feedback: bool = False,
+                    channel_feedback_dim: int = 6) -> "ObservationSlices":
         """Build slice descriptors from scenario config."""
         s = ObservationSlices(K=K, Q=Q, has_p0=use_p0,
-                              has_rel_features=use_rel_features)
+                              has_rel_features=use_rel_features,
+                              has_comm_tokens=use_comm_tokens,
+                              has_channel_feedback=use_channel_feedback)
 
         # Beliefs block
         belief_len = Q * s.belief_per_target
@@ -105,8 +128,24 @@ class ObservationSlices:
         # Comm
         comm_end = pd_hist_end + s.comm_len
 
+        # Per-sender message tokens and validity mask (optional).
+        token_start = comm_end
+        token_dim = int(comm_token_dim)
+        tokens_per_sender = max(1, int(comm_tokens_per_sender))
+        token_count = (K - 1) * tokens_per_sender
+        token_len = (token_count * token_dim
+                     if use_comm_tokens else 0)
+        mask_start = token_start + token_len
+        mask_len = token_count if use_comm_tokens else 0
+        feedback_start = mask_start + mask_len
+        feedback_len = (
+            max(1, int(channel_feedback_dim))
+            if use_channel_feedback else 0)
+
         return ObservationSlices(
             K=K, Q=Q, has_p0=use_p0, has_rel_features=use_rel_features,
+            has_comm_tokens=use_comm_tokens,
+            has_channel_feedback=use_channel_feedback,
             self_start=0, self_len=8,
             belief_start=8, belief_per_target=9,
             geom_start=geom_start, geom_per_target=8,
@@ -117,11 +156,16 @@ class ObservationSlices:
             global_start=neighbor_end, global_len=global_len,
             pd_hist_start=global_end, pd_hist_len=Q,
             comm_start=pd_hist_end, comm_len=16,
+            comm_token_start=token_start, comm_token_per_sender=token_dim,
+            comm_tokens_per_sender=tokens_per_sender,
+            comm_mask_start=mask_start, comm_mask_len=mask_len,
+            channel_feedback_start=feedback_start,
+            channel_feedback_len=feedback_len,
         )
 
     @property
     def total_dim(self) -> int:
-        return self.comm_start + self.comm_len
+        return self.channel_feedback_start + self.channel_feedback_len
 
     def extract_self(self, obs: np.ndarray):
         return obs[..., self.self_start:self.self_start + self.self_len]
@@ -148,6 +192,26 @@ class ObservationSlices:
 
     def extract_comm(self, obs: np.ndarray):
         return obs[..., self.comm_start:self.comm_start + self.comm_len]
+
+    def extract_comm_tokens(self, obs: np.ndarray):
+        if not self.has_comm_tokens:
+            return None
+        token_count = (self.K - 1) * self.comm_tokens_per_sender
+        length = token_count * self.comm_token_per_sender
+        raw = obs[..., self.comm_token_start:self.comm_token_start + length]
+        return raw.reshape(
+            *raw.shape[:-1], token_count, self.comm_token_per_sender)
+
+    def extract_comm_mask(self, obs: np.ndarray):
+        if not self.has_comm_tokens:
+            return None
+        return obs[..., self.comm_mask_start:self.comm_mask_start + self.comm_mask_len]
+
+    def extract_channel_feedback(self, obs: np.ndarray):
+        if not self.has_channel_feedback:
+            return None
+        start = self.channel_feedback_start
+        return obs[..., start:start + self.channel_feedback_len]
 
     def extract_neighbors(self, obs: np.ndarray):
         """Returns (..., K-1, neighbor_dim) neighbors array."""

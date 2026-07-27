@@ -1,0 +1,36 @@
+# Multi-round, multi-target U2U-ISAC MAPPO model.
+# Every simulator frame is a communication round.  Each UAV learns a message,
+# rate, communication-power fraction and sensing-power distribution over all
+# targets under one exact per-frame RF budget.
+extends: exp_800_q4_u2u.yaml
+
+uav:
+  # Per-UAV hard RF budget. The policy autonomously divides this 1 W between
+  # communication and the Q target-sensing channels every frame.
+  P_isac_total: 1.0
+
+marl:
+  # Send one unconstrained 16-D network token for every local target entity.
+  # The receiver consumes the resulting sender-target token set directly.
+  comm_payload_mode: target_tokens
+  comm_target_token_dim: 16
+  joint_isac_power_enabled: true
+  comm_power_fraction_min: 0.0
+  comm_power_fraction_max: 1.0
+  isac_power_log_std_init: -1.0
+  sensing_allocation_log_std_init: -1.0
+
+  # One decentralized decision per physical frame gives repeated, adaptive
+  # exchanges: round t+1 observes the messages delivered after round t.
+  actor_decision_interval: 1
+  # Two adaptive token exchanges occur between consecutive movement updates.
+  # This remains decentralized: every UAV commits locally using only its own
+  # observation and the physically delivered neighbour tokens.
+  movement_decision_interval: 2
+  assignment_hold_frames: 1
+
+  # The sensing resource action is already a Q-way allocation.  Keep the old
+  # categorical one-target commitment probes disabled.
+  target_allocation_enabled: false
+  target_allocation_teacher_enabled: false
+  target_allocation_sinkhorn_enabled: false

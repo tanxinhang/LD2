@@ -1,0 +1,32 @@
+# Gate 2B: same fixed actor and physical policy as the paper Top-1 run, but
+# final detection consumes only owner-local evidence plus quantized peer LLRs
+# delivered through the physical U2U link.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_eval.yaml
+
+marl:
+  detection_fusion_mode: u2u_distributed
+  use_centered_marginal: false
+  use_difference_reward: false
+  team_weight: 1.0
+  diff_weight: 0.0
+  evidence_packet_topk: 1
+  evidence_packet_owner_aware: true
+  evidence_packet_llr_bits: 8
+  evidence_packet_confidence_bits: 2
+  evidence_packet_clip_max: 46.926640798928354
+  evidence_packet_standardized_threshold: 3.0705367211772674
+  evidence_packet_confidence_log_boundaries:
+    - 1.6939108149591953
+    - 2.2247346073849115
+    - 2.8105760489283256
+  evidence_packet_confidence_representatives:
+    - 2.44349694161395
+    - 6.037010872176553
+    - 11.390416288894018
+    - 24.524456614971932
+  evidence_packet_mc_draws: 2048
+  evidence_packet_mc_seed: 20260725
+  evidence_packet_content_mode: normal
+  # Clip/confidence: selection20. Team-PFA threshold: independent H0 draws on
+  # stress20 geometry (no H1 labels), as in the formal Gate 1c protocol.
+  evidence_packet_calibration_profile: gate1c-selection20-clip-conf_stress20-h0-threshold_top1-8bit-conf2
