@@ -1,0 +1,22 @@
+# End-to-end latent U2U commitment probe.
+#
+# No payload field is assigned a hand-written meaning.  During centralized
+# training, delayed straight-through-quantized messages must support a balanced,
+# persistent set of decentralized target commitments.  At execution, each UAV
+# uses only its local observation and physically delivered U2U inbox.
+extends: exp_800_q4_u2u_rate8.yaml
+
+marl:
+  target_allocation_enabled: true
+  target_allocation_teacher_enabled: false
+  target_allocation_sinkhorn_enabled: false
+  target_allocation_balance_coef: 4.0
+  target_allocation_commit_coef: 0.10
+  target_allocation_temperature: 0.30
+  target_allocation_straight_through: true
+  target_allocation_movement_blend: 0.25
+  target_allocation_differentiable_comm: true
+  target_allocation_comm_delay_decisions: 1
+  target_allocation_temporal_coef: 0.25
+  target_allocation_aux_epochs: 8
+  target_allocation_aux_lr: 0.003

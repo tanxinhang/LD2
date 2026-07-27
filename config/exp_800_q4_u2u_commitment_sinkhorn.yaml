@@ -1,0 +1,9 @@
+# Decentralized learned-bid/Sinkhorn variant of the latent commitment probe.
+# Every receiver reconstructs neighbour bid rows from physically delivered
+# latent messages, then applies its own differentiable team normalization.
+extends: exp_800_q4_u2u_commitment.yaml
+
+marl:
+  target_allocation_sinkhorn_enabled: true
+  target_allocation_aux_epochs: 4
+  target_allocation_aux_lr: 0.001

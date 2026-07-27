@@ -1,0 +1,10 @@
+# Gate 2F: retain Gate 2E local channel observability and give the rate head
+# an attributable transport-constraint signal. Each active UAV is penalized
+# only for the fraction of its own broadcast links that failed. The signal is
+# training-only; decentralized execution still sees only the local six-value
+# reciprocal-link summary.
+extends: exp_800_q4_u2u_gate2e_local_channel_rate_only.yaml
+
+marl:
+  comm_sender_delivery_penalty_enabled: true
+  comm_sender_delivery_penalty_weight: 0.05

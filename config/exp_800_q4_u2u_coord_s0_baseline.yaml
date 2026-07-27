@@ -1,0 +1,9 @@
+# Stage 0 paired control. Keep QoS measurement, dual updates, communication
+# encouragement, rate exploration, silence penalty and physical costs, but
+# remove the old one-shot weighted QoS reward so staged attribution is clean.
+extends: exp_800_q4_u2u_joint_isac.yaml
+
+marl:
+  comm_qos_reward_scale: 0.0
+  coord_reward_enabled: false
+  coord_reward_stage: 0

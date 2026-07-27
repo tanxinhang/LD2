@@ -149,6 +149,7 @@ def test_no_global_pd_fallback():
     cfg.marl.num_envs = 1
     env = UAVISACEnv(config=cfg, seed=42)
     K, Q = cfg.scenario.K, cfg.scenario.Q
+    env.reset(seed=42)
 
     env.core.prev_P_D = np.full(Q, 0.99)   # distinctive global value
     env.core.prev_P_D_local = {}            # simulate edge case

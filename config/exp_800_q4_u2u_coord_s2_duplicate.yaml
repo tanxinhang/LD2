@@ -1,0 +1,7 @@
+# Stage 2: Stage 1 plus avoidable duplicate-motion penalty. A duplicate is
+# charged only while a below-floor target has no UAV moving towards it.
+extends: exp_800_q4_u2u_coord_s1_worst.yaml
+
+marl:
+  coord_reward_stage: 2
+  coord_reward_duplicate_weight: 0.01

@@ -1,0 +1,6 @@
+# Evaluation-only causal content ablation: retain learned rate/power decisions
+# but replace every transmitted target token with zero at deployment.
+extends: exp_800_q4_u2u_causal_ccp.yaml
+
+marl:
+  comm_eval_message_ablation: zero

@@ -8,7 +8,179 @@ Critic: MLP [256, 256] → scalar value + per-target value heads
 import torch
 import torch.nn as nn
 import numpy as np
+import itertools
 from typing import Optional, Tuple
+
+
+def sinkhorn_normalize(
+    logits: torch.Tensor,
+    iterations: int = 48,
+    temperature: float = 0.20,
+) -> torch.Tensor:
+    """Differentiable approximately doubly-stochastic team assignment."""
+    if logits.ndim != 3:
+        raise ValueError('Sinkhorn logits must have shape (batch, K, Q)')
+    log_p = logits / max(float(temperature), 1e-4)
+    for _ in range(max(int(iterations), 1)):
+        log_p = log_p - torch.logsumexp(log_p, dim=-1, keepdim=True)
+        log_p = log_p - torch.logsumexp(log_p, dim=-2, keepdim=True)
+    return torch.exp(log_p)
+
+
+def exact_permutation_assignment(
+    logits: torch.Tensor,
+    temperature: float = 0.35,
+    max_exact_agents: int = 8,
+) -> torch.Tensor:
+    """Exact decentralized one-to-one projection with soft gradients.
+
+    If every UAV evaluates this function on the same globally indexed U2U
+    claim matrix, every UAV obtains the same permutation without a coordinator.
+    The forward value is hard; a Gibbs distribution over feasible permutations
+    supplies a straight-through gradient during training.
+    """
+    if logits.ndim != 3:
+        raise ValueError('assignment logits must have shape (batch, K, Q)')
+    _, num_agents, num_targets = logits.shape
+    if num_agents != num_targets or num_agents > max_exact_agents:
+        return sinkhorn_normalize(logits, temperature=temperature)
+
+    permutations = torch.tensor(
+        list(itertools.permutations(range(num_targets))),
+        dtype=torch.long,
+        device=logits.device,
+    )
+    rows = torch.arange(num_agents, device=logits.device)
+    permutation_scores = logits[:, rows, permutations].sum(dim=-1)
+    soft_weights = torch.softmax(
+        permutation_scores / max(float(temperature), 1e-4), dim=-1)
+    permutation_matrices = torch.nn.functional.one_hot(
+        permutations, num_classes=num_targets).to(logits.dtype)
+    soft_assignment = torch.einsum(
+        'bp,pkq->bkq', soft_weights, permutation_matrices)
+    hard_assignment = permutation_matrices[
+        permutation_scores.argmax(dim=-1)]
+    return hard_assignment + soft_assignment - soft_assignment.detach()
+
+
+def capacity_sinkhorn_normalize(
+    logits: torch.Tensor,
+    row_capacity: float,
+    column_capacity: float,
+    iterations: int = 32,
+    temperature: float = 0.35,
+) -> torch.Tensor:
+    """Project team bids onto a soft capacitated bipartite matching.
+
+    Unlike a doubly-stochastic one-to-one Sinkhorn matrix, bistatic sensing
+    needs more than one endpoint per target.  This alternating KL projection
+    preserves the requested row/column loads while keeping entries in [0, 1].
+    The total requested capacity must agree on both sides.
+    """
+    if logits.ndim != 3:
+        raise ValueError('capacity logits must have shape (batch, K, Q)')
+    _, num_agents, num_targets = logits.shape
+    row_capacity = float(row_capacity)
+    column_capacity = float(column_capacity)
+    if row_capacity <= 0.0 or column_capacity <= 0.0:
+        raise ValueError('matching capacities must be positive')
+    total_rows = row_capacity * num_agents
+    total_columns = column_capacity * num_targets
+    if not np.isclose(total_rows, total_columns, rtol=1e-5, atol=1e-5):
+        raise ValueError(
+            'row and column matching capacities must have equal total load')
+
+    # The box-constrained entropic transport optimum has the logistic form
+    #   X_ij = sigmoid(logit_ij / T + u_i + v_j).
+    # Alternating Newton updates of its row/column dual variables enforce both
+    # marginals without the post-hoc clipping that breaks capacity conservation.
+    # This is the bounded analogue of Sinkhorn scaling for binary endpoint
+    # reservations; every edge remains differentiable and lies strictly in
+    # (0, 1).
+    scaled = torch.clamp(
+        logits / max(float(temperature), 1e-4), -30.0, 30.0)
+    row_dual = torch.zeros_like(scaled[:, :, :1])
+    column_dual = torch.zeros_like(scaled[:, :1, :])
+
+    def solve_dual(
+        fixed: torch.Tensor,
+        target: float,
+        reduce_dim: int,
+        template: torch.Tensor,
+    ) -> torch.Tensor:
+        # Monotone bisection is deliberately used instead of an unconstrained
+        # Newton update: sparse top-k claims can saturate sigmoid derivatives
+        # and make a Newton step jump to the wrong boundary.
+        lower = torch.full_like(template, -60.0)
+        upper = torch.full_like(template, 60.0)
+        for _ in range(16):
+            midpoint = 0.5 * (lower + upper)
+            load = torch.sigmoid(fixed + midpoint).sum(
+                dim=reduce_dim, keepdim=True)
+            below = load < target
+            lower = torch.where(below, midpoint, lower)
+            upper = torch.where(below, upper, midpoint)
+        return 0.5 * (lower + upper)
+
+    # The dual variables only enforce feasibility; treating their numerical
+    # solve as a stop-gradient operation avoids backpropagating through hundreds
+    # of bisection kernels.  The final logistic edge probabilities still carry
+    # direct gradients to every bid logit (a straight-through dual projection).
+    with torch.no_grad():
+        detached_scaled = scaled.detach()
+        for _ in range(max(int(iterations), 1)):
+            row_dual = solve_dual(
+                detached_scaled + column_dual,
+                row_capacity,
+                -1,
+                row_dual,
+            )
+            column_dual = solve_dual(
+                detached_scaled + row_dual,
+                column_capacity,
+                -2,
+                column_dual,
+            )
+    return torch.sigmoid(scaled + row_dual + column_dual)
+
+
+def apply_semantic_capacity_bid_correction(
+    neighbor_logits: torch.Tensor,
+    semantic_evidence: torch.Tensor,
+    semantic_pd: torch.Tensor,
+    valid: torch.Tensor,
+    gain: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Refine sparse peer bids with decoded quality before projection.
+
+    The correction is row-centred: it can change which of one sender's target
+    claims survives a capacity conflict, but cannot inflate that sender's
+    aggregate authority. Invalid or silent token edges remain untouched. This
+    path therefore affects sensing endpoints without directly changing motion
+    or the per-UAV communication/sensing power split.
+    """
+    if neighbor_logits.ndim != 3:
+        raise ValueError('neighbor logits must have shape (batch, peers, Q)')
+    expected_shape = neighbor_logits.shape
+    for name, value in (
+        ('semantic evidence', semantic_evidence),
+        ('semantic P_D', semantic_pd),
+        ('valid mask', valid),
+    ):
+        if value.shape != expected_shape:
+            raise ValueError(f'{name} must match neighbor logits')
+    valid_bool = valid.to(torch.bool)
+    valid_float = valid_bool.to(neighbor_logits.dtype)
+    quality = (
+        semantic_evidence.to(neighbor_logits.dtype)
+        * semantic_pd.to(neighbor_logits.dtype)
+        * valid_float
+    )
+    valid_count = valid_float.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    row_mean = quality.sum(dim=-1, keepdim=True) / valid_count
+    correction = (quality - row_mean) * valid_float
+    corrected = neighbor_logits + max(float(gain), 0.0) * correction
+    return corrected, correction
 
 
 def mlp(input_dim: int, hidden_dims: list, output_dim: int,
@@ -37,9 +209,14 @@ class ActorNetwork(nn.Module):
     """
 
     def __init__(self, obs_dim: int, hidden_layers: list = [256, 256],
-                 max_dp: float = 2.5):
+                 max_dp: float = 2.5, comm_num_rate_levels: int = 4,
+                 comm_log_std_init: float = -1.0, num_targets: int = 4,
+                 comm_payload_dim: int = 16,
+                 isac_power_log_std_init: float = -1.0,
+                 sensing_allocation_log_std_init: float = -1.0):
         super().__init__()
         self.max_dp = max_dp
+        self.comm_payload_dim = max(1, int(comm_payload_dim))
 
         # Shared feature extractor: 2 hidden ReLU layers (obs→256→256→256).
         # FIX: previously hidden_layers[:-1] dropped the 2nd hidden layer
@@ -48,7 +225,18 @@ class ActorNetwork(nn.Module):
 
         # Heads
         self.dp_mean_head = nn.Linear(hidden_layers[-1], 2)
-        self.comm_head = nn.Linear(hidden_layers[-1], 16)  # communication message (16-dim)
+        self.comm_head = nn.Linear(hidden_layers[-1], self.comm_payload_dim)
+        self.comm_rate_head = nn.Linear(
+            self.comm_payload_dim, comm_num_rate_levels)
+        self.comm_log_std = nn.Parameter(
+            torch.full((self.comm_payload_dim,), float(comm_log_std_init)))
+        self.isac_power_mean_head = nn.Linear(self.comm_payload_dim, 1)
+        self.isac_sensing_mean_head = nn.Linear(
+            self.comm_payload_dim, int(num_targets))
+        self.isac_power_log_std = nn.Parameter(torch.tensor(
+            [float(isac_power_log_std_init)]))
+        self.isac_sensing_log_std = nn.Parameter(torch.full(
+            (int(num_targets),), float(sensing_allocation_log_std_init)))
         self.pd_aux_head = nn.Linear(hidden_layers[-1], 1) # auxiliary P_D predictor
         # init 0: with range (-1,1), tanh(0)=0 -> log_std=0 -> sigma=1 (matches the
         # high-entropy regime that learned early).
@@ -57,6 +245,12 @@ class ActorNetwork(nn.Module):
 
         # Initialize weights
         self._init_weights()
+        nn.init.zeros_(self.comm_rate_head.weight)
+        nn.init.zeros_(self.comm_rate_head.bias)
+        nn.init.zeros_(self.isac_power_mean_head.weight)
+        nn.init.zeros_(self.isac_power_mean_head.bias)
+        nn.init.zeros_(self.isac_sensing_mean_head.weight)
+        nn.init.zeros_(self.isac_sensing_mean_head.bias)
 
     def _init_weights(self):
         """PPO-style init: hidden layers sqrt(2), output heads small."""
@@ -69,7 +263,11 @@ class ActorNetwork(nn.Module):
                     nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
                 nn.init.constant_(module.bias, 0.0)
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None,
+                detach_h_new: bool = True, window_mask: torch.Tensor = None,
+                comm_round_phase: torch.Tensor = None,
+                agent_identity: torch.Tensor = None,
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             obs: (batch, obs_dim)
@@ -86,7 +284,22 @@ class ActorNetwork(nn.Module):
         pd_pred = torch.sigmoid(self.pd_aux_head(h))  # aux P_D prediction (0~1)
         LOG_STD_MIN, LOG_STD_MAX = -1.0, 1.0
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (torch.tanh(self.dp_log_std) + 1.0)
-        return dp_mean, log_std, role_logits, comm_msg, pd_pred
+        return dp_mean, log_std, role_logits, comm_msg, pd_pred, None
+
+    def communication_parameters(self, comm_mean: torch.Tensor):
+        """Distribution parameters for the stochastic communication action."""
+        comm_log_std = torch.clamp(self.comm_log_std, -4.0, 1.0)
+        rate_logits = self.comm_rate_head(comm_mean)
+        return comm_log_std, rate_logits
+
+    def isac_resource_parameters(self, comm_mean: torch.Tensor):
+        """Logistic-normal parameters for power and multi-target sensing."""
+        power_mean = self.isac_power_mean_head(comm_mean).squeeze(-1)
+        sensing_mean = self.isac_sensing_mean_head(comm_mean)
+        power_log_std = torch.clamp(self.isac_power_log_std, -4.0, 1.0)
+        sensing_log_std = torch.clamp(
+            self.isac_sensing_log_std, -4.0, 1.0)
+        return power_mean, power_log_std, sensing_mean, sensing_log_std
 
 
 class StructuredActorNetwork(nn.Module):
@@ -114,18 +327,242 @@ class StructuredActorNetwork(nn.Module):
                  entity_dim: int = 128, max_dp: float = 2.5,
                  single_frame_dim: int = 0,
                  use_corrected_parser: bool = False,
-                 use_p0: bool = False):
+                 use_p0: bool = False,
+                 comm_num_rate_levels: int = 4,
+                 comm_log_std_init: float = -1.0,
+                 use_comm_cross_attention: bool = False,
+                 comm_token_dim: int = 21,
+                 comm_tokens_per_sender: int = 1,
+                 comm_payload_dim: int = 16,
+                 comm_target_token_enabled: bool = False,
+                 comm_target_token_dim: int = 16,
+                 use_target_allocation: bool = False,
+                 use_team_sinkhorn: bool = False,
+                 capacity_matching_enabled: bool = False,
+                 capacity_matching_row_capacity: int = 2,
+                 capacity_matching_column_capacity: int = 2,
+                 capacity_matching_temperature: float = 0.35,
+                 capacity_matching_iterations: int = 32,
+                 capacity_matching_blend: float = 0.0,
+                 target_allocation_temperature: float = 1.0,
+                 target_allocation_straight_through: bool = False,
+                 target_allocation_movement_blend: float = 0.0,
+                 target_allocation_movement_confidence_gating_enabled: bool = False,
+                 target_allocation_movement_confidence_floor: float = 0.0,
+                 target_allocation_movement_confidence_power: float = 2.0,
+                 hierarchical_dual_assignment_enabled: bool = False,
+                 movement_team_matching_enabled: bool = False,
+                 movement_team_matching_temperature: float = 0.35,
+                 movement_team_matching_iterations: int = 16,
+                 movement_team_matching_blend: float = 0.0,
+                 movement_team_matching_intrinsic_bid_mix: float = 0.0,
+                 target_allocation_resource_blend: float = 0.0,
+                 round_negotiation_enabled: bool = False,
+                 round_negotiation_strength: float = 0.5,
+                 round_negotiation_temperature: float = 0.5,
+                 sparse_claim_enabled: bool = False,
+                 sparse_claim_share_topk: int = 2,
+                 sparse_claim_desired_endpoints: int = 2,
+                 sparse_claim_full_penalty: float = 2.0,
+                 sparse_claim_vacant_bonus: float = 0.5,
+                 sparse_claim_temperature: float = 0.25,
+                 comm_aided_sensing_enabled: bool = False,
+                 comm_aided_sensing_blend: float = 1.0,
+                 comm_semantic_decoder_enabled: bool = False,
+                 comm_semantic_capacity_bid_enabled: bool = False,
+                 comm_semantic_capacity_bid_gain: float = 0.0,
+                 comm_semantic_extra_token_enabled: bool = False,
+                 comm_semantic_extra_token_threshold: float = 0.10,
+                 semantic_kinematic_field_enabled: bool = False,
+                 semantic_kinematic_field_gain: float = 0.15,
+                 target_conditioned_movement_enabled: bool = False,
+                 target_conditioned_movement_gain: float = 0.15,
+                 scale_equivariant_comm_heads_enabled: bool = False,
+                 permutation_equivariant_round_encoding_enabled: bool = False,
+                 comm_channel_feedback_rate_enabled: bool = False,
+                 comm_channel_feedback_dim: int = 6,
+                 isac_power_log_std_init: float = -1.0,
+                 sensing_allocation_log_std_init: float = -1.0):
         super().__init__()
         self.K, self.Q = K, Q
         self.max_dp = max_dp
         D = entity_dim
         self.single_frame_dim = single_frame_dim
-        self._use_corrected_parser = use_corrected_parser
+        # Per-target communication attention requires correctly aligned target
+        # queries. The historical hand parser assumes interleaved belief/geometry
+        # fields, while ObservationBuilder emits block-wise fields. Therefore the
+        # new receiver path always uses the authoritative slice descriptor.
+        self._use_corrected_parser = bool(
+            use_corrected_parser or use_comm_cross_attention
+            or comm_channel_feedback_rate_enabled)
         self._use_p0 = use_p0
-        if use_corrected_parser:
+        self._use_comm_cross_attention = bool(use_comm_cross_attention)
+        self._use_target_allocation = bool(use_target_allocation)
+        self._use_team_sinkhorn = bool(
+            use_team_sinkhorn and use_target_allocation)
+        self._capacity_matching_enabled = bool(
+            capacity_matching_enabled and use_target_allocation
+            and comm_target_token_enabled and use_comm_cross_attention)
+        self._capacity_matching_row_capacity = max(
+            1, int(capacity_matching_row_capacity))
+        self._capacity_matching_column_capacity = max(
+            1, int(capacity_matching_column_capacity))
+        self._capacity_matching_temperature = max(
+            1e-3, float(capacity_matching_temperature))
+        self._capacity_matching_iterations = max(
+            1, int(capacity_matching_iterations))
+        self._capacity_matching_blend = float(np.clip(
+            capacity_matching_blend, 0.0, 1.0))
+        if self._capacity_matching_enabled:
+            row_total = self.K * self._capacity_matching_row_capacity
+            column_total = self.Q * self._capacity_matching_column_capacity
+            if row_total != column_total:
+                raise ValueError(
+                    'capacity matching requires K*row_capacity == '
+                    'Q*column_capacity')
+        self._target_allocation_temperature = max(
+            float(target_allocation_temperature), 1e-3)
+        self._target_allocation_straight_through = bool(
+            target_allocation_straight_through)
+        self._target_allocation_movement_blend = float(np.clip(
+            target_allocation_movement_blend, 0.0, 1.0))
+        self._target_allocation_movement_confidence_gating_enabled = bool(
+            target_allocation_movement_confidence_gating_enabled)
+        self._target_allocation_movement_confidence_floor = float(np.clip(
+            target_allocation_movement_confidence_floor, 0.0, 1.0))
+        self._target_allocation_movement_confidence_power = max(
+            0.0, float(target_allocation_movement_confidence_power))
+        self._hierarchical_dual_assignment_enabled = bool(
+            hierarchical_dual_assignment_enabled
+            and self._capacity_matching_enabled)
+        self._movement_team_matching_enabled = bool(
+            movement_team_matching_enabled and use_target_allocation
+            and comm_target_token_enabled and use_comm_cross_attention)
+        self._movement_team_matching_temperature = max(
+            1e-3, float(movement_team_matching_temperature))
+        self._movement_team_matching_iterations = max(
+            1, int(movement_team_matching_iterations))
+        self._movement_team_matching_blend = float(np.clip(
+            movement_team_matching_blend, 0.0, 1.0))
+        self._movement_team_matching_intrinsic_bid_mix = float(np.clip(
+            movement_team_matching_intrinsic_bid_mix, 0.0, 1.0))
+        self._target_allocation_resource_blend = max(
+            0.0, float(target_allocation_resource_blend))
+        self._round_negotiation_enabled = bool(
+            round_negotiation_enabled and use_target_allocation
+            and comm_target_token_enabled)
+        self._round_negotiation_strength = max(
+            0.0, float(round_negotiation_strength))
+        self._round_negotiation_temperature = max(
+            1e-3, float(round_negotiation_temperature))
+        self._sparse_claim_enabled = bool(
+            sparse_claim_enabled and use_target_allocation
+            and comm_target_token_enabled)
+        self._sparse_claim_share_topk = int(np.clip(
+            sparse_claim_share_topk, 1, Q))
+        self._sparse_claim_desired_endpoints = max(
+            1, int(sparse_claim_desired_endpoints))
+        self._sparse_claim_full_penalty = max(
+            0.0, float(sparse_claim_full_penalty))
+        self._sparse_claim_vacant_bonus = max(
+            0.0, float(sparse_claim_vacant_bonus))
+        self._sparse_claim_temperature = max(
+            1e-3, float(sparse_claim_temperature))
+        self._comm_aided_sensing_enabled = bool(
+            comm_aided_sensing_enabled and use_comm_cross_attention)
+        self._comm_aided_sensing_blend = max(
+            0.0, float(comm_aided_sensing_blend))
+        self._comm_semantic_decoder_enabled = bool(
+            comm_semantic_decoder_enabled
+            and use_comm_cross_attention
+            and comm_target_token_enabled
+            and int(comm_target_token_dim) >= 2)
+        self._comm_semantic_capacity_bid_enabled = bool(
+            comm_semantic_capacity_bid_enabled
+            and self._comm_semantic_decoder_enabled
+            and self._capacity_matching_enabled)
+        self._comm_semantic_capacity_bid_gain = max(
+            0.0, float(comm_semantic_capacity_bid_gain))
+        self._comm_semantic_extra_token_enabled = bool(
+            comm_semantic_extra_token_enabled
+            and self._comm_semantic_decoder_enabled
+            and self._sparse_claim_enabled)
+        self._comm_semantic_extra_token_threshold = max(
+            0.0, float(comm_semantic_extra_token_threshold))
+        self._semantic_kinematic_field_enabled = bool(
+            semantic_kinematic_field_enabled
+            and self._sparse_claim_enabled)
+        self._semantic_kinematic_field_gain = max(
+            0.0, float(semantic_kinematic_field_gain))
+        self._target_conditioned_movement_enabled = bool(
+            target_conditioned_movement_enabled and use_target_allocation)
+        self._target_conditioned_movement_gain = max(
+            0.0, float(target_conditioned_movement_gain))
+        if (self._semantic_kinematic_field_enabled
+                and self._target_conditioned_movement_enabled):
+            raise ValueError(
+                'semantic field and target-conditioned movement are mutually exclusive')
+        self.comm_token_dim = int(comm_token_dim)
+        self.comm_tokens_per_sender = max(1, int(comm_tokens_per_sender))
+        self.comm_payload_dim = max(1, int(comm_payload_dim))
+        self._comm_channel_feedback_rate_enabled = bool(
+            comm_channel_feedback_rate_enabled)
+        self.comm_channel_feedback_dim = max(
+            1, int(comm_channel_feedback_dim))
+        if (self._comm_channel_feedback_rate_enabled
+                and self.comm_channel_feedback_dim != 6):
+            raise ValueError(
+                'comm_channel_feedback_dim must be 6 for the current '
+                'local channel summary')
+        self._comm_target_token_enabled = bool(comm_target_token_enabled)
+        self.comm_target_token_dim = max(1, int(comm_target_token_dim))
+        self._scale_equivariant_comm_heads_enabled = bool(
+            scale_equivariant_comm_heads_enabled
+            and self._comm_target_token_enabled)
+        self._permutation_equivariant_round_encoding_enabled = bool(
+            permutation_equivariant_round_encoding_enabled
+            and self._round_negotiation_enabled)
+        self.last_comm_attention = None
+        self.last_target_assignment = None
+        self.last_movement_assignment = None
+        self.last_target_assignment_st = None
+        self.last_movement_confidence = None
+        self.last_effective_movement_blend = None
+        self.last_capacity_assignment = None
+        self.last_movement_team_assignment = None
+        self.last_round_peer_claims = None
+        self.last_peer_claim_load = None
+        self.last_outgoing_token_mask = None
+        self.last_sparse_claim_scores = None
+        # Read-only diagnostic used by offline communication-value probes.
+        # It is never fed back into the actor and therefore cannot change the
+        # deployed policy or checkpoint compatibility.
+        self.last_policy_latent = None
+        self.last_comm_sensing_logits = None
+        self.last_comm_semantic_evidence = None
+        self.last_comm_semantic_pd = None
+        self.last_comm_semantic_capacity_bias = None
+        self.last_comm_semantic_extra_token_mask = None
+        self.last_semantic_field_vector = None
+        self.last_semantic_field_weights = None
+        self.last_semantic_field_delta = None
+        self.last_target_movement_candidates = None
+        self.last_target_movement_residual = None
+        self.last_target_movement_delta = None
+        self.last_target_movement_candidates = None
+        self.last_target_movement_residual = None
+        self.last_target_movement_delta = None
+        self.last_comm_channel_feedback = None
+        if self._use_corrected_parser:
             from uav_isac.environment.observation_slices import ObservationSlices
             self._obs_slices = ObservationSlices.from_config(
-                K=K, Q=Q, use_p0=use_p0, use_rel_features=True)
+                K=K, Q=Q, use_p0=use_p0, use_rel_features=True,
+                use_comm_tokens=self._use_comm_cross_attention,
+                comm_token_dim=self.comm_token_dim,
+                comm_tokens_per_sender=self.comm_tokens_per_sender,
+                use_channel_feedback=(
+                    self._comm_channel_feedback_rate_enabled),
+                channel_feedback_dim=self.comm_channel_feedback_dim)
 
         # ── Entity encoders ──
         self.self_enc = nn.Sequential(
@@ -151,15 +588,149 @@ class StructuredActorNetwork(nn.Module):
         # ── Communication gate ──
         self.comm_proj = nn.Linear(16, D)
         self.gate = nn.Linear(D + D, 1)
+        if self._use_comm_cross_attention:
+            self.comm_token_enc = nn.Sequential(
+                nn.Linear(self.comm_token_dim, D), nn.ReLU(),
+                nn.Linear(D, D), nn.ReLU(),
+            )
+            comm_heads = 4 if D % 4 == 0 else 1
+            self.comm_cross_attn = nn.MultiheadAttention(
+                D, num_heads=comm_heads, batch_first=True)
+            self.comm_cross_norm = nn.LayerNorm(D)
+            self.comm_target_gate = nn.Linear(2 * D, D)
+            if self._comm_aided_sensing_enabled:
+                # Explicit receiver path: a target query and the message
+                # context it retrieved jointly produce a residual on the
+                # executed target-sensing logits.
+                self.comm_sensing_gate = nn.Linear(2 * D, 1)
+                self.comm_sensing_head = nn.Sequential(
+                    nn.Linear(2 * D, D), nn.ReLU(), nn.Linear(D, 1))
+            if self._comm_semantic_decoder_enabled:
+                semantic_dim = self.comm_target_token_dim - 1
+                self.comm_semantic_decoder = nn.Sequential(
+                    nn.Linear(semantic_dim, 32), nn.ReLU(),
+                    nn.Linear(32, 16), nn.ReLU(),
+                    nn.Linear(16, 2),
+                )
+
+        if self._use_target_allocation:
+            self.target_assignment_head = nn.Sequential(
+                nn.Linear(2 * D, D), nn.ReLU(), nn.Linear(D, 1))
+            if self._hierarchical_dual_assignment_enabled:
+                # Independent slow commitment head.  Endpoint-capacity PPO and
+                # the one-target kinematic teacher no longer push the same
+                # output weights in contradictory directions.
+                # A zero-initialized residual adapter gives DAgger a private
+                # feature path without modifying token, sensing-resource or
+                # endpoint-assignment representations used by other heads.
+                self.movement_feature_adapter = nn.Linear(2 * D, 2 * D)
+                self.movement_commitment_head = nn.Sequential(
+                    nn.Linear(2 * D, D), nn.ReLU(), nn.Linear(D, 1))
+            self.allocation_proj = nn.Linear(D, D)
+            self.allocation_gate = nn.Linear(2 * D, 1)
+            if self._target_conditioned_movement_enabled:
+                # Interpretable (radial, tangential) coefficients for every
+                # locally represented target. Peer tokens condition ``te``
+                # before this head is evaluated.
+                self.target_movement_head = nn.Sequential(
+                    nn.Linear(2 * D, D), nn.ReLU(), nn.Linear(D, 2))
+            if (self._use_team_sinkhorn or self._capacity_matching_enabled
+                    or self._movement_team_matching_enabled):
+                self.neighbor_bid_msg_proj = nn.Linear(D, D)
+                self.neighbor_bid_target_proj = nn.Linear(D, D)
+        if self._round_negotiation_enabled:
+            # A local synchronized phase bit is not inter-UAV information.  It
+            # lets the same shared policy emit a proposal token in round 0 and
+            # a response token after consuming the delivered proposal in round 1.
+            self.round_phase_enc = nn.Sequential(
+                nn.Linear(2 + self.K, D), nn.Tanh(), nn.Linear(D, D))
+            if self._permutation_equivariant_round_encoding_enabled:
+                # The phase is shared local protocol state, not an agent ID.
+                # Removing the K-dimensional one-hot makes this branch
+                # permutation equivariant and cardinality independent.
+                self.round_phase_equivariant_enc = nn.Sequential(
+                    nn.Linear(2, D), nn.Tanh(), nn.Linear(D, D))
+            self.round_target_gate = nn.Linear(2 * D, 1)
+            # The payload remains latent.  This shared decoder merely learns a
+            # comparable per-target peer claim from each delivered token.
+            self.round_peer_claim_head = nn.Sequential(
+                nn.Linear(self.comm_target_token_dim, D), nn.ReLU(),
+                nn.Linear(D, 1))
 
         # ── Output heads ──
         self.dp_head = nn.Linear(D, 2)
         self.comm_head = nn.Linear(D, 16)
-        self.intent_head = nn.Linear(16, Q)  # comm→target: force semantic encoding
+        if self._comm_target_token_enabled:
+            self.comm_target_token_head = nn.Linear(
+                D, self.comm_target_token_dim)
+        self.comm_rate_head = nn.Linear(
+            self.comm_payload_dim, comm_num_rate_levels)
+        if self._comm_channel_feedback_rate_enabled:
+            self.comm_rate_feedback_head = nn.Linear(
+                self.comm_channel_feedback_dim, comm_num_rate_levels)
+        self.comm_log_std = nn.Parameter(
+            torch.full((self.comm_payload_dim,), float(comm_log_std_init)))
+        self.isac_power_mean_head = nn.Linear(self.comm_payload_dim, 1)
+        self.isac_sensing_mean_head = nn.Linear(self.comm_payload_dim, Q)
+        if self._scale_equivariant_comm_heads_enabled:
+            # Pool only this UAV's own per-target outgoing tokens. No raw
+            # state or hidden representation from another UAV is available.
+            self.comm_set_attention = nn.Linear(
+                self.comm_target_token_dim, 1)
+            self.comm_set_rate_head = nn.Linear(
+                self.comm_target_token_dim, comm_num_rate_levels)
+            self.isac_set_power_head = nn.Linear(
+                self.comm_target_token_dim, 1)
+        self.isac_power_log_std = nn.Parameter(torch.tensor(
+            [float(isac_power_log_std_init)]))
+        self.isac_sensing_log_std = nn.Parameter(torch.full(
+            (Q,), float(sensing_allocation_log_std_init)))
+        self.intent_head = nn.Linear(self.comm_payload_dim, Q)
         self.role_head = nn.Linear(D, 3)
         self.dp_log_std = nn.Parameter(torch.zeros(2))
 
         self._init_weights()
+        nn.init.zeros_(self.comm_rate_head.weight)
+        nn.init.zeros_(self.comm_rate_head.bias)
+        if self._comm_channel_feedback_rate_enabled:
+            nn.init.zeros_(self.comm_rate_feedback_head.weight)
+            nn.init.zeros_(self.comm_rate_feedback_head.bias)
+        nn.init.zeros_(self.isac_power_mean_head.weight)
+        nn.init.zeros_(self.isac_power_mean_head.bias)
+        nn.init.zeros_(self.isac_sensing_mean_head.weight)
+        nn.init.zeros_(self.isac_sensing_mean_head.bias)
+        if self._scale_equivariant_comm_heads_enabled:
+            # Uniform set pooling is the neutral cardinality-equivariant
+            # initialization. Compatible checkpoint loading replaces the two
+            # output heads with block-summed legacy weights.
+            nn.init.zeros_(self.comm_set_attention.weight)
+            nn.init.zeros_(self.comm_set_attention.bias)
+            nn.init.zeros_(self.comm_set_rate_head.weight)
+            nn.init.zeros_(self.comm_set_rate_head.bias)
+            nn.init.zeros_(self.isac_set_power_head.weight)
+            nn.init.zeros_(self.isac_set_power_head.bias)
+        if self._use_target_allocation:
+            # Nearly identity-preserving for old physical-policy warm starts;
+            # PPO and the allocation auxiliary can open the residual gate.
+            nn.init.zeros_(self.allocation_gate.weight)
+            nn.init.constant_(self.allocation_gate.bias, -4.0)
+            if self._target_conditioned_movement_enabled:
+                # Exact no-op for old checkpoints. PPO must earn any physical
+                # influence through target-wise movement credit.
+                nn.init.zeros_(self.target_movement_head[-1].weight)
+                nn.init.zeros_(self.target_movement_head[-1].bias)
+        if self._round_negotiation_enabled:
+            nn.init.zeros_(self.round_target_gate.weight)
+            nn.init.constant_(self.round_target_gate.bias, -4.0)
+            nn.init.zeros_(self.round_peer_claim_head[-1].weight)
+            nn.init.zeros_(self.round_peer_claim_head[-1].bias)
+        if self._comm_aided_sensing_enabled:
+            # Neutral for old checkpoints; the auxiliary objective opens the
+            # path only when received tokens improve target-level sensing.
+            nn.init.zeros_(self.comm_sensing_head[-1].weight)
+            nn.init.zeros_(self.comm_sensing_head[-1].bias)
+            nn.init.zeros_(self.comm_sensing_gate.weight)
+            nn.init.constant_(self.comm_sensing_gate.bias, -2.0)
 
     def _init_weights(self):
         for name, m in self.named_modules():
@@ -203,18 +774,20 @@ class StructuredActorNetwork(nn.Module):
             w = obs_dim // single_dim
             frames = []
             for i in range(w):
-                s, t, n, g, c, pd = parse_fn(obs[:, i*single_dim:(i+1)*single_dim], B)
-                frames.append((s, t, n, g, c, pd))
+                s, t, n, g, c, pd, mt, mm, cf = parse_fn(
+                    obs[:, i*single_dim:(i+1)*single_dim], B)
+                frames.append((s, t, n, g, c, pd, mt, mm, cf))
             s_seq = torch.stack([f[0] for f in frames], dim=-1)
             t_seq = torch.stack([f[1] for f in frames], dim=-1)
             n_seq = torch.stack([f[2] for f in frames], dim=-1)
             g_seq = torch.stack([f[3] for f in frames], dim=-1)
             pd_seq = torch.stack([f[5] for f in frames], dim=-1)
-            return s_seq, t_seq, n_seq, g_seq, frames[-1][4], w, pd_seq
+            return (s_seq, t_seq, n_seq, g_seq, frames[-1][4], w, pd_seq,
+                    frames[-1][6], frames[-1][7], frames[-1][8])
         else:
-            s, t, n, g, c, pd = parse_fn(obs, B)
+            s, t, n, g, c, pd, mt, mm, cf = parse_fn(obs, B)
             return (s.unsqueeze(-1), t.unsqueeze(-1), n.unsqueeze(-1),
-                    g.unsqueeze(-1), c, 1, pd.unsqueeze(-1))
+                    g.unsqueeze(-1), c, 1, pd.unsqueeze(-1), mt, mm, cf)
 
     def _parse_one_corrected(self, obs, B):
         """Parse using ObservationSlices — correct block-based layout."""
@@ -275,8 +848,29 @@ class StructuredActorNetwork(nn.Module):
         # PD_hist and comm
         pd_hist = obs[:, sl.pd_hist_start:sl.pd_hist_start + sl.pd_hist_len]
         comm_agg = obs[:, sl.comm_start:sl.comm_start + sl.comm_len]
+        if sl.has_comm_tokens:
+            token_count = (K - 1) * sl.comm_tokens_per_sender
+            token_len = token_count * sl.comm_token_per_sender
+            comm_tokens = obs[:, sl.comm_token_start:sl.comm_token_start + token_len]
+            comm_tokens = comm_tokens.reshape(
+                B, token_count, sl.comm_token_per_sender)
+            comm_mask = obs[:, sl.comm_mask_start:sl.comm_mask_start + sl.comm_mask_len]
+        else:
+            token_count = (K - 1) * self.comm_tokens_per_sender
+            comm_tokens = torch.zeros(B, token_count, self.comm_token_dim,
+                                      device=obs.device)
+            comm_mask = torch.zeros(B, token_count, device=obs.device)
+        if sl.has_channel_feedback:
+            channel_feedback = obs[
+                :, sl.channel_feedback_start:
+                sl.channel_feedback_start + sl.channel_feedback_len]
+        else:
+            channel_feedback = torch.zeros(
+                B, self.comm_channel_feedback_dim, device=obs.device)
 
-        return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
+        return (self_state, target_stack, neighbor_stack, global_feat,
+                comm_agg, pd_hist, comm_tokens, comm_mask,
+                channel_feedback)
 
     def _parse_one(self, obs, B):
         """Parse single frame (227 dims) into entity tensors.
@@ -315,7 +909,10 @@ class StructuredActorNetwork(nn.Module):
 
         # Coverage(Q) + pairing(K-1) — may be absent in non-P0 configs
         remaining = obs_dim_real - ptr
-        without_p0 = (K-1)*9 + 2 + Q + 16  # neighbors + global + P_D + comm
+        token_count = (K - 1) * self.comm_tokens_per_sender
+        comm_extra = (token_count * self.comm_token_dim + token_count
+                      if self._use_comm_cross_attention else 0)
+        without_p0 = (K-1)*9 + 2 + Q + 16 + comm_extra
         has_p0 = (remaining > without_p0 + 2)  # heuristic: P0 adds Q+(K-1) dims
 
         coverage = None
@@ -344,6 +941,24 @@ class StructuredActorNetwork(nn.Module):
         pd_hist = obs[:, ptr:ptr+Q]; ptr += Q  # P_D history (B, Q)
 
         comm_agg = obs[:, ptr:ptr+16]  # 16
+        ptr += 16
+        if self._use_comm_cross_attention:
+            token_len = token_count * self.comm_token_dim
+            comm_tokens = obs[:, ptr:ptr+token_len].reshape(
+                B, token_count, self.comm_token_dim)
+            ptr += token_len
+            comm_mask = obs[:, ptr:ptr+token_count]
+            ptr += token_count
+        else:
+            comm_tokens = torch.zeros(B, token_count, self.comm_token_dim,
+                                      device=obs.device)
+            comm_mask = torch.zeros(B, token_count, device=obs.device)
+        if self._comm_channel_feedback_rate_enabled:
+            channel_feedback = obs[
+                :, ptr:ptr + self.comm_channel_feedback_dim]
+        else:
+            channel_feedback = torch.zeros(
+                B, self.comm_channel_feedback_dim, device=obs.device)
 
         # Append physics to self_state for encoder
         self_state = torch.cat([self_state, physics_feat], dim=-1)  # (B, 11)
@@ -361,10 +976,14 @@ class StructuredActorNetwork(nn.Module):
             pad = torch.zeros(B, Q, 18 - target_stack.shape[-1], device=target_stack.device)
             target_stack = torch.cat([target_stack, pad], dim=-1)
 
-        return self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
+        return (self_state, target_stack, neighbor_stack, global_feat,
+                comm_agg, pd_hist, comm_tokens, comm_mask,
+                channel_feedback)
 
     def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None,
-                detach_h_new: bool = True, window_mask: torch.Tensor = None):
+                detach_h_new: bool = True, window_mask: torch.Tensor = None,
+                comm_round_phase: torch.Tensor = None,
+                agent_identity: torch.Tensor = None):
         """Forward with optional streaming GRU hidden state.
 
         Args:
@@ -381,15 +1000,29 @@ class StructuredActorNetwork(nn.Module):
             dp_mean, log_std, role_logits, comm_msg, pd_pred, h_new
         """
         result = self._parse_obs(obs)
-        self_s, targets, neighbors, global_f, comm_agg, n_frames, pd_hist = result
+        (self_s, targets, neighbors, global_f, comm_agg, n_frames, pd_hist,
+         comm_tokens, comm_mask, channel_feedback) = result
+        self.last_comm_channel_feedback = channel_feedback
         B = obs.shape[0]
         D = self.self_enc[0].out_features
+        if agent_identity is None:
+            identity_index = torch.zeros(
+                B, dtype=torch.long, device=obs.device)
+        else:
+            identity_index = agent_identity.to(
+                device=obs.device, dtype=torch.long).reshape(B)
+            identity_index = identity_index.clamp(0, self.K - 1)
         LOG_STD_MIN, LOG_STD_MAX = -1.0, 1.0
         log_std = LOG_STD_MIN + 0.5*(LOG_STD_MAX-LOG_STD_MIN)*(torch.tanh(self.dp_log_std)+1.0)
 
         if targets is None:
             h = self.self_enc(torch.zeros(B, 11, device=obs.device))
-            return self.dp_head(h), log_std, self.role_head(h), torch.tanh(self.comm_head(h)), torch.zeros(B, 1), None
+            self.last_policy_latent = h.detach()
+            comm_out = (torch.zeros(B, self.comm_payload_dim, device=obs.device)
+                        if self._comm_target_token_enabled
+                        else torch.tanh(self.comm_head(h)))
+            return (self.dp_head(h), log_std, self.role_head(h), comm_out,
+                    torch.zeros(B, 1, device=obs.device), None)
 
         # Encode entities: use last timestep (dim=-1 is seq)
         se = self.self_enc(self_s[..., -1]).unsqueeze(1)          # (B, 1, D)
@@ -403,6 +1036,463 @@ class StructuredActorNetwork(nn.Module):
         pd_last = pd_hist[..., -1]  # (B, Q)
         pd_feat = self.pd_hist_proj(pd_last.unsqueeze(-1))  # (B, Q, D)
         te = te_base + pd_feat  # residual modulation by detection history
+
+        # Target-conditioned receiver: every target entity independently queries
+        # the delivered per-sender messages. Invalid/silent/expired links are
+        # masked, and all-missing batches are forced to a zero residual.
+        msg_entities = None
+        valid = None
+        valid_any = None
+        self.last_comm_sensing_logits = None
+        self.last_comm_semantic_evidence = None
+        self.last_comm_semantic_pd = None
+        self.last_comm_semantic_capacity_bias = None
+        self.last_comm_semantic_extra_token_mask = None
+        local_te = te
+        if (self._use_comm_cross_attention
+                and comm_tokens is not None and comm_tokens.shape[1] > 0):
+            valid = comm_mask > 0.5
+            valid_any = valid.any(dim=1)
+            safe_valid = valid.clone()
+            if (~valid_any).any():
+                safe_valid[~valid_any, 0] = True
+            token_input = comm_tokens * valid.unsqueeze(-1).to(comm_tokens.dtype)
+            if self._comm_semantic_decoder_enabled:
+                evidence_logits, semantic_pd = self.decode_comm_semantics(
+                    token_input[..., :self.comm_target_token_dim])
+                valid_float = valid.to(semantic_pd.dtype)
+                self.last_comm_semantic_evidence = (
+                    torch.sigmoid(evidence_logits) * valid_float)
+                self.last_comm_semantic_pd = semantic_pd * valid_float
+            msg_entities = self.comm_token_enc(token_input)
+            msg_ctx, attn_weights = self.comm_cross_attn(
+                te, msg_entities, msg_entities,
+                key_padding_mask=~safe_valid,
+                need_weights=True,
+                average_attn_weights=False,
+            )
+            msg_ctx = msg_ctx * valid_any[:, None, None].to(msg_ctx.dtype)
+            msg_gate = torch.sigmoid(self.comm_target_gate(
+                torch.cat([te, msg_ctx], dim=-1)))
+            # Normalize only the message residual. Normalizing the whole sum
+            # would alter a warm-started physical policy merely because a
+            # message arrived, even while the receiver branch is untrained.
+            fused_te = te + msg_gate * self.comm_cross_norm(msg_ctx)
+            # Preserve the physical target embedding for samples with no
+            # delivered token, so silence is a genuinely neutral input.
+            te = torch.where(valid_any[:, None, None], fused_te, te)
+            if self._comm_aided_sensing_enabled:
+                comm_sensing_input = torch.cat([local_te, msg_ctx], dim=-1)
+                comm_sensing_gate = torch.sigmoid(
+                    self.comm_sensing_gate(comm_sensing_input)).squeeze(-1)
+                comm_sensing_logits = torch.tanh(
+                    self.comm_sensing_head(
+                        comm_sensing_input).squeeze(-1))
+                self.last_comm_sensing_logits = (
+                    comm_sensing_gate * comm_sensing_logits
+                    * valid_any[:, None].to(comm_sensing_logits.dtype))
+            # Kept only for diagnostics/figures; never fed back into training.
+            self.last_comm_attention = (
+                attn_weights.detach()
+                * valid[:, None, None, :].to(attn_weights.dtype)
+            )
+        else:
+            self.last_comm_attention = None
+
+        # Phase-conditioned proposal/response refinement.  In round 1, ``te``
+        # already contains the physically delivered round-0 token context, so
+        # the outgoing response is causally conditioned on peer proposals.
+        negotiation_te = te
+        if self._round_negotiation_enabled:
+            if comm_round_phase is None:
+                phase = torch.zeros(B, 1, device=obs.device, dtype=te.dtype)
+            else:
+                phase = comm_round_phase.to(
+                    device=obs.device, dtype=te.dtype).reshape(B, 1)
+                phase = phase.clamp(0.0, 1.0)
+            phase_only = torch.cat([1.0 - phase, phase], dim=-1)
+            if self._permutation_equivariant_round_encoding_enabled:
+                phase_ctx = self.round_phase_equivariant_enc(
+                    phase_only).unsqueeze(1)
+            else:
+                identity_onehot = torch.nn.functional.one_hot(
+                    identity_index, num_classes=self.K).to(te.dtype)
+                phase_input = torch.cat(
+                    [phase_only, identity_onehot], dim=-1)
+                phase_ctx = self.round_phase_enc(phase_input).unsqueeze(1)
+            phase_ctx = phase_ctx.expand(-1, self.Q, -1)
+            phase_gate = torch.sigmoid(self.round_target_gate(torch.cat(
+                [te, phase_ctx], dim=-1)))
+            negotiation_te = te + phase_gate * phase_ctx
+
+        outgoing_target_tokens = None
+        if self._comm_target_token_enabled:
+            outgoing_target_tokens = torch.tanh(
+                self.comm_target_token_head(negotiation_te))
+
+        # Decentralized target responsibility. Target embeddings already carry
+        # the masked per-sender communication context, so the allocation remains
+        # local at execution time while being communication-aware.
+        assignment_context = None
+        if self._use_target_allocation:
+            self_for_targets = se.expand(-1, self.Q, -1)
+            assignment_features = torch.cat(
+                [negotiation_te, self_for_targets], dim=-1)
+            assignment_logits = self.target_assignment_head(
+                assignment_features).squeeze(-1)
+            if self._hierarchical_dual_assignment_enabled:
+                movement_features = assignment_features + torch.tanh(
+                    self.movement_feature_adapter(assignment_features))
+                movement_logits = self.movement_commitment_head(
+                    movement_features).squeeze(-1)
+            else:
+                movement_logits = assignment_logits
+            if (self._sparse_claim_enabled and valid is not None
+                    and valid.shape[1] == (self.K - 1) * self.Q):
+                # A delivered target-token mask is an explicit sparse proposal,
+                # not prescribed token semantics. One peer claim is welcome as
+                # the other bistatic endpoint; two or more fill the target and
+                # suppress further competition. Unclaimed targets receive a
+                # small vacancy bonus so remote targets are not abandoned.
+                peer_claims = valid.reshape(
+                    B, self.K - 1, self.Q).to(assignment_logits.dtype)
+                peer_load = peer_claims.sum(dim=1)
+                desired = float(self._sparse_claim_desired_endpoints)
+                full_gate = torch.sigmoid(
+                    (peer_load - (desired - 0.5))
+                    / self._sparse_claim_temperature)
+                vacant_gate = torch.sigmoid(
+                    (0.5 - peer_load) / self._sparse_claim_temperature)
+                coordination_bias = (
+                    -self._sparse_claim_full_penalty * full_gate
+                    + self._sparse_claim_vacant_bonus * vacant_gate)
+                assignment_logits = assignment_logits + coordination_bias
+                movement_logits = movement_logits + coordination_bias
+                self.last_peer_claim_load = peer_load.detach()
+            else:
+                self.last_peer_claim_load = None
+            if (self._round_negotiation_enabled
+                    and msg_entities is not None and valid is not None
+                    and msg_entities.shape[1]
+                    == (self.K - 1) * self.Q):
+                peer_content = comm_tokens[
+                    ..., :self.comm_target_token_dim].reshape(
+                        B, self.K - 1, self.Q,
+                        self.comm_target_token_dim)
+                peer_claims = self.round_peer_claim_head(
+                    peer_content).squeeze(-1)
+                own_claims = self.round_peer_claim_head(
+                    outgoing_target_tokens).squeeze(-1)
+                peer_valid = valid.reshape(B, self.K - 1, self.Q)
+                # A UAV locally prefers targets for which its own claim outranks
+                # delivered peer claims.  All operations use only its inbox.
+                margin = (
+                    own_claims.unsqueeze(1) - peer_claims
+                ) / self._round_negotiation_temperature
+                win_log = torch.nn.functional.logsigmoid(margin)
+                win_log = win_log * peer_valid.to(win_log.dtype)
+                peer_count = peer_valid.sum(dim=1).clamp_min(1).to(win_log.dtype)
+                agreement = win_log.sum(dim=1) / peer_count
+                assignment_logits = (
+                    assignment_logits
+                    + self._round_negotiation_strength * agreement)
+                movement_logits = (
+                    movement_logits
+                    + self._round_negotiation_strength * agreement)
+                self.last_round_peer_claims = peer_claims.detach()
+            else:
+                self.last_round_peer_claims = None
+            assignment_probs = torch.softmax(
+                assignment_logits / self._target_allocation_temperature,
+                dim=-1)
+            # The slow kinematic variable has a one-target semantics and an
+            # independent head; the endpoint branch below is projected to
+            # capacity two without changing these probabilities.
+            movement_probs = torch.softmax(
+                movement_logits / self._target_allocation_temperature,
+                dim=-1)
+            # Preserve the intrinsic local bid before any team projection.
+            # This is what must be communicated in the next negotiation round;
+            # rebroadcasting the projected one-hot winner creates a positive
+            # feedback loop that permanently locks the first permutation.
+            local_movement_probs = movement_probs
+            self.last_capacity_assignment = None
+            self.last_movement_team_assignment = None
+            if ((self._use_team_sinkhorn or self._capacity_matching_enabled
+                 or self._movement_team_matching_enabled)
+                    and msg_entities is not None
+                    and valid is not None):
+                target_bids = self.neighbor_bid_target_proj(te)
+                if msg_entities.shape[1] == (self.K - 1) * self.Q:
+                    # Target-token payloads contain Q tokens per sender. They
+                    # are Q target bids from ONE neighboring UAV, not Q extra
+                    # agents. Preserve the target alignment and collapse only
+                    # the sender dimension into Sinkhorn rows.
+                    msg_bids = self.neighbor_bid_msg_proj(
+                        msg_entities.reshape(
+                            B, self.K - 1, self.Q, D))
+                    neighbor_logits = torch.einsum(
+                        'bnqd,bqd->bnq', msg_bids, target_bids
+                    ) / np.sqrt(D)
+                    neighbor_valid = valid.reshape(
+                        B, self.K - 1, self.Q)
+                else:
+                    # Aggregate payload: one token already represents one
+                    # neighboring UAV.
+                    msg_bids = self.neighbor_bid_msg_proj(msg_entities)
+                    neighbor_logits = torch.einsum(
+                        'bnd,bqd->bnq', msg_bids, target_bids
+                    ) / np.sqrt(D)
+                    neighbor_valid = valid.unsqueeze(-1).expand(
+                        -1, -1, self.Q)
+                if self._comm_semantic_capacity_bid_enabled:
+                    semantic_evidence = self.last_comm_semantic_evidence.reshape(
+                        B, self.K - 1, self.Q)
+                    semantic_pd = self.last_comm_semantic_pd.reshape(
+                        B, self.K - 1, self.Q)
+                    neighbor_logits, semantic_capacity_bias = (
+                        apply_semantic_capacity_bid_correction(
+                            neighbor_logits,
+                            semantic_evidence,
+                            semantic_pd,
+                            neighbor_valid,
+                            self._comm_semantic_capacity_bid_gain,
+                        ))
+                    self.last_comm_semantic_capacity_bias = (
+                        semantic_capacity_bias.detach())
+                team_logits = torch.cat(
+                    [assignment_logits.unsqueeze(1), neighbor_logits], dim=1)
+                team_valid = torch.cat([
+                    torch.ones(
+                        B, 1, self.Q, dtype=torch.bool,
+                        device=valid.device),
+                    neighbor_valid,
+                ], dim=1)
+                if self._movement_team_matching_enabled:
+                    # Consensus claim graph. Peer token masks arrive in sender
+                    # ID order and the otherwise-unused aggregate block stores
+                    # this UAV's last transmitted mask. Scatter both into the
+                    # true global UAV rows, so all receivers with complete U2U
+                    # delivery evaluate the exact same matrix. Token content
+                    # still conditions sensing and local logits above; the hard
+                    # movement topology uses explicit sparse claims to avoid a
+                    # receiver-dependent reinterpretation of the same token.
+                    peer_scores = comm_tokens[
+                        ..., :self.comm_target_token_dim].reshape(
+                            B, self.K - 1, self.Q,
+                            self.comm_target_token_dim)[..., 0]
+                    peer_scores = torch.where(
+                        neighbor_valid,
+                        peer_scores,
+                        torch.full_like(peer_scores, -12.0))
+                    own_scores = comm_agg[:, :self.Q]
+                    own_claims = comm_agg[
+                        :, self.Q:2 * self.Q] > 0.5
+                    own_scores = torch.where(
+                        own_claims,
+                        own_scores,
+                        torch.full_like(own_scores, -12.0))
+                    all_agent_ids = torch.arange(
+                        self.K, device=obs.device).unsqueeze(0).expand(B, -1)
+                    peer_agent_ids = all_agent_ids[
+                        all_agent_ids != identity_index.unsqueeze(1)
+                    ].reshape(B, self.K - 1)
+                    global_claims = torch.full(
+                        (B, self.K, self.Q), -12.0,
+                        dtype=movement_logits.dtype,
+                        device=obs.device)
+                    global_claims.scatter_(
+                        1,
+                        peer_agent_ids.unsqueeze(-1).expand(-1, -1, self.Q),
+                        peer_scores,
+                    )
+                    global_claims.scatter_(
+                        1,
+                        identity_index[:, None, None].expand(-1, 1, self.Q),
+                        own_scores.unsqueeze(1),
+                    )
+                    # Claims dominate. A tiny lexicographic UAV/target bias
+                    # resolves otherwise symmetric permutations identically at
+                    # every node without materially changing claim preference.
+                    agent_rank = torch.arange(
+                        self.K, dtype=movement_logits.dtype,
+                        device=obs.device).view(1, self.K, 1)
+                    target_rank = torch.arange(
+                        self.Q, dtype=movement_logits.dtype,
+                        device=obs.device).view(1, 1, self.Q)
+                    tie_break = -1e-3 * target_rank / torch.pow(
+                        torch.as_tensor(
+                            float(self.Q + 1), dtype=movement_logits.dtype,
+                            device=obs.device),
+                        agent_rank,
+                    )
+                    consensus_logits = global_claims + tie_break
+                    movement_team_assignment = exact_permutation_assignment(
+                        consensus_logits,
+                        temperature=self._movement_team_matching_temperature,
+                    )
+                    batch_index = torch.arange(B, device=obs.device)
+                    own_movement = movement_team_assignment[
+                        batch_index, identity_index, :]
+                    peer_available = neighbor_valid.any(dim=-1).all(
+                        dim=-1, keepdim=True)
+                    own_available = own_claims.any(
+                        dim=-1, keepdim=True)
+                    consensus_available = peer_available & own_available
+                    movement_probs = torch.where(
+                        consensus_available,
+                        ((1.0 - self._movement_team_matching_blend)
+                         * movement_probs
+                         + self._movement_team_matching_blend
+                         * own_movement),
+                        movement_probs,
+                    )
+                    self.last_movement_team_assignment = (
+                        movement_team_assignment.detach())
+                if self._capacity_matching_enabled:
+                    # Sparse top-k payloads intentionally leave most
+                    # sender-target entries absent.  Old one-to-one Sinkhorn
+                    # required valid.all(), so it never affected this path.
+                    # Keep received claims as feasible edges and assign a low
+                    # finite bid to absent edges so projection remains smooth.
+                    sparse_team_logits = torch.where(
+                        team_valid, team_logits,
+                        torch.full_like(team_logits, -12.0))
+                    capacity_assignment = capacity_sinkhorn_normalize(
+                        sparse_team_logits,
+                        row_capacity=(
+                            self._capacity_matching_row_capacity),
+                        column_capacity=(
+                            self._capacity_matching_column_capacity),
+                        iterations=self._capacity_matching_iterations,
+                        temperature=self._capacity_matching_temperature,
+                    )
+                    own_capacity = capacity_assignment[:, 0, :]
+                    own_capacity = own_capacity / own_capacity.sum(
+                        dim=-1, keepdim=True).clamp_min(1e-8)
+                    # A complete broadcast is unnecessary; require only one
+                    # physically delivered sparse claim from every peer. This
+                    # preserves decentralized operation under top-k payloads.
+                    peer_available = neighbor_valid.any(dim=-1).all(
+                        dim=-1, keepdim=True)
+                    blend = self._capacity_matching_blend
+                    blended_assignment = (
+                        (1.0 - blend) * assignment_probs
+                        + blend * own_capacity)
+                    assignment_probs = torch.where(
+                        peer_available,
+                        blended_assignment,
+                        assignment_probs,
+                    )
+                    self.last_capacity_assignment = (
+                        capacity_assignment.detach())
+                else:
+                    team_assignment = sinkhorn_normalize(team_logits)
+                    own_sinkhorn = team_assignment[:, 0, :]
+                    own_sinkhorn = own_sinkhorn / own_sinkhorn.sum(
+                        dim=-1, keepdim=True).clamp_min(1e-8)
+                    assignment_probs = torch.where(
+                        valid.all(dim=1, keepdim=True),
+                        own_sinkhorn,
+                        assignment_probs,
+                    )
+            self.last_target_assignment = assignment_probs
+            if not self._hierarchical_dual_assignment_enabled:
+                movement_probs = assignment_probs
+            self.last_movement_assignment = movement_probs
+            if self._target_allocation_straight_through:
+                hard_assignment = torch.nn.functional.one_hot(
+                    movement_probs.argmax(dim=-1),
+                    num_classes=self.Q,
+                ).to(movement_probs.dtype)
+                movement_assignment = (
+                    hard_assignment + movement_probs
+                    - movement_probs.detach())
+            else:
+                movement_assignment = movement_probs
+            self.last_target_assignment_st = movement_assignment
+            assignment_context = torch.sum(
+                movement_assignment.unsqueeze(-1) * negotiation_te, dim=1)
+            if self._sparse_claim_enabled:
+                bid_mix = self._movement_team_matching_intrinsic_bid_mix
+                team_bid_probs = (
+                    bid_mix * local_movement_probs
+                    + (1.0 - bid_mix) * movement_probs)
+                shared_claim_probs = (
+                    team_bid_probs
+                    if self._movement_team_matching_enabled
+                    else assignment_probs)
+                self.last_sparse_claim_scores = shared_claim_probs.detach()
+                top_idx = torch.topk(
+                    shared_claim_probs,
+                    k=self._sparse_claim_share_topk,
+                    dim=-1,
+                ).indices
+                outgoing_mask = torch.zeros_like(assignment_probs)
+                outgoing_mask.scatter_(1, top_idx, 1.0)
+                if (self._comm_semantic_extra_token_enabled
+                        and valid is not None
+                        and valid.shape[1] == (self.K - 1) * self.Q):
+                    peer_valid = valid.reshape(B, self.K - 1, self.Q)
+                    peer_load = peer_valid.to(assignment_probs.dtype).sum(dim=1)
+                    peer_quality = (
+                        self.last_comm_semantic_evidence
+                        * self.last_comm_semantic_pd
+                    ).reshape(B, self.K - 1, self.Q)
+                    peer_quality = torch.where(
+                        peer_valid,
+                        peer_quality,
+                        torch.zeros_like(peer_quality),
+                    ).amax(dim=1)
+                    # Geometry feature 15 is exp(-distance/150 m), a bounded
+                    # local capability measure available without ground truth.
+                    local_capability = targets[..., -1][..., 15].clamp(0.0, 1.0)
+                    endpoint_deficit = torch.relu(
+                        float(self._sparse_claim_desired_endpoints) - peer_load)
+                    extra_score = (
+                        endpoint_deficit
+                        * (1.0 - peer_quality)
+                        * local_capability
+                        * (1.0 - outgoing_mask)
+                    )
+                    extra_value, extra_index = extra_score.max(
+                        dim=-1, keepdim=True)
+                    extra_active = (
+                        extra_value >= self._comm_semantic_extra_token_threshold
+                    ).to(outgoing_mask.dtype)
+                    extra_mask = torch.zeros_like(outgoing_mask)
+                    extra_mask.scatter_(1, extra_index, extra_active)
+                    outgoing_mask = torch.maximum(outgoing_mask, extra_mask)
+                    self.last_comm_semantic_extra_token_mask = (
+                        extra_mask.detach())
+                self.last_outgoing_token_mask = outgoing_mask.detach()
+                outgoing_target_tokens = (
+                    outgoing_target_tokens * outgoing_mask.unsqueeze(-1))
+                if self._movement_team_matching_enabled:
+                    # Reserve one continuous channel in every learned target
+                    # token for a comparable movement bid. The remaining token
+                    # dimensions stay latent and continue to condition sensing.
+                    bid_channel = (
+                        (2.0 * team_bid_probs - 1.0) * outgoing_mask)
+                    if self.comm_target_token_dim == 1:
+                        outgoing_target_tokens = bid_channel.unsqueeze(-1)
+                    else:
+                        outgoing_target_tokens = torch.cat([
+                            bid_channel.unsqueeze(-1),
+                            outgoing_target_tokens[..., 1:],
+                        ], dim=-1)
+            else:
+                self.last_outgoing_token_mask = None
+                self.last_sparse_claim_scores = None
+        else:
+            self.last_target_assignment = None
+            self.last_movement_assignment = None
+            self.last_target_assignment_st = None
+            self.last_capacity_assignment = None
+            self.last_movement_team_assignment = None
+            self.last_peer_claim_load = None
+            self.last_outgoing_token_mask = None
+            self.last_sparse_claim_scores = None
 
         # Streaming GRU for neighbors: (B*Nn, 1, 9) with per-neighbor state
         Nn = neighbors.shape[1]
@@ -419,15 +1509,285 @@ class StructuredActorNetwork(nn.Module):
         ctx, _ = self.attn(se, entities, entities)
         h_physical = self.attn_norm(se + ctx).squeeze(1)
 
-        cp = self.comm_proj(comm_agg)
-        gate = torch.sigmoid(self.gate(torch.cat([h_physical, cp], dim=-1)))
-        h = h_physical + gate * cp
+        if assignment_context is not None:
+            allocation_gate = torch.sigmoid(self.allocation_gate(torch.cat(
+                [h_physical, assignment_context], dim=-1)))
+            h_physical = h_physical + allocation_gate * self.allocation_proj(
+                assignment_context)
 
+        if self._use_comm_cross_attention:
+            h = h_physical
+        else:
+            cp = self.comm_proj(comm_agg)
+            gate = torch.sigmoid(self.gate(torch.cat([h_physical, cp], dim=-1)))
+            h = h_physical + gate * cp
+
+        self.last_policy_latent = h.detach()
         dp_mean = self.dp_head(h)
-        comm_msg = torch.tanh(self.comm_head(h))
+        self.last_semantic_field_vector = None
+        self.last_semantic_field_weights = None
+        self.last_semantic_field_delta = None
+        if (assignment_context is not None
+                and self._target_allocation_movement_blend > 0.0):
+            # Geometry fields 9:11 are the normalized local dx/dy from this UAV
+            # to each target.  A straight-through committed target therefore
+            # has an immediate, differentiable effect on the physical action,
+            # rather than relying on a weak hidden-state residual to discover
+            # the connection indirectly.
+            target_rel_xy = targets[..., -1][:, :, 9:11]
+            committed_rel = torch.sum(
+                movement_assignment.unsqueeze(-1) * target_rel_xy, dim=1)
+            committed_norm = committed_rel.norm(dim=-1, keepdim=True)
+            committed_direction = committed_rel / committed_norm.clamp_min(1e-8)
+            committed_direction = torch.where(
+                committed_norm > 1e-8,
+                committed_direction,
+                torch.zeros_like(committed_direction))
+            guidance_raw = torch.atanh(
+                committed_direction.clamp(-0.999, 0.999))
+            blend = self._target_allocation_movement_blend
+            self.last_movement_confidence = None
+            self.last_effective_movement_blend = None
+            if self._target_allocation_movement_confidence_gating_enabled:
+                if self.Q > 1:
+                    top2 = torch.topk(
+                        movement_probs, k=2, dim=-1).values
+                    confidence = (top2[:, 0] - top2[:, 1]).clamp(0.0, 1.0)
+                else:
+                    confidence = torch.ones(
+                        movement_probs.shape[0], dtype=movement_probs.dtype,
+                        device=movement_probs.device)
+                confidence_gate = (
+                    self._target_allocation_movement_confidence_floor
+                    + (1.0 - self._target_allocation_movement_confidence_floor)
+                    * confidence.pow(
+                        self._target_allocation_movement_confidence_power)
+                )
+                blend = blend * confidence_gate.unsqueeze(-1)
+                self.last_movement_confidence = confidence.detach()
+                self.last_effective_movement_blend = blend.detach()
+            dp_mean = (1.0 - blend) * dp_mean + blend * guidance_raw
+        if (self._semantic_kinematic_field_enabled
+                and assignment_context is not None
+                and self.last_peer_claim_load is not None
+                and valid_any is not None):
+            # ED-SKF: a target with missing peer endpoints attracts assistance;
+            # a target already at bistatic capacity exerts no kinematic force.
+            # Competition for full targets is suppressed in assignment logits
+            # above.  A zero force is important here: actively moving away from
+            # an already useful sensing geometry can improve role diversity but
+            # catastrophically reduce worst-target P_D.
+            target_rel_xy = targets[..., -1][:, :, 9:11]
+            desired_endpoints = float(self._sparse_claim_desired_endpoints)
+            endpoint_signal = torch.relu(
+                desired_endpoints - self.last_peer_claim_load
+            ) / desired_endpoints
+            field_weights = movement_assignment * endpoint_signal
+            target_rel_norm = target_rel_xy.norm(dim=-1, keepdim=True)
+            target_direction = target_rel_xy / target_rel_norm.clamp_min(1e-8)
+            target_direction = torch.where(
+                target_rel_norm > 1e-8,
+                target_direction,
+                torch.zeros_like(target_direction))
+            # Assignment probabilities sum to one and endpoint_signal lies in
+            # [0, 1], so the raw weighted vector is already bounded. Preserve
+            # its magnitude: weak or conflicting evidence must yield a weak
+            # intervention instead of being normalized to full gain.
+            field_vector = torch.sum(
+                field_weights.unsqueeze(-1) * target_direction, dim=1
+            )
+            field_norm = field_vector.norm(dim=-1, keepdim=True)
+            field_active = (
+                valid_any.unsqueeze(-1) & (field_norm > 1e-8))
+            field_vector = torch.where(
+                field_active, field_vector,
+                torch.zeros_like(field_vector))
+
+            # Apply the semantic gradient as a bounded residual to the actual
+            # normalized movement action, then map back to the Gaussian mean
+            # parameter used by PPO. Silence is exactly neutral.
+            base_action = torch.tanh(dp_mean)
+            guided_action = torch.clamp(
+                base_action
+                + self._semantic_kinematic_field_gain * field_vector,
+                -0.999, 0.999)
+            field_delta = torch.where(
+                field_active, guided_action - base_action,
+                torch.zeros_like(base_action))
+            dp_mean = torch.atanh(torch.clamp(
+                base_action + field_delta, -0.999, 0.999))
+            self.last_semantic_field_vector = field_vector.detach()
+            self.last_semantic_field_weights = field_weights.detach()
+            self.last_semantic_field_delta = field_delta.detach()
+        if (self._target_conditioned_movement_enabled
+                and assignment_context is not None):
+            # CTMH: every communication-refined target entity proposes a local
+            # radial/tangential motion. Negotiated responsibilities combine the
+            # proposals, retaining a distributed actor at execution time.
+            target_rel_xy = targets[..., -1][:, :, 9:11]
+            target_rel_norm = target_rel_xy.norm(dim=-1, keepdim=True)
+            radial_direction = (
+                target_rel_xy / target_rel_norm.clamp_min(1e-8))
+            radial_direction = torch.where(
+                target_rel_norm > 1e-8,
+                radial_direction,
+                torch.zeros_like(radial_direction))
+            tangent_direction = torch.stack(
+                [-radial_direction[..., 1], radial_direction[..., 0]],
+                dim=-1)
+            target_self = se.expand(-1, self.Q, -1)
+            coefficients = torch.tanh(self.target_movement_head(torch.cat(
+                [negotiation_te, target_self], dim=-1)))
+            coefficient_norm = coefficients.norm(dim=-1, keepdim=True)
+            coefficients = coefficients / coefficient_norm.clamp_min(1.0)
+            candidates = (
+                coefficients[..., :1] * radial_direction
+                + coefficients[..., 1:] * tangent_direction)
+            movement_residual = torch.sum(
+                movement_assignment.unsqueeze(-1) * candidates, dim=1)
+
+            base_action = torch.tanh(dp_mean)
+            guided_action = torch.clamp(
+                base_action
+                + self._target_conditioned_movement_gain * movement_residual,
+                -0.999, 0.999)
+            movement_delta = guided_action - base_action
+            # Preserve bitwise-identical warm-start behavior while the
+            # zero-initialized movement head is inactive. A tanh/atanh round
+            # trip alone is enough to alter long stochastic trajectories. The
+            # straight-through neutral branch keeps its forward value exact but
+            # still lets PPO open the zero-initialized head on the first update.
+            movement_active = movement_residual.abs().sum(
+                dim=-1, keepdim=True) > 0.0
+            guided_mean = torch.atanh(guided_action)
+            logit_delta = guided_mean - dp_mean
+            neutral_straight_through = (
+                dp_mean + logit_delta - logit_delta.detach())
+            dp_mean = torch.where(
+                movement_active, guided_mean, neutral_straight_through)
+            self.last_target_movement_candidates = candidates.detach()
+            self.last_target_movement_residual = movement_residual.detach()
+            self.last_target_movement_delta = movement_delta.detach()
+        if self._comm_target_token_enabled:
+            # Transmit the learned target-entity tokens themselves. Their
+            # semantics are not prescribed; the receiver learns how to use the
+            # sender-target token set through cross-attention.
+            comm_msg = outgoing_target_tokens.reshape(B, -1)
+        else:
+            comm_msg = torch.tanh(self.comm_head(h))
         role_logits = self.role_head(h)
 
         return dp_mean, log_std, role_logits, comm_msg, torch.sigmoid(torch.zeros_like(dp_mean[:, :1])), h_new
+
+    def communication_parameters(self, comm_mean: torch.Tensor):
+        """Distribution parameters for learned message content and rate.
+
+        Rate index zero is the silence action.  Message semantics remain fully
+        learned; the environment only quantizes the sampled content according
+        to the selected rate.
+        """
+        comm_log_std = torch.clamp(self.comm_log_std, -4.0, 1.0)
+        if self._scale_equivariant_comm_heads_enabled:
+            summary = self._pool_local_target_tokens(comm_mean)
+            rate_logits = self.comm_set_rate_head(summary)
+        else:
+            rate_logits = self.comm_rate_head(comm_mean)
+        feedback = self.last_comm_channel_feedback
+        if (self._comm_channel_feedback_rate_enabled
+                and feedback is not None
+                and feedback.ndim == 2
+                and feedback.shape[0] == comm_mean.shape[0]):
+            rate_logits = (
+                rate_logits + self.comm_rate_feedback_head(feedback))
+        return comm_log_std, rate_logits
+
+    def _pool_local_target_tokens(
+        self, comm_mean: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attention-pool one sender's target-token set.
+
+        This is a local set operation: the batch row belongs to one UAV and
+        contains only that UAV's outgoing target tokens. The result is
+        invariant to target ordering and independent of Q.
+        """
+        expected = self.Q * self.comm_target_token_dim
+        if comm_mean.ndim != 2 or comm_mean.shape[-1] != expected:
+            raise ValueError(
+                'scale-equivariant communication head expected '
+                f'{expected} values, got {tuple(comm_mean.shape)}')
+        tokens = comm_mean.reshape(
+            comm_mean.shape[0], self.Q, self.comm_target_token_dim)
+        logits = self.comm_set_attention(tokens).squeeze(-1)
+        weights = torch.softmax(logits, dim=-1)
+        self.last_comm_set_attention = weights.detach()
+        return torch.sum(weights.unsqueeze(-1) * tokens, dim=1)
+
+    def set_capacity_matching_blend(self, blend: float) -> None:
+        """Set the execution coupling used by the slow matching layer."""
+        self._capacity_matching_blend = float(np.clip(blend, 0.0, 1.0))
+
+    def set_target_allocation_movement_blend(self, blend: float) -> None:
+        """Set slow-commitment authority at a rollout boundary.
+
+        The trainer, rather than ``forward``, owns the schedule so every
+        sample in one PPO rollout is generated by the same behaviour map.
+        """
+        self._target_allocation_movement_blend = float(np.clip(
+            blend, 0.0, 1.0))
+
+    def decode_comm_semantics(
+        self, target_token_content: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode sender evidence and conditional P_D from latent dimensions.
+
+        The explicit bid at dimension zero is deliberately excluded.  This
+        helper has no path to any action head; it becomes behaviourally active
+        only when a later, separately gated CA-CSR mechanism consumes it.
+        """
+        if not self._comm_semantic_decoder_enabled:
+            raise RuntimeError('communication semantic decoder is disabled')
+        if target_token_content.shape[-1] < self.comm_target_token_dim:
+            raise ValueError('target token content is shorter than configured')
+        semantic = target_token_content[
+            ..., 1:self.comm_target_token_dim]
+        decoded = self.comm_semantic_decoder(semantic)
+        return decoded[..., 0], torch.sigmoid(decoded[..., 1])
+
+    def isac_resource_parameters(self, comm_mean: torch.Tensor):
+        """Logistic-normal parameters for joint power and target allocation.
+
+        The optional responsibility adapter converts locally negotiated target
+        probabilities to centered log-odds and adds them to the physical
+        sensing logits. Token agreement therefore controls an executed ISAC
+        resource instead of remaining an auxiliary representation.
+        """
+        if self._scale_equivariant_comm_heads_enabled:
+            summary = self._pool_local_target_tokens(comm_mean)
+            power_mean = self.isac_set_power_head(summary).squeeze(-1)
+        else:
+            power_mean = self.isac_power_mean_head(comm_mean).squeeze(-1)
+        sensing_mean = self.isac_sensing_mean_head(comm_mean)
+        comm_sensing_logits = self.last_comm_sensing_logits
+        if (self._comm_aided_sensing_enabled
+                and comm_sensing_logits is not None
+                and comm_sensing_logits.shape == sensing_mean.shape):
+            sensing_mean = (
+                sensing_mean
+                + self._comm_aided_sensing_blend * comm_sensing_logits)
+        assignment = self.last_target_assignment
+        if (self._target_allocation_resource_blend > 0.0
+                and assignment is not None
+                and assignment.shape == sensing_mean.shape):
+            allocation_logits = torch.log(assignment.clamp_min(1e-8))
+            allocation_logits = allocation_logits - allocation_logits.mean(
+                dim=-1, keepdim=True)
+            sensing_mean = (
+                sensing_mean
+                + self._target_allocation_resource_blend * allocation_logits)
+        power_log_std = torch.clamp(self.isac_power_log_std, -4.0, 1.0)
+        sensing_log_std = torch.clamp(
+            self.isac_sensing_log_std, -4.0, 1.0)
+        return power_mean, power_log_std, sensing_mean, sensing_log_std
 
 
 # ── Parameter group names for selective plasticity (S1) ──
@@ -435,15 +1795,29 @@ class StructuredActorNetwork(nn.Module):
 # string-exclusion) to avoid silently missing heads like intent_head, dp_log_std.
 ENCODER_PARAM_PREFIXES = (
     'self_enc.', 'target_enc.', 'pd_hist_proj.',
-    'neighbor_gru.', 'neighbor_proj.', 'global_enc.',
+    'neighbor_gru.', 'neighbor_proj.', 'global_enc.', 'comm_token_enc.',
+    'round_phase_enc.', 'round_phase_equivariant_enc.',
 )
 HEAD_PARAM_PREFIXES = (
-    'dp_head.', 'comm_head.', 'intent_head.',
-    'role_head.', 'comm_proj.', 'gate.',
+    'dp_head.', 'comm_head.', 'comm_target_token_head.', 'intent_head.',
+    'comm_rate_head.', 'comm_log_std',
+    'comm_rate_feedback_head.',
+    'comm_set_rate_head.', 'comm_set_attention.',
+    'isac_power_mean_head.', 'isac_sensing_mean_head.',
+    'isac_set_power_head.',
+    'isac_power_log_std', 'isac_sensing_log_std',
+    'role_head.', 'comm_proj.', 'gate.', 'comm_target_gate.',
+    'target_assignment_head.', 'movement_feature_adapter.',
+    'movement_commitment_head.', 'allocation_gate.',
+    'neighbor_bid_msg_proj.', 'neighbor_bid_target_proj.',
+    'round_target_gate.', 'round_peer_claim_head.',
+    'comm_sensing_gate.', 'comm_sensing_head.',
+    'comm_semantic_decoder.',
+    'target_movement_head.',
     'dp_log_std',  # nn.Parameter, no trailing dot
 )
 ATTENTION_PARAM_PREFIXES = (
-    'attn.', 'attn_norm.',
+    'attn.', 'attn_norm.', 'comm_cross_attn.', 'comm_cross_norm.',
 )
 
 
@@ -467,6 +1841,57 @@ def split_param_groups(named_params):
     return enc, head, attn
 
 
+class CausalContributionPredictor(nn.Module):
+    """Amortized sender-token effects on per-target sensing QoS.
+
+    The predictor is used only during centralized training. Its supervision is
+    produced by paired simulator interventions that keep the post-transition
+    state and random-number stream fixed while removing one sender from every
+    receiver inbox. The deployed actor does not call this network.
+    """
+
+    def __init__(self, obs_dim: int, comm_dim: int, num_targets: int,
+                 num_rate_levels: int = 4, hidden_dim: int = 128):
+        super().__init__()
+        self.num_targets = int(num_targets)
+        hidden = max(32, int(hidden_dim))
+        rate_dim = min(16, hidden // 4)
+        self.obs_encoder = nn.Sequential(
+            nn.Linear(int(obs_dim), hidden), nn.LayerNorm(hidden), nn.ReLU())
+        self.message_encoder = nn.Sequential(
+            nn.Linear(int(comm_dim), hidden), nn.LayerNorm(hidden), nn.ReLU())
+        self.rate_embedding = nn.Embedding(
+            max(1, int(num_rate_levels)), rate_dim)
+        self.fusion = nn.Sequential(
+            nn.Linear(2 * hidden + rate_dim, hidden),
+            nn.LayerNorm(hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden // 2), nn.ReLU(),
+        )
+        self.effect_head = nn.Linear(hidden // 2, self.num_targets)
+        self.apply(self._init_module)
+        # Neutral prior before the first intervention batch is fitted.
+        nn.init.zeros_(self.effect_head.weight)
+        nn.init.zeros_(self.effect_head.bias)
+
+    @staticmethod
+    def _init_module(module):
+        if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+            nn.init.zeros_(module.bias)
+
+    def forward(self, obs: torch.Tensor, message: torch.Tensor,
+                rate_index: torch.Tensor) -> torch.Tensor:
+        obs_h = self.obs_encoder(obs)
+        msg_h = self.message_encoder(message)
+        rate = rate_index.to(dtype=torch.long).clamp(
+            min=0, max=self.rate_embedding.num_embeddings - 1)
+        rate_h = self.rate_embedding(rate)
+        effect = self.effect_head(self.fusion(torch.cat(
+            [obs_h, msg_h, rate_h], dim=-1)))
+        # A paired one-step difference in detection probability is in [-1, 1].
+        return torch.tanh(effect)
+
+
 class CriticNetwork(nn.Module):
     """MAPPO centralized critic network.
 
@@ -474,25 +1899,109 @@ class CriticNetwork(nn.Module):
     Output: scalar V(s) + optional per-target V_q(s)
     """
 
-    def __init__(self, state_dim: int, hidden_layers: list = [256, 256],
-                 num_agents: int = 4, comm_dim: int = 0, num_targets: int = 0):
+    def __init__(
+        self,
+        state_dim: int,
+        hidden_layers: list = [256, 256],
+        num_agents: int = 4,
+        comm_dim: int = 0,
+        num_targets: int = 0,
+        set_risk_critic_enabled: bool = False,
+        risk_hidden_dim: int = 128,
+        risk_num_quantiles: int = 16,
+        risk_cvar_alpha: float = 0.20,
+        risk_monotonic_quantiles_enabled: bool = False,
+    ):
         super().__init__()
+        self.state_dim = int(state_dim)
         self.num_agents = num_agents
         self.comm_dim = comm_dim
         self.num_targets = num_targets
+        self.set_risk_critic_enabled = bool(set_risk_critic_enabled)
+        self.risk_num_quantiles = max(2, int(risk_num_quantiles))
+        self.risk_cvar_alpha = float(np.clip(risk_cvar_alpha, 1e-6, 1.0))
+        self.risk_monotonic_quantiles_enabled = bool(
+            risk_monotonic_quantiles_enabled)
         input_dim = state_dim + num_agents + comm_dim
         # Shared trunk: full MLP
         self.shared = mlp(input_dim, hidden_layers, hidden_layers[-1])
         last_dim = hidden_layers[-1]
         # Scalar value head
         self.value_head = nn.Linear(last_dim, 1)
+        # CTDE-only action-head credit baselines. These do not enter the actor
+        # observation or deployed policy; they only reduce variance for the
+        # movement/message/rate/resource PPO objectives.
+        self.credit_head_names = ('movement', 'message', 'rate', 'resource')
+        self.credit_heads = nn.ModuleList([
+            nn.Linear(last_dim, 1) for _ in self.credit_head_names
+        ])
         # Per-target value heads (S3: target-wise critic)
         self.target_heads = None
         if num_targets > 0:
             self.target_heads = nn.ModuleList([
                 nn.Linear(last_dim, 1) for _ in range(num_targets)
             ])
+
+        # CTDE-only distributional risk critic.  The centralized state has the
+        # layout K*[pos, vel, battery, role], Q*[pos, vel], time,
+        # Q*uncertainty, Q*P_D.  Shared node encoders plus set pooling make the
+        # UAV path permutation invariant and the target outputs permutation
+        # equivariant.  In particular, the appended K-long agent one-hot is
+        # intentionally ignored; it is useful to the legacy value critic but
+        # must not become an identity shortcut for team risk prediction.
+        self.risk_uav_encoder = None
+        self.risk_target_encoder = None
+        self.risk_uav_attention = None
+        self.risk_target_attention = None
+        self.risk_context = None
+        self.risk_quantile_head = None
+        self.risk_constraint_head = None
+        if self.set_risk_critic_enabled:
+            expected_state_dim = (
+                8 * int(num_agents) + 8 * int(num_targets) + 1)
+            if int(state_dim) != expected_state_dim:
+                raise ValueError(
+                    'set risk critic requires the centralized global-state '
+                    f'layout of width {expected_state_dim}, got {state_dim}')
+            risk_hidden_dim = max(16, int(risk_hidden_dim))
+            self.risk_uav_encoder = nn.Sequential(
+                nn.Linear(8, risk_hidden_dim),
+                nn.LayerNorm(risk_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(risk_hidden_dim, risk_hidden_dim),
+                nn.ReLU(),
+            )
+            # Six target kinematics + uncertainty + previous P_D.
+            self.risk_target_encoder = nn.Sequential(
+                nn.Linear(8, risk_hidden_dim),
+                nn.LayerNorm(risk_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(risk_hidden_dim, risk_hidden_dim),
+                nn.ReLU(),
+            )
+            self.risk_uav_attention = nn.Linear(risk_hidden_dim, 1)
+            self.risk_target_attention = nn.Linear(risk_hidden_dim, 1)
+            risk_context_dim = (
+                3 * risk_hidden_dim + 1 + int(comm_dim))
+            self.risk_context = nn.Sequential(
+                nn.Linear(risk_context_dim, risk_hidden_dim),
+                nn.LayerNorm(risk_hidden_dim),
+                nn.ReLU(),
+            )
+            quantile_outputs = (
+                self.risk_num_quantiles + 1
+                if self.risk_monotonic_quantiles_enabled
+                else self.risk_num_quantiles)
+            self.risk_quantile_head = nn.Linear(
+                risk_hidden_dim, quantile_outputs)
+            self.risk_constraint_head = nn.Linear(risk_hidden_dim, 1)
         self._init_weights()
+        # A random baseline would overwhelm the milliscale delayed message
+        # reward on the first PPO update. Start all credit baselines at zero;
+        # their supervised return losses learn the appropriate scales.
+        for head in self.credit_heads:
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
 
     def _init_weights(self):
         for module in self.modules():
@@ -513,6 +2022,91 @@ class CriticNetwork(nn.Module):
         if self.target_heads is not None:
             target_v = torch.stack([head(h).squeeze(-1) for head in self.target_heads], dim=-1)
         return scalar_v, target_v
+
+    def forward_with_credit(self, state: torch.Tensor):
+        """Return the legacy scalar value and four action-head baselines."""
+        h = self.shared(state)
+        scalar_v = self.value_head(h).squeeze(-1)
+        credit_v = torch.stack([
+            head(h).squeeze(-1) for head in self.credit_heads
+        ], dim=-1)
+        return scalar_v, credit_v
+
+    def forward_risk(self, state: torch.Tensor):
+        """Return per-target next-P_D quantiles and QoS-violation logits.
+
+        This branch is training-only.  It does not enter the decentralized
+        actor forward pass or add any observation at deployment.
+        """
+        if not self.set_risk_critic_enabled:
+            return None
+        expected_width = self.state_dim + self.num_agents + self.comm_dim
+        if state.ndim != 2 or state.shape[-1] != expected_width:
+            raise ValueError(
+                'risk critic input must be [base global state, agent one-hot, '
+                f'communication summary] with width {expected_width}')
+
+        batch = state.shape[0]
+        base = state[:, :self.state_dim]
+        uav_end = 8 * self.num_agents
+        target_motion_end = uav_end + 6 * self.num_targets
+        uav = base[:, :uav_end].reshape(batch, self.num_agents, 8)
+        target_motion = base[:, uav_end:target_motion_end].reshape(
+            batch, self.num_targets, 6)
+        time_fraction = base[:, target_motion_end:target_motion_end + 1]
+        uncertainty_start = target_motion_end + 1
+        uncertainty = base[
+            :, uncertainty_start:uncertainty_start + self.num_targets]
+        pd_start = uncertainty_start + self.num_targets
+        previous_pd = base[:, pd_start:pd_start + self.num_targets]
+        target = torch.cat([
+            target_motion,
+            uncertainty.unsqueeze(-1),
+            previous_pd.unsqueeze(-1),
+        ], dim=-1)
+
+        uav_h = self.risk_uav_encoder(uav)
+        target_h = self.risk_target_encoder(target)
+        uav_weight = torch.softmax(
+            self.risk_uav_attention(uav_h), dim=1)
+        target_weight = torch.softmax(
+            self.risk_target_attention(target_h), dim=1)
+        uav_pool = torch.sum(uav_weight * uav_h, dim=1)
+        target_pool = torch.sum(target_weight * target_h, dim=1)
+
+        # The communication summary is already averaged over senders by the
+        # trainer.  Ignore the intervening absolute-agent one-hot block.
+        comm_start = self.state_dim + self.num_agents
+        comm = state[:, comm_start:comm_start + self.comm_dim]
+        shared_context = torch.cat(
+            [uav_pool, target_pool, time_fraction, comm], dim=-1)
+        shared_context = shared_context.unsqueeze(1).expand(
+            -1, self.num_targets, -1)
+        context = self.risk_context(torch.cat(
+            [target_h, shared_context], dim=-1))
+        quantile_raw = self.risk_quantile_head(context)
+        if self.risk_monotonic_quantiles_enabled:
+            # A simplex over N+1 non-negative spacings parameterizes N ordered
+            # points strictly inside [0, 1].  This prevents quantile crossing
+            # structurally instead of relying on an auxiliary penalty.
+            spacing = torch.softmax(quantile_raw, dim=-1)
+            quantiles = torch.cumsum(spacing, dim=-1)[
+                ..., :self.risk_num_quantiles]
+        else:
+            quantiles = quantile_raw
+        constraint_logits = self.risk_constraint_head(context).squeeze(-1)
+        return quantiles, constraint_logits
+
+    def risk_cvar(self, state: torch.Tensor) -> Optional[torch.Tensor]:
+        """Lower-tail next-P_D estimate for each target."""
+        outputs = self.forward_risk(state)
+        if outputs is None:
+            return None
+        quantiles, _ = outputs
+        tail_count = max(
+            1, int(np.ceil(self.risk_cvar_alpha * self.risk_num_quantiles)))
+        ordered = torch.sort(quantiles, dim=-1).values
+        return ordered[..., :tail_count].mean(dim=-1)
 
 
 class GATEncoder(nn.Module):

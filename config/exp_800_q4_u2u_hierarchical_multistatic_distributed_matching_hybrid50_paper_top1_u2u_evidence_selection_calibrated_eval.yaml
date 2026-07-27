@@ -1,0 +1,8 @@
+# Gate 2C: all LLR clipping, confidence classes, and the standardized H0
+# threshold are calibrated on selection20 only. Stress geometries are never
+# used to choose detector parameters.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_u2u_evidence_eval.yaml
+
+marl:
+  evidence_packet_standardized_threshold: 3.0951552649384646
+  evidence_packet_calibration_profile: gate2c-selection20-only_top1-8bit-conf2

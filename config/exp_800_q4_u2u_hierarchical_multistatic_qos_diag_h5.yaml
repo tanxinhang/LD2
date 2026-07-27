@@ -1,0 +1,9 @@
+# Evaluation-only teacher audit.  Communication, sensing power and endpoint
+# bids remain those of the stable decentralized actor; only slow movement is
+# replaced by the QoS-aware centralized label generator.
+extends: exp_800_q4_u2u_hierarchical_multistatic_stable_eval.yaml
+
+marl:
+  eval_qos_bistatic_assignment_movement: true
+  target_allocation_teacher_commitment_frames: 5
+  target_allocation_teacher_qos_weight: 2.0

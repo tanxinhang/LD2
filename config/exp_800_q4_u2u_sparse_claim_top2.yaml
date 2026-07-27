@@ -1,0 +1,6 @@
+# Capacity-matched sparse proposal: four UAVs x top-2 claims exactly equals
+# four targets x two bistatic endpoints.
+extends: exp_800_q4_u2u_sparse_claim.yaml
+
+marl:
+  sparse_claim_share_topk: 2

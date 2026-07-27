@@ -1,0 +1,7 @@
+# Physical-layer ablation: keep BRH-GMAPPO unchanged and remove only the
+# one-role-per-frame endpoint restriction.  Every UAV still has exactly 1 W
+# total RF power; P0 schedules TX and RX participation in separate sub-slots.
+extends: exp_800_q4_u2u_brh_gmappo.yaml
+
+marl:
+  multistatic_subslot_enabled: true

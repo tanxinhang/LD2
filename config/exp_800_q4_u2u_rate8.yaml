@@ -1,0 +1,6 @@
+# Medium-rate ablation: identical to the canonical U2U experiment except that
+# QoS-infeasible rate-head exploration saturates at 8 rather than 16 bit/dim.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  comm_rate_bonus_target_bits: 8

@@ -96,13 +96,26 @@ class Target:
         self._bounce()
 
     def _step_cv(self):
-        w = self.rng.multivariate_normal(np.zeros(4), self._Q).astype(np.float64)
+        # The CV covariance is rank two: it is generated exactly by independent
+        # x/y acceleration noise. Sampling the latent accelerations avoids an
+        # unnecessary per-frame SVD in NumPy's multivariate_normal (which also
+        # conflicts with some Torch+MKL Windows runtimes).
+        acceleration = self.rng.normal(
+            0.0, self.sigma_a, size=2).astype(np.float64)
+        dt = self.dt
+        w = np.array([
+            0.5 * dt * dt * acceleration[0],
+            0.5 * dt * dt * acceleration[1],
+            dt * acceleration[0],
+            dt * acceleration[1],
+        ], dtype=np.float64)
         self.state = self._F @ self.state + w
 
     def _step_ct(self):
         px, py, v, theta, omega = self.state
         dt = self.dt
-        w = self.rng.multivariate_normal(np.zeros(5), self._Q).astype(np.float64)
+        w = (self.rng.normal(size=5) * np.sqrt(np.diag(self._Q))).astype(
+            np.float64)
         if abs(omega) > 1e-6:
             px_n = px + v/omega*(np.sin(theta+omega*dt)-np.sin(theta))
             py_n = py + v/omega*(np.cos(theta)-np.cos(theta+omega*dt))
@@ -114,7 +127,17 @@ class Target:
                               dtype=np.float64)
 
     def _step_ca(self):
-        w = self.rng.multivariate_normal(np.zeros(6), self._Q).astype(np.float64)
+        jerk = self.rng.normal(
+            0.0, 0.5 * self.sigma_a, size=2).astype(np.float64)
+        dt = self.dt
+        w = np.array([
+            0.5 * dt * dt * jerk[0],
+            0.5 * dt * dt * jerk[1],
+            dt * jerk[0],
+            dt * jerk[1],
+            jerk[0],
+            jerk[1],
+        ], dtype=np.float64)
         self.state = self._F @ self.state + w
 
     def _bounce(self):

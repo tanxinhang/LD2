@@ -1,0 +1,8 @@
+# Endpoint-deficit semantic kinematic field experiment.  This is deliberately
+# isolated from the later communication-value gate and counterfactual critic so
+# its effect on movement conflict and tail QoS remains attributable.
+extends: exp_800_q4_u2u_sparse_claim_top2.yaml
+
+marl:
+  semantic_kinematic_field_enabled: true
+  semantic_kinematic_field_gain: 0.05

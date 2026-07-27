@@ -1,0 +1,7 @@
+# Diagnostic upper bound for endpoint negotiation: expose all Q target tokens
+# so capacity-two projection, rather than the movement top-2 mask, chooses the
+# sensing endpoints. This intentionally spends more communication bits.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_semantic_decoder_eval.yaml
+
+marl:
+  sparse_claim_share_topk: 4

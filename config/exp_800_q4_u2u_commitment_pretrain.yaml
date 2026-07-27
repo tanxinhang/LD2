@@ -1,0 +1,12 @@
+# Phase-A latent commitment pretraining. Keep the warm-started physical policy
+# almost unchanged while the delayed quantized message/assignment path learns.
+extends: exp_800_q4_u2u_commitment_teacher.yaml
+
+marl:
+  ppo_epochs: 0
+  target_allocation_movement_blend: 0.05
+  target_allocation_teacher_label_coef: 1.0
+  target_allocation_teacher_movement_coef: 0.10
+  target_allocation_teacher_message_coef: 1.0
+  target_allocation_teacher_epochs: 32
+  target_allocation_aux_lr: 0.003

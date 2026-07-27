@@ -1,0 +1,7 @@
+# Causal allocation intervention: replace only movement with centralized
+# minimum-distance one-to-one target assignment. Roles and U2U messages remain
+# those of the learned actor.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  eval_centralized_assignment_movement: true

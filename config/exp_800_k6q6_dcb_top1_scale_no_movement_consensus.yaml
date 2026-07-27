@@ -1,0 +1,6 @@
+# Matched 6/6 ablation of communication-induced movement matching.
+extends: exp_800_k6q6_dcb_top1_scale.yaml
+
+marl:
+  movement_team_matching_enabled: false
+  movement_team_matching_blend: 0.0

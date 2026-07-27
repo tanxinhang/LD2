@@ -1,0 +1,5 @@
+# Matched 6/6 ablation of capacity-two sensing projection.
+extends: exp_800_k6q6_dcb_top1_scale.yaml
+
+marl:
+  capacity_matching_enabled: false

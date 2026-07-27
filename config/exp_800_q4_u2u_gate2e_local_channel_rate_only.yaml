@@ -1,0 +1,9 @@
+# Gate 2E: repeat the Gate 2D rate-only screen after exposing a strictly
+# local reciprocal-link summary to the categorical rate head. Movement,
+# target-token content, Top-1 cardinality, ISAC power, evidence fusion, and
+# the calibrated detector remain frozen.
+extends: exp_800_q4_u2u_gate2d_channel_randomized_rate_only.yaml
+
+marl:
+  comm_channel_feedback_rate_enabled: true
+  comm_channel_feedback_dim: 6

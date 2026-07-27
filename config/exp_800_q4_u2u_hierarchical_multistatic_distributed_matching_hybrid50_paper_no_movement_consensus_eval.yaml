@@ -1,0 +1,7 @@
+# Remove communication-induced team movement matching while retaining U2U
+# tokens, communication-aided sensing, target allocation and power learning.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_eval.yaml
+
+marl:
+  movement_team_matching_enabled: false
+  movement_team_matching_blend: 0.0

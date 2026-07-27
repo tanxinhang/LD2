@@ -1,0 +1,6 @@
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_gated_move50_eval.yaml
+
+marl:
+  target_allocation_movement_blend: 1.0
+  target_allocation_movement_blend_start: 1.0
+  target_allocation_movement_blend_end: 1.0

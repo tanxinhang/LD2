@@ -1,0 +1,12 @@
+# Target-directed revision of the bounded risk-residual MAPPO adapter.
+extends: exp_800_q4_u2u_risk_residual_mappo.yaml
+
+marl:
+  # Still conservative relative to full-actor MAPPO: the foundation policy is
+  # frozen and the normalized movement correction cannot exceed 0.08.
+  risk_residual_delta_max: 0.08
+  risk_residual_gate_bias: -1.25
+  risk_residual_learning_rate: 3.0e-4
+  risk_residual_directional_basis_enabled: true
+  ppo_clip: 0.08
+  target_kl: 0.008

@@ -1,0 +1,12 @@
+# Decentralized token-conditioned team matching. Each UAV reconstructs peer
+# target bids from its delivered inbox and locally applies Sinkhorn balancing;
+# the resulting own row directly controls its sensing-resource logits.
+extends: exp_800_q4_u2u_agreement_resource.yaml
+
+marl:
+  target_allocation_sinkhorn_enabled: true
+  target_allocation_straight_through: false
+  target_allocation_movement_blend: 0.0
+  target_allocation_balance_coef: 1.0
+  target_allocation_commit_coef: 0.05
+  target_allocation_aux_epochs: 16

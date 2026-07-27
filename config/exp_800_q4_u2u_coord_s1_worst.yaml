@@ -1,0 +1,9 @@
+# Stage 1: isolate temporal progress of the worst target.
+extends: exp_800_q4_u2u_coord_s0_baseline.yaml
+
+marl:
+  coord_reward_enabled: true
+  coord_reward_stage: 1
+  coord_reward_ema_alpha: 0.20
+  coord_reward_worst_floor: 0.60
+  coord_reward_worst_weight: 1.00

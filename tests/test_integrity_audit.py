@@ -12,6 +12,7 @@ import torch
 from config.params import get_default_config
 from uav_isac.environment.action import ActionSpace
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.environment.observation_slices import ObservationSlices
 from uav_isac.environment.uav import UAV
 from uav_isac.environment.belief import BeliefManager
 from uav_isac.environment.reward import RewardComputer
@@ -105,7 +106,8 @@ class TestLogProbConsistency:
         agent = MAPPOAgent(0, obs_dim, gs_dim, aspace, num_agents=4, device="cpu")
         obs = torch.randn(1, obs_dim)
         with torch.no_grad():
-            dp_mean_t, dp_log_std_t, role_logits_t, _ = agent.actor(obs)
+            (dp_mean_t, dp_log_std_t, role_logits_t,
+             _comm, _pd, _hidden) = agent.actor(obs)
         errs = []
         for _ in range(500):
             act, lp1 = aspace.decode(
@@ -113,8 +115,10 @@ class TestLogProbConsistency:
                 dp_log_std_t.numpy(),
                 role_logits_t.squeeze(0).numpy(),
             )
-            gs = torch.zeros(1, gs_dim + 4)
-            lp_t, _, _, _ = agent.evaluate_actions(
+            # evaluate_actions appends the agent/message critic context when a
+            # caller supplies only the base global state.
+            gs = torch.zeros(1, gs_dim)
+            lp_t, _, _, _, _, _ = agent.evaluate_actions(
                 obs,
                 gs,
                 torch.tensor(act.delta_p, dtype=torch.float32).unsqueeze(0),
@@ -130,7 +134,7 @@ class TestLogProbConsistency:
         agent = MAPPOAgent(0, 40, 46, aspace, num_agents=4, device="cpu")
         with torch.no_grad():
             agent.actor.dp_log_std.fill_(5.0)  # raw > 1, tanh(5)≈1
-            _, fwd_log_std, _, _ = agent.actor(torch.randn(1, 40))
+            _, fwd_log_std, _, _, _, _ = agent.actor(torch.randn(1, 40))
             fwd_log_std = fwd_log_std.numpy()
             raw = agent.actor.dp_log_std.detach().numpy()
         # Forward: tanh maps raw 5.0 to log_std ≈ 1.0 (bounded)
@@ -375,6 +379,9 @@ class TestEnvStatistics:
         assert mismatches / total > 0.15, f"mismatch rate={mismatches/total:.3f}"
 
     def test_belief_position_error_grows_without_observation(self, default_config):
+        # This audit exercises the tracking loop explicitly. The deployable
+        # U2U-ISAC scenario defaults to mission-known fixed sensing targets.
+        default_config.marl.tracking_enabled = True
         env = UAVISACEnv(config=default_config, seed=99)
         env.reset(seed=99)
         tgt_start = env.core.targets[0].state[:2].copy()
@@ -435,27 +442,31 @@ class TestEnvStatistics:
         # P0 roles → more valid pairs → fewer violations
         assert rate >= 0.0, f"violation rate={rate:.2f}"
 
-    def test_prev_pd_is_one_frame_delayed_and_shared(self, default_config):
-        """obs at step t carries P_D from step t-1; all agents share the same vector."""
+    def test_prev_pd_is_local_and_matches_next_observation(self, default_config):
+        """Each next observation carries that UAV's latest local RX P_D."""
         env = UAVISACEnv(config=default_config, seed=7)
         obs, _ = env.reset(seed=7)
-        pd_history = [None]
+        builder = env.core.obs_builder
+        slices = ObservationSlices.from_config(
+            K=env.K,
+            Q=env.Q,
+            use_p0=builder.use_p0_global_info,
+            use_rel_features=builder.use_relative_features,
+            use_comm_tokens=builder.use_comm_tokens,
+            comm_token_dim=builder.comm_token_dim,
+            comm_tokens_per_sender=builder.comm_tokens_per_sender,
+        )
         for step in range(1, 4):
             actions = {str(k): {"delta_p": np.zeros(2), "role": 2} for k in range(env.K)}
-            obs, _, _, _, info = env.step(actions)
-            expected = pd_history[-1]
-            if expected is None:
-                expected = np.zeros(env.Q)
-            # P_D is before the 16-dim comm message at the end of obs
-            pd_end = -(16 + env.Q) if obs["0"].shape[0] > 16 + env.Q else -env.Q
-            obs_pd = obs["0"][pd_end:pd_end+env.Q] if pd_end < 0 else obs["0"][-env.Q:]
-            for k in range(1, env.K):
-                assert np.allclose(obs[str(0)][pd_end:pd_end+env.Q] if pd_end < 0 else obs[str(0)][-env.Q:],
-                                  obs[str(k)][pd_end:pd_end+env.Q] if pd_end < 0 else obs[str(k)][-env.Q:])
-            assert np.allclose(obs_pd, expected), (
-                f"step {step}: obs prev_P_D={obs_pd}, expected prior P_D={expected}"
-            )
-            pd_history.append(info["P_D_q"].copy())
+            obs, _, _, _, _ = env.step(actions)
+            for k in range(env.K):
+                obs_pd = slices.extract_pd_hist(obs[str(k)])
+                expected = env.core.prev_P_D_local.get(
+                    k, np.zeros(env.Q))
+                assert np.allclose(obs_pd, expected), (
+                    f"step {step}, UAV {k}: local obs P_D={obs_pd}, "
+                    f"computed local P_D={expected}"
+                )
 
     def test_role_switch_rate_high_under_random_policy(self, default_config):
         env = UAVISACEnv(config=default_config, seed=0)

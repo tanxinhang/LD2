@@ -1,0 +1,22 @@
+# Stage-1 calibration of the CTDE-only set/distributional risk critic.
+# The established top-1 actor is loaded externally and remains bitwise frozen.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_eval.yaml
+
+marl:
+  set_risk_critic_enabled: true
+  risk_critic_hidden_dim: 128
+  risk_critic_num_quantiles: 16
+  risk_critic_cvar_alpha: 0.20
+  risk_critic_monotonic_quantiles_enabled: true
+  risk_critic_qos_floor: 0.60
+  risk_critic_quantile_coef: 1.0
+  risk_critic_constraint_coef: 1.0
+  risk_critic_constraint_positive_weight: 0.0
+  risk_critic_only_training: true
+  critic_lr_mult: 1.0
+  rollout_steps: 1024
+  num_envs: 8
+  minibatch_size: 256
+  ppo_epochs: 4
+  early_stop: false
+  checkpoint_confirmation_enabled: false

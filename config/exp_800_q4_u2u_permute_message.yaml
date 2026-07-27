@@ -1,0 +1,5 @@
+# Causal content ablation: cyclically permute payloads across physical senders.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  comm_eval_message_ablation: permute

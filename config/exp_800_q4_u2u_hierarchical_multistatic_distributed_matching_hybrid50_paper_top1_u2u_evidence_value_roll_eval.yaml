@@ -1,0 +1,9 @@
+# Content-only intervention: preserve packet metadata and target IDs while
+# cyclically attaching another target's null LLR value. The H0 threshold is
+# independently calibrated to keep team PFA fixed.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_u2u_evidence_eval.yaml
+
+marl:
+  evidence_packet_content_mode: value_roll
+  evidence_packet_standardized_threshold: 3.62841064743488
+  evidence_packet_calibration_profile: gate1c-selection20-clip-conf_stress20-h0-threshold_top1-8bit-conf2-value-roll

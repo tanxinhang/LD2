@@ -1,0 +1,10 @@
+# Frozen-policy structural probe: received target tokens define a local copy of
+# the team bid graph. A one-to-one Sinkhorn projection controls movement, while
+# the existing capacity-two projection controls multistatic sensing endpoints.
+extends: exp_800_q4_u2u_hierarchical_multistatic_soft_commitment_gated_move50_eval.yaml
+
+marl:
+  movement_team_matching_enabled: true
+  movement_team_matching_temperature: 0.35
+  movement_team_matching_iterations: 16
+  movement_team_matching_blend: 1.0

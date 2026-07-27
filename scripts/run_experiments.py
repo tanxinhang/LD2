@@ -54,7 +54,22 @@ def train_one(cfg, seed, centralized: bool) -> float:
                    num_targets=cfg.scenario.Q,
                    hidden_layers=cfg.marl.hidden_layers, lr=cfg.marl.lr,
                    max_grad_norm=cfg.marl.max_grad_norm, device=device,
-                   centralized_critic=centralized)
+                   centralized_critic=centralized,
+                   comm_num_rate_levels=len(getattr(
+                       cfg.marl, 'comm_rate_bits_per_dim', [0, 4, 8, 16])),
+                   comm_log_std_init=float(getattr(
+                       cfg.marl, 'comm_message_log_std_init', -1.0)),
+                   comm_entropy_scale=float(getattr(
+                       cfg.marl, 'comm_entropy_scale', 1.0)),
+                   use_comm_cross_attention=bool(getattr(
+                       cfg.marl, 'comm_cross_attention_enabled', False)),
+                   comm_token_dim=21,
+                   use_target_allocation=bool(
+                       getattr(cfg.marl, 'target_allocation_enabled', False)
+                       or getattr(cfg.marl,
+                                  'target_allocation_teacher_enabled', False)),
+                   use_team_sinkhorn=bool(getattr(
+                       cfg.marl, 'target_allocation_sinkhorn_enabled', False)))
         for k in range(K)
     ]
     trainer = MAPPTrainer(env=env, agents=agents, config=cfg, device=device)

@@ -1,0 +1,6 @@
+# Tight-latency perturbation: reduce the packet deadline from 5 ms to 1 ms.
+# Packets missing the deadline are dropped by the unchanged physical channel.
+extends: exp_800_q4_u2u_hierarchical_multistatic_distributed_matching_hybrid50_paper_top1_eval.yaml
+
+marl:
+  comm_deadline_s: 0.001

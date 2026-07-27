@@ -1,0 +1,7 @@
+# Diagnostic only: test whether target-specific credit assignment can recover
+# one-to-one sensing coverage from the current shared-advantage checkpoint.
+extends: exp_800_q4_u2u_rate8.yaml
+
+marl:
+  advantage_mode: target_wise
+  target_responsibility_tau_m: 50.0

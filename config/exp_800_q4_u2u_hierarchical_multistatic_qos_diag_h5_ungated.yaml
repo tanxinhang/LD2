@@ -1,0 +1,7 @@
+# Causal diagnostic: retain the QoS teacher's movement intervention, but remove
+# the actor-token top-k subgraph filter.  A gain here identifies disagreement
+# between the movement assignment and learned communication/sensing claims.
+extends: exp_800_q4_u2u_hierarchical_multistatic_qos_diag_h5.yaml
+
+marl:
+  distributed_target_commitment_enabled: false

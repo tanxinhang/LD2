@@ -1,0 +1,5 @@
+# Matched 6/6 projected-commitment ablation (no live intrinsic rebid).
+extends: exp_800_k6q6_dcb_top1_scale.yaml
+
+marl:
+  movement_team_matching_intrinsic_bid_mix: 0.0

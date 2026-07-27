@@ -1,0 +1,5 @@
+# Over-subscribed ablation: 12 proposals compete for eight endpoint slots.
+extends: exp_800_q4_u2u_sparse_claim.yaml
+
+marl:
+  sparse_claim_share_topk: 3

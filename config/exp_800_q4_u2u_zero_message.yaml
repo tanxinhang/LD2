@@ -1,0 +1,5 @@
+# Causal content ablation: transmit all-zero payloads at the learned rates.
+extends: exp_800_q4_u2u.yaml
+
+marl:
+  comm_eval_message_ablation: zero

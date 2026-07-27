@@ -1,0 +1,11 @@
+# Communication-conditioned target movement head (CTMH) experiment.
+# The only structural change relative to sparse-claim top-2 is a learnable
+# per-target radial/tangential movement proposal. Movement PPO credit uses the
+# existing per-target critic advantages instead of the team-average signal.
+extends: exp_800_q4_u2u_sparse_claim_top2.yaml
+
+marl:
+  semantic_kinematic_field_enabled: false
+  target_conditioned_movement_enabled: true
+  target_conditioned_movement_gain: 0.15
+  advantage_mode: target_wise

@@ -1,0 +1,6 @@
+# 6/6 controlled-density scale test for cardinality-equivariant communication.
+extends: exp_800_k6q6_dcb_top1_scale.yaml
+
+marl:
+  scale_equivariant_comm_heads_enabled: true
+  permutation_equivariant_round_encoding_enabled: true
