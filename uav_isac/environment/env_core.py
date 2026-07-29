@@ -60,8 +60,10 @@ from uav_isac.coordination.qpd import (
 from uav_isac.coordination.hyperedge import (
     decode_offer_stream,
     encode_offer_stream,
+    factorized_endpoint_capabilities,
     mutual_endpoint_consensus,
     plan_local_hyperedges,
+    reconstruct_bistatic_pair_value,
     update_consensus_streak,
 )
 
@@ -536,6 +538,14 @@ class EnvironmentCore:
             self.Q, int(getattr(ma, 'hyperedge_share_topk', self.Q))))
         self._hyperedge_distance_scale_m = max(1e-6, float(getattr(
             ma, 'hyperedge_distance_scale_m', 150.0)))
+        self._hyperedge_capability_mode = str(getattr(
+            ma, 'hyperedge_capability_mode',
+            'exponential')).strip().lower()
+        if self._hyperedge_capability_mode not in {
+                'exponential', 'inverse_square'}:
+            raise ValueError(
+                'hyperedge_capability_mode must be exponential or '
+                'inverse_square')
         self._hyperedge_deficit_gain = max(0.0, float(getattr(
             ma, 'hyperedge_deficit_gain', 2.0)))
         self._hyperedge_proxy_floor = max(1e-9, float(getattr(
@@ -554,6 +564,8 @@ class EnvironmentCore:
             7 if self._hyperedge_state_stream_enabled else 3)
         self._hyperedge_consensus_rounds = max(1, int(getattr(
             ma, 'hyperedge_consensus_rounds', 2)))
+        self._hyperedge_assignment_hold_frames = max(1, int(getattr(
+            ma, 'hyperedge_assignment_hold_frames', 1)))
         self._hyperedge_min_target_coverage = float(np.clip(getattr(
             ma, 'hyperedge_min_target_coverage', 1.0), 0.0, 1.0))
         self._hyperedge_safety_fallback = bool(getattr(
@@ -722,6 +734,7 @@ class EnvironmentCore:
         self._hyperedge_consensus_streak = np.zeros(
             (self.K, self.K, self.Q), dtype=np.int64)
         self._hyperedge_selected_set: Tuple[Tuple[int, int, int], ...] = tuple()
+        self._hyperedge_last_update_frame = -10**9
         self._hyperedge_metrics: Dict[str, object] = {}
         self._pending_comm_power_fractions: Dict[int, float] = {}
         self._pending_sensing_weights: Dict[int, np.ndarray] = {}
@@ -912,6 +925,7 @@ class EnvironmentCore:
         self._hyperedge_consensus_streak = np.zeros(
             (self.K, self.K, self.Q), dtype=np.int64)
         self._hyperedge_selected_set = tuple()
+        self._hyperedge_last_update_frame = -10**9
         self._hyperedge_metrics = {}
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
@@ -1163,7 +1177,6 @@ class EnvironmentCore:
             target.get_position_3d()[:2] for target in self.targets])
         distance = np.linalg.norm(
             uav_xy[:, None, :] - target_xy[None, :, :], axis=-1)
-        geometry = np.exp(-distance / self._hyperedge_distance_scale_m)
 
         self._pending_hyperedge_protocol = {}
         for sender in range(self.K):
@@ -1177,14 +1190,14 @@ class EnvironmentCore:
             # Tx capability includes the sender's actual remaining sensing
             # fraction and target split. Rx capability is geometric because
             # receive participation does not emit sensing RF power.
-            tx_capability = np.clip(
-                geometry[sender]
-                * np.sqrt(np.maximum(
-                    (1.0 - comm_fraction) * sensing_weights, 0.0)),
-                0.0,
-                1.0,
+            tx_capability, rx_capability = (
+                factorized_endpoint_capabilities(
+                    distance[sender],
+                    (1.0 - comm_fraction) * sensing_weights,
+                    distance_scale_m=self._hyperedge_distance_scale_m,
+                    mode=self._hyperedge_capability_mode,
+                )
             )
-            rx_capability = np.clip(geometry[sender], 0.0, 1.0)
             local_pd = np.asarray(
                 self.prev_P_D_local.get(
                     sender, np.zeros(self.Q, dtype=np.float64)),
@@ -1952,15 +1965,43 @@ class EnvironmentCore:
         physical_entries: list,
     ) -> Tuple[Tuple[int, int, int], ...]:
         """Resolve reciprocal directed plans from receiver-local offer views."""
-        physical_pair_value = None
-        if self._hyperedge_pair_score_mode == 'physical_reconstructable':
-            physical_pair_value = np.zeros(
-                (self.K, self.K, self.Q), dtype=np.float64)
-            for entry in physical_entries:
-                if int(entry.i) != int(entry.j):
-                    physical_pair_value[
-                        int(entry.i), int(entry.j), int(entry.q)] = max(
-                            float(entry.d_eff), 0.0)
+        physical_lookup = {
+            (int(entry.i), int(entry.j), int(entry.q))
+            for entry in physical_entries
+            if int(entry.i) != int(entry.j) and float(entry.d_eff) > 0.0
+        }
+        held = tuple(
+            edge for edge in self._hyperedge_selected_set
+            if edge in physical_lookup)
+        hold_active = bool(
+            held
+            and len(held) == len(self._hyperedge_selected_set)
+            and self.t - self._hyperedge_last_update_frame
+            < self._hyperedge_assignment_hold_frames
+        )
+        if hold_active:
+            coverage = float(len({
+                target for _, _, target in held
+            }) / max(self.Q, 1))
+            self._hyperedge_metrics = {
+                **self._hyperedge_metrics,
+                'hyperedge_enabled': 1.0,
+                'hyperedge_active_edges': float(len(held)),
+                'hyperedge_target_coverage': coverage,
+                'hyperedge_protocol_used': 1.0,
+                'hyperedge_safety_fallback': 0.0,
+                'hyperedge_assignment_reused': 1.0,
+                'hyperedge_assignment_age_frames': float(
+                    self.t - self._hyperedge_last_update_frame),
+                'hyperedge_assignment_hold_frames': float(
+                    self._hyperedge_assignment_hold_frames),
+            }
+            self._last_isac_metrics.update(self._hyperedge_metrics)
+            return held
+
+        target_xy = np.asarray([
+            target.get_position_3d()[:2] for target in self.targets
+        ], dtype=np.float64)
         local_plans = []
         visible_peer_counts = []
         local_min_proxy = []
@@ -1969,6 +2010,8 @@ class EnvironmentCore:
             rx_capability = np.zeros((self.K, self.Q), dtype=np.float64)
             deficit = np.zeros((self.K, self.Q), dtype=np.float64)
             visible = np.zeros((self.K, self.Q), dtype=bool)
+            public_position = np.zeros(
+                (self.K, self.Q, 2), dtype=np.float64)
 
             tx_capability[viewer] = self._hyperedge_local_offer[
                 viewer, :, 0]
@@ -1976,6 +2019,13 @@ class EnvironmentCore:
                 viewer, :, 1]
             deficit[viewer] = self._hyperedge_local_offer[viewer, :, 2]
             visible[viewer] = True
+            if self._hyperedge_state_stream_enabled:
+                public_position[viewer, :, 0] = (
+                    self._hyperedge_local_offer[viewer, :, 3]
+                    * float(self.area_size[0]))
+                public_position[viewer, :, 1] = (
+                    self._hyperedge_local_offer[viewer, :, 4]
+                    * float(self.area_size[1]))
 
             received = (
                 self._hyperedge_received_last_seen[viewer] > -10**8)
@@ -1986,6 +2036,15 @@ class EnvironmentCore:
                 viewer, :, :, 1][received]
             deficit[received] = self._hyperedge_received_offer[
                 viewer, :, :, 2][received]
+            if self._hyperedge_state_stream_enabled:
+                public_position[:, :, 0][received] = (
+                    self._hyperedge_received_offer[
+                        viewer, :, :, 3][received]
+                    * float(self.area_size[0]))
+                public_position[:, :, 1][received] = (
+                    self._hyperedge_received_offer[
+                        viewer, :, :, 4][received]
+                    * float(self.area_size[1]))
             visible_peer_counts.append(float(np.sum(
                 np.any(received, axis=1))))
 
@@ -1996,6 +2055,15 @@ class EnvironmentCore:
             target_deficit[~np.isfinite(target_deficit)] = (
                 self._hyperedge_local_offer[viewer, :, 2][
                     ~np.isfinite(target_deficit)])
+            pair_value = None
+            if self._hyperedge_pair_score_mode == 'physical_reconstructable':
+                pair_value = reconstruct_bistatic_pair_value(
+                    tx_capability,
+                    public_position,
+                    target_xy,
+                    visible,
+                    distance_scale_m=self._hyperedge_distance_scale_m,
+                )
             plan = plan_local_hyperedges(
                 tx_capability,
                 rx_capability,
@@ -2004,7 +2072,7 @@ class EnvironmentCore:
                 target_pair_limit=int(self.cfg.detection.K_q_max),
                 deficit_gain=self._hyperedge_deficit_gain,
                 proxy_floor=self._hyperedge_proxy_floor,
-                pair_value=physical_pair_value,
+                pair_value=pair_value,
             )
             local_plans.append(plan)
             local_min_proxy.append(float(np.min(
@@ -2022,11 +2090,6 @@ class EnvironmentCore:
             consensus_rounds=self._hyperedge_consensus_rounds,
         )
 
-        physical_lookup = {
-            (int(entry.i), int(entry.j), int(entry.q))
-            for entry in physical_entries
-            if int(entry.i) != int(entry.j) and float(entry.d_eff) > 0.0
-        }
         active = tuple(
             edge for edge in stable if edge in physical_lookup)
         covered_targets = {target for _, _, target in active}
@@ -2039,6 +2102,8 @@ class EnvironmentCore:
         )
         selected = active if use_protocol else tuple()
         self._hyperedge_selected_set = selected
+        if use_protocol:
+            self._hyperedge_last_update_frame = int(self.t)
         self._hyperedge_metrics = {
             'hyperedge_enabled': 1.0,
             'hyperedge_visible_peers_per_uav': float(np.mean(
@@ -2052,6 +2117,10 @@ class EnvironmentCore:
             'hyperedge_protocol_used': float(use_protocol),
             'hyperedge_safety_fallback': float(
                 not use_protocol and self._hyperedge_safety_fallback),
+            'hyperedge_assignment_reused': 0.0,
+            'hyperedge_assignment_age_frames': 0.0,
+            'hyperedge_assignment_hold_frames': float(
+                self._hyperedge_assignment_hold_frames),
             'hyperedge_consensus_rounds': float(
                 self._hyperedge_consensus_rounds),
             'hyperedge_pair_score_mode': self._hyperedge_pair_score_mode,
@@ -3328,6 +3397,8 @@ class EnvironmentCore:
                 self._hyperedge_consensus_streak.copy()),
             'hyperedge_selected_set': tuple(
                 self._hyperedge_selected_set),
+            'hyperedge_last_update_frame': int(
+                self._hyperedge_last_update_frame),
             'hyperedge_metrics': copy.deepcopy(self._hyperedge_metrics),
             'pending_comm_power_fractions': dict(
                 self._pending_comm_power_fractions),
@@ -3489,6 +3560,8 @@ class EnvironmentCore:
         self._hyperedge_selected_set = tuple(
             tuple(int(value) for value in edge)
             for edge in state.get('hyperedge_selected_set', ()))
+        self._hyperedge_last_update_frame = int(state.get(
+            'hyperedge_last_update_frame', -10**9))
         self._hyperedge_metrics = copy.deepcopy(state.get(
             'hyperedge_metrics', {}))
         self._pending_comm_power_fractions = dict(

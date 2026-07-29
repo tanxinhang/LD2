@@ -1,0 +1,8 @@
+# Quantization control for Gate B2: retain receiver ownership, public protocol
+# state, one-round consensus, and five-frame hysteresis, but rank pairs from
+# bounded endpoint capability rather than coarse absolute-position recovery.
+extends: exp_800_q4_architecture_v2_hyperedge_gate.yaml
+
+marl:
+  hyperedge_consensus_rounds: 1
+  hyperedge_assignment_hold_frames: 5

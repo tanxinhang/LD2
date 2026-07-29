@@ -4762,6 +4762,7 @@ class MAPPTrainer:
         eval_hyperedge_target_coverage = []
         eval_hyperedge_protocol_used = []
         eval_hyperedge_safety_fallback = []
+        eval_hyperedge_assignment_reused = []
         eval_cacsr_gate_rate = []
         eval_cacsr_delta_abs = []
         eval_risk_residual_gate = []
@@ -5691,6 +5692,8 @@ class MAPPTrainer:
                             'hyperedge_protocol_used', 0.0)))
                         eval_hyperedge_safety_fallback.append(float(info.get(
                             'hyperedge_safety_fallback', 0.0)))
+                        eval_hyperedge_assignment_reused.append(float(info.get(
+                            'hyperedge_assignment_reused', 0.0)))
                     if (term.get('__all__', False)
                             or trunc.get('__all__', False)):
                         episode_done = True
@@ -6070,6 +6073,8 @@ class MAPPTrainer:
                 eval_hyperedge_protocol_used or [0.0])),
             'eval_hyperedge_safety_fallback_rate': float(np.mean(
                 eval_hyperedge_safety_fallback or [0.0])),
+            'eval_hyperedge_assignment_reuse_rate': float(np.mean(
+                eval_hyperedge_assignment_reused or [0.0])),
             'eval_cacsr_gate_rate': float(np.mean(
                 eval_cacsr_gate_rate or [0.0])),
             'eval_cacsr_delta_abs': float(np.mean(

@@ -27,6 +27,39 @@ class LocalHyperedgePlan:
     role_mask: np.ndarray
 
 
+def factorized_endpoint_capabilities(
+    distance_m: np.ndarray,
+    sensing_fraction: np.ndarray,
+    *,
+    distance_scale_m: float,
+    mode: str = "exponential",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Encode factorized bistatic Tx/Rx capability in bounded coordinates."""
+    distance = np.asarray(distance_m, dtype=np.float64)
+    sensing = np.asarray(sensing_fraction, dtype=np.float64)
+    if distance.shape != sensing.shape:
+        raise ValueError("distance and sensing_fraction must have equal shape")
+    if not (np.all(np.isfinite(distance)) and np.all(np.isfinite(sensing))):
+        raise ValueError("capability inputs must be finite")
+    scale = max(float(distance_scale_m), 1.0e-9)
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "exponential":
+        receive = np.exp(-np.maximum(distance, 0.0) / scale)
+    elif normalized_mode == "inverse_square":
+        ratio = np.maximum(distance, 0.0) / scale
+        receive = 1.0 / (1.0 + ratio ** 2)
+    else:
+        raise ValueError(
+            "capability mode must be exponential or inverse_square")
+    receive = np.clip(receive, 0.0, 1.0)
+    transmit = np.clip(
+        receive * np.sqrt(np.maximum(sensing, 0.0)),
+        0.0,
+        1.0,
+    )
+    return transmit, receive
+
+
 def encode_offer_stream(
     tx_capability: np.ndarray,
     rx_capability: np.ndarray,
@@ -52,6 +85,68 @@ def decode_offer_stream(stream: np.ndarray) -> np.ndarray:
     if not np.all(np.isfinite(encoded)):
         raise ValueError("offer stream must be finite")
     return np.clip(0.5 * (encoded + 1.0), 0.0, 1.0)
+
+
+def reconstruct_bistatic_pair_value(
+    tx_capability: np.ndarray,
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    visible: np.ndarray,
+    *,
+    distance_scale_m: float,
+) -> np.ndarray:
+    """Reconstruct normalized pair value from public, quantized local state.
+
+    No realized global deflection entry is used.  Mission target positions are
+    common knowledge; node positions and Tx capability must come from the
+    viewer's own public offer or an actually delivered neighbor offer.
+    """
+    tx_value = np.asarray(tx_capability, dtype=np.float64)
+    positions = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    seen = np.asarray(visible, dtype=bool)
+    if tx_value.ndim != 2:
+        raise ValueError("tx_capability must have shape (K, Q)")
+    k_count, q_count = tx_value.shape
+    if positions.shape != (k_count, q_count, 2):
+        raise ValueError("node_positions_xy must have shape (K, Q, 2)")
+    if targets.shape != (q_count, 2):
+        raise ValueError("target_positions_xy must have shape (Q, 2)")
+    if seen.shape != (k_count, q_count):
+        raise ValueError("visible must have shape (K, Q)")
+    if not (np.all(np.isfinite(tx_value))
+            and np.all(np.isfinite(positions))
+            and np.all(np.isfinite(targets))):
+        raise ValueError("public reconstruction inputs must be finite")
+
+    scale = max(float(distance_scale_m), 1.0e-9)
+    pair_value = np.zeros((k_count, k_count, q_count), dtype=np.float64)
+    for target in range(q_count):
+        ranges = np.linalg.norm(
+            positions[:, target] - targets[target], axis=-1)
+        for tx in range(k_count):
+            if not seen[tx, target]:
+                continue
+            tx_range = max(float(ranges[tx]), 1.0)
+            geometry_proxy = np.exp(-tx_range / scale)
+            estimated_power = np.clip(
+                float(tx_value[tx, target])
+                / max(float(geometry_proxy), 1.0e-9),
+                0.0,
+                1.0,
+            ) ** 2
+            for rx in range(k_count):
+                if tx == rx or not seen[rx, target]:
+                    continue
+                rx_range = max(float(ranges[rx]), 1.0)
+                pair_value[tx, rx, target] = (
+                    estimated_power
+                    / (tx_range ** 2 * rx_range ** 2)
+                )
+        target_max = float(np.max(pair_value[:, :, target]))
+        if target_max > 0.0:
+            pair_value[:, :, target] /= target_max
+    return pair_value
 
 
 def _edge_score(

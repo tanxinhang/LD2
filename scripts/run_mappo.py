@@ -634,12 +634,15 @@ def main():
             "enabled": config.marl.hyperedge_negotiation_enabled,
             "share_topk": config.marl.hyperedge_share_topk,
             "distance_scale_m": config.marl.hyperedge_distance_scale_m,
+            "capability_mode": config.marl.hyperedge_capability_mode,
             "deficit_gain": config.marl.hyperedge_deficit_gain,
             "proxy_floor": config.marl.hyperedge_proxy_floor,
             "pair_score_mode": config.marl.hyperedge_pair_score_mode,
             "state_stream_enabled": (
                 config.marl.hyperedge_state_stream_enabled),
             "consensus_rounds": config.marl.hyperedge_consensus_rounds,
+            "assignment_hold_frames": (
+                config.marl.hyperedge_assignment_hold_frames),
             "min_target_coverage": (
                 config.marl.hyperedge_min_target_coverage),
             "safety_fallback_enabled": (

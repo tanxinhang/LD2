@@ -274,11 +274,13 @@ class MARLParams:
     hyperedge_negotiation_enabled: bool = False
     hyperedge_share_topk: int = 4
     hyperedge_distance_scale_m: float = 150.0
+    hyperedge_capability_mode: str = "exponential"
     hyperedge_deficit_gain: float = 2.0
     hyperedge_proxy_floor: float = 0.25
     hyperedge_pair_score_mode: str = "endpoint_proxy"
     hyperedge_state_stream_enabled: bool = False
     hyperedge_consensus_rounds: int = 2
+    hyperedge_assignment_hold_frames: int = 1
     hyperedge_min_target_coverage: float = 1.0
     hyperedge_safety_fallback_enabled: bool = True
     # Diagnostic architecture gate: replace the average-utility greedy P0 with

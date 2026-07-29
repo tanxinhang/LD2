@@ -546,3 +546,26 @@ complete physical candidate graph.  Its proper role is to supervise and bound
 a Token-constrained approximation with three explicit states: receiver
 ownership, single-role endpoint prices, and switch hysteresis.  Treating the
 teacher itself as the paper's distributed contribution would be incorrect.
+
+## Distributed receiver-owner Gate B2
+
+After freezing the teacher, a stricter distributed approximation was tested.
+Every node ranked edges only from its own public quantized offer, actually
+delivered neighbor offers, and mission-known target positions.  The true
+physical table was used only to reject infeasible execution edges, never as a
+score.  Receiver ownership and a five-frame hold were explicit.
+
+| Two-seed protocol | steady | weak3 | worst | coverage | bit/frame |
+|---|---:|---:|---:|---:|---:|
+| Matched frozen baseline | 0.756 | 0.675 | **0.398** | -- | 768 |
+| 4-bit absolute-position reconstruction | 0.751 | 0.668 | 0.070 | 0.979 | 1728 |
+| Exponential endpoint proxy | 0.798 | 0.731 | 0.341 | 0.958 | 1467 |
+| Factorized inverse-square capability | **0.832** | **0.776** | 0.344 | **0.991** | 1472 |
+
+The absolute-position version fails because four-bit coordinates over 800 m
+have roughly 53 m resolution.  Factorized capability removes this
+quantization pathology and improves mean metrics, yet its episode worst values
+are `0.094/0.594`: one target can still starve despite almost complete graph
+coverage and assignment reuse near 0.75.  Gate B2 therefore stops before ten
+seeds.  The remaining missing state is a target-deficit price shared across
+nodes, not more Token dimensions or another distance-scale sweep.

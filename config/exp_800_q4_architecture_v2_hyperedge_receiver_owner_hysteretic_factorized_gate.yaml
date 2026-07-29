@@ -1,0 +1,7 @@
+# Factorized low-bit protocol: Tx and Rx fields approximate the two one-way
+# inverse-square factors of bistatic deflection, avoiding absolute-position
+# transmission while preserving receiver ownership and five-frame hysteresis.
+extends: exp_800_q4_architecture_v2_hyperedge_receiver_owner_hysteretic_proxy_gate.yaml
+
+marl:
+  hyperedge_capability_mode: inverse_square

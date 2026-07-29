@@ -4,8 +4,10 @@ from config.params import load_config
 from uav_isac.coordination.hyperedge import (
     decode_offer_stream,
     encode_offer_stream,
+    factorized_endpoint_capabilities,
     mutual_endpoint_consensus,
     plan_local_hyperedges,
+    reconstruct_bistatic_pair_value,
     update_consensus_streak,
 )
 from uav_isac.environment.env_wrapper import UAVISACEnv
@@ -28,6 +30,53 @@ def test_offer_stream_round_trip_is_bounded():
     np.testing.assert_allclose(decoded[:, 0], np.clip(tx, 0.0, 1.0))
     np.testing.assert_allclose(decoded[:, 1], np.clip(rx, 0.0, 1.0))
     np.testing.assert_allclose(decoded[:, 2], np.clip(gap, 0.0, 1.0))
+
+
+def test_inverse_square_endpoint_capability_is_bounded_and_physical():
+    distance = np.array([50.0, 150.0, 300.0])
+    sensing = np.array([0.25, 0.25, 0.25])
+    tx, rx = factorized_endpoint_capabilities(
+        distance,
+        sensing,
+        distance_scale_m=150.0,
+        mode="inverse_square",
+    )
+    assert np.all((0.0 <= tx) & (tx <= 1.0))
+    assert np.all((0.0 <= rx) & (rx <= 1.0))
+    assert rx[0] > rx[1] > rx[2]
+    np.testing.assert_allclose(tx, 0.5 * rx)
+
+
+def test_public_state_pair_reconstruction_needs_visible_endpoints():
+    tx = np.full((3, 1), 0.8)
+    positions = np.array([
+        [[10.0, 0.0]],
+        [[90.0, 0.0]],
+        [[50.0, 0.0]],
+    ])
+    targets = np.array([[0.0, 0.0]])
+    visible = np.ones((3, 1), dtype=bool)
+    value = reconstruct_bistatic_pair_value(
+        tx,
+        positions,
+        targets,
+        visible,
+        distance_scale_m=150.0,
+    )
+    assert value.shape == (3, 3, 1)
+    assert np.max(value) == 1.0
+    assert value[0, 2, 0] > value[1, 2, 0]
+
+    visible[0, 0] = False
+    masked = reconstruct_bistatic_pair_value(
+        tx,
+        positions,
+        targets,
+        visible,
+        distance_scale_m=150.0,
+    )
+    np.testing.assert_allclose(masked[0, :, 0], 0.0)
+    np.testing.assert_allclose(masked[:, 0, 0], 0.0)
 
 
 def test_local_plan_enforces_directed_single_roles_and_target_capacity():
@@ -221,6 +270,7 @@ def test_hyperedge_snapshot_restore_is_exact():
     core._hyperedge_received_last_seen[:] = 3
     core._hyperedge_consensus_streak[0, 1, 0] = 2
     core._hyperedge_selected_set = ((0, 1, 0),)
+    core._hyperedge_last_update_frame = 7
     snapshot = core.get_state()
 
     core._hyperedge_local_offer[:] = 0.0
@@ -228,6 +278,7 @@ def test_hyperedge_snapshot_restore_is_exact():
     core._hyperedge_received_last_seen[:] = -99
     core._hyperedge_consensus_streak[:] = 0
     core._hyperedge_selected_set = tuple()
+    core._hyperedge_last_update_frame = -99
     core.set_state(snapshot)
 
     np.testing.assert_allclose(
@@ -243,3 +294,4 @@ def test_hyperedge_snapshot_restore_is_exact():
         core._hyperedge_consensus_streak,
         snapshot['hyperedge_consensus_streak'])
     assert core._hyperedge_selected_set == ((0, 1, 0),)
+    assert core._hyperedge_last_update_frame == 7

@@ -110,11 +110,13 @@ marl:
   hyperedge_negotiation_enabled: false
   hyperedge_share_topk: 4
   hyperedge_distance_scale_m: 150.0
+  hyperedge_capability_mode: exponential
   hyperedge_deficit_gain: 2.0
   hyperedge_proxy_floor: 0.25
   hyperedge_pair_score_mode: endpoint_proxy
   hyperedge_state_stream_enabled: false
   hyperedge_consensus_rounds: 2
+  hyperedge_assignment_hold_frames: 1
   hyperedge_min_target_coverage: 1.0
   hyperedge_safety_fallback_enabled: true
   p0_maxmin_pairing_enabled: false

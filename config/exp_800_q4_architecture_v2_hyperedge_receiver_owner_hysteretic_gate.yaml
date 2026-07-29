@@ -1,0 +1,9 @@
+# Distributed Gate B2: every node reconstructs pair values only from its own
+# public quantized offer, actually delivered neighbor offers, and mission-known
+# target positions. Receiver ownership is explicit and assignments are held for
+# five frames to suppress role churn.
+extends: exp_800_q4_architecture_v2_hyperedge_physical_gate.yaml
+
+marl:
+  hyperedge_consensus_rounds: 1
+  hyperedge_assignment_hold_frames: 5
