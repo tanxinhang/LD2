@@ -1,0 +1,29 @@
+# Three-update admission gate for CTDE slow-intent distillation. Main PPO and
+# the shared physical/sensing representation remain frozen; only the bounded
+# V2 assignment/movement and message coordination heads are optimized.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  lr: 0.0
+  num_episodes: 3
+  eval_interval: 1
+  eval_episodes: 2
+  checkpoint_confirmation_enabled: false
+
+  target_allocation_teacher_enabled: true
+  target_allocation_teacher_mode: qos_bistatic
+  target_allocation_teacher_label_coef: 1.0
+  target_allocation_teacher_movement_coef: 0.5
+  target_allocation_teacher_message_coef: 0.0
+  target_allocation_teacher_epochs: 2
+  target_allocation_teacher_differentiable_comm: true
+  target_allocation_teacher_switching_penalty_m: 75.0
+  target_allocation_teacher_qos_floor: 0.60
+  target_allocation_teacher_qos_weight: 2.0
+  target_allocation_teacher_commitment_frames: 5
+  target_allocation_aux_lr: 0.00005
+
+  distributed_target_commitment_source: sensing_power
+  architecture_v2_sensing_aligned_claims_enabled: false
+  target_allocation_aux_epochs: 0
+  comm_rate_bonus_aux_coef: 0.0

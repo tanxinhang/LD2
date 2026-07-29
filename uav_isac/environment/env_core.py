@@ -14,11 +14,12 @@ Step pipeline:
 """
 
 import copy
+import time
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
-from uav_isac.utils.types import Action, UAVState, TargetState
+from uav_isac.utils.types import Action, P0Solution, UAVState, TargetState
 from uav_isac.environment.uav import UAV
 from uav_isac.environment.target import Target
 from uav_isac.environment.belief import BeliefManager
@@ -31,7 +32,13 @@ from uav_isac.environment.reward import (
 from uav_isac.environment.constraints import ConstraintChecker
 from uav_isac.physical.deflection import DeflectionComputer
 from uav_isac.physical.inner_solver import InnerSolver
-from uav_isac.physical.detection import compute_detection_probabilities
+from uav_isac.physical.detection import (
+    compute_detection_probabilities,
+    compute_target_utilities,
+)
+from uav_isac.physical.feasibility_oracle import (
+    solve_maxmin_single_role_pairs,
+)
 from uav_isac.physical.evidence import (
     DETECTION_FUSION_MODES,
     DeflectionConfidenceQuantizer,
@@ -46,6 +53,17 @@ from uav_isac.environment.communication import (
     CommunicationStepStats,
     InterUAVCommunicationModel,
 )
+from uav_isac.coordination.qpd import (
+    local_primal_dual_update,
+    update_virtual_queue,
+)
+from uav_isac.coordination.hyperedge import (
+    decode_offer_stream,
+    encode_offer_stream,
+    mutual_endpoint_consensus,
+    plan_local_hyperedges,
+    update_consensus_streak,
+)
 
 
 def filter_deflection_by_local_commitments(
@@ -56,6 +74,7 @@ def filter_deflection_by_local_commitments(
     mode: str = 'hard',
     soft_floor: float = 0.25,
     uncertainty_relief: float = 1.0,
+    commitment_mask: Optional[np.ndarray] = None,
 ) -> Tuple[list, Dict[str, object]]:
     """Apply local UAV commitments to the P0 candidate graph.
 
@@ -91,10 +110,18 @@ def filter_deflection_by_local_commitments(
             'learned_comm_commitment_mode': mode,
         }
     k_eff = int(np.clip(topk, 1, Q))
-    committed = np.zeros((K, Q), dtype=bool)
-    order = np.argsort(-power, axis=1, kind='stable')
-    rows = np.arange(K)[:, None]
-    committed[rows, order[:, :k_eff]] = True
+    if commitment_mask is None:
+        committed = np.zeros((K, Q), dtype=bool)
+        order = np.argsort(-power, axis=1, kind='stable')
+        rows = np.arange(K)[:, None]
+        committed[rows, order[:, :k_eff]] = True
+    else:
+        explicit = np.asarray(commitment_mask)
+        if explicit.shape != (K, Q):
+            raise ValueError(
+                'commitment_mask must have the same (num_uavs, '
+                'num_targets) shape as sensing_power_w')
+        committed = explicit > 0.5
 
     ranked = []
     gates = []
@@ -164,6 +191,8 @@ def filter_deflection_by_local_commitments(
         'learned_comm_commitment_hard_target_coverage': float(
             len(hard_covered_targets) / Q),
         'learned_comm_commitment_topk': int(k_eff),
+        'learned_comm_commitment_claims_per_uav': float(np.mean(
+            committed.sum(axis=1))),
         'learned_comm_commitment_require_receiver': bool(require_receiver),
         'learned_comm_commitment_mode': mode,
         'learned_comm_commitment_soft_gate_mean': float(np.mean(
@@ -197,6 +226,8 @@ class StepInfo:
     valid_pair: bool = False                 # P0 selected >=1 bistatic pair -> sensing happened
     no_tx: bool = False                      # zero TX this frame (no sensing possible)
     all_same_role: bool = False              # all K UAVs picked the same role (degenerate)
+    p0_resolved: bool = False
+    p0_solve_time_s: float = 0.0
     learned_comm: Optional[Dict[str, object]] = None
     reward_components: Optional[Dict[str, float]] = None
 
@@ -434,6 +465,143 @@ class EnvironmentCore:
                 self.cfg.marl,
                 'distributed_target_commitment_uncertainty_relief', 1.0),
                 0.0, 1.0))
+        self._distributed_target_commitment_source = str(getattr(
+            self.cfg.marl,
+            'distributed_target_commitment_source',
+            'sensing_power')).strip().lower()
+        if self._distributed_target_commitment_source not in {
+                'sensing_power', 'persistent_sensing', 'sent_token', 'qpd'}:
+            raise ValueError(
+                'distributed_target_commitment_source must be '
+                'sensing_power, persistent_sensing, sent_token or qpd')
+        self._distributed_target_commitment_min_hold_frames = max(
+            0, int(getattr(
+                self.cfg.marl,
+                'distributed_target_commitment_min_hold_frames', 0)))
+        self._distributed_target_commitment_handover_frames = max(
+            0, int(getattr(
+                self.cfg.marl,
+                'distributed_target_commitment_handover_frames', 0)))
+        self._distributed_target_commitment_max_age_frames = max(
+            1, int(getattr(
+                self.cfg.marl,
+                'distributed_target_commitment_max_age_frames',
+                getattr(self.cfg.marl, 'comm_message_ttl_frames', 5))))
+        self._qpd_enabled = bool(getattr(ma, 'qpd_isac_enabled', False))
+        self._qpd_qos_floor = float(np.clip(getattr(
+            ma, 'qpd_qos_floor', 0.60), 0.0, 1.0))
+        self._qpd_queue_step = max(
+            0.0, float(getattr(ma, 'qpd_queue_step', 0.25)))
+        self._qpd_queue_max = max(
+            1e-6, float(getattr(ma, 'qpd_queue_max', 4.0)))
+        self._qpd_primal_step = max(
+            0.0, float(getattr(ma, 'qpd_primal_step', 1.0)))
+        self._qpd_dual_step = max(
+            0.0, float(getattr(ma, 'qpd_dual_step', 0.25)))
+        self._qpd_rounds = max(1, int(getattr(ma, 'qpd_rounds', 2)))
+        self._qpd_row_capacity = float(np.clip(
+            getattr(ma, 'qpd_row_capacity', 2.0), 0.0, max(self.Q, 1)))
+        self._qpd_target_capacity = max(
+            0.0, float(getattr(ma, 'qpd_target_capacity', 2.0)))
+        self._qpd_price_max = max(
+            1e-6, float(getattr(ma, 'qpd_price_max', 4.0)))
+        self._qpd_primal_exploration_floor = max(
+            0.0, float(getattr(
+                ma, 'qpd_primal_exploration_floor', 0.02)))
+        self._qpd_peer_deficit_gain = max(
+            0.0, float(getattr(ma, 'qpd_peer_deficit_gain', 2.0)))
+        self._qpd_send_threshold = max(
+            0.0, float(getattr(ma, 'qpd_send_threshold', 0.05)))
+        self._qpd_bid_change_weight = max(
+            0.0, float(getattr(ma, 'qpd_bid_change_weight', 1.0)))
+        self._qpd_power_cost = max(
+            0.0, float(getattr(ma, 'qpd_power_cost', 0.02)))
+        self._qpd_comm_cost = max(
+            0.0, float(getattr(ma, 'qpd_comm_cost', 0.01)))
+        self._qpd_switch_cost = max(
+            0.0, float(getattr(ma, 'qpd_switch_cost', 0.02)))
+        self._qpd_distance_scale_m = max(1e-6, float(getattr(
+            ma, 'qpd_capability_distance_scale_m', 150.0)))
+        self._qpd_commitment_threshold = float(np.clip(getattr(
+            ma, 'qpd_commitment_threshold', 0.25), 0.0, 1.0))
+        self._qpd_override_token_mask = bool(getattr(
+            ma, 'qpd_override_token_mask', True))
+        self._qpd_overwrite_protocol_header = bool(getattr(
+            ma, 'qpd_overwrite_protocol_header', True))
+        self._qpd_override_sensing_weights = bool(getattr(
+            ma, 'qpd_override_sensing_weights', True))
+        self._hyperedge_enabled = bool(getattr(
+            ma, 'hyperedge_negotiation_enabled', False))
+        self._hyperedge_share_topk = max(1, min(
+            self.Q, int(getattr(ma, 'hyperedge_share_topk', self.Q))))
+        self._hyperedge_distance_scale_m = max(1e-6, float(getattr(
+            ma, 'hyperedge_distance_scale_m', 150.0)))
+        self._hyperedge_deficit_gain = max(0.0, float(getattr(
+            ma, 'hyperedge_deficit_gain', 2.0)))
+        self._hyperedge_proxy_floor = max(1e-9, float(getattr(
+            ma, 'hyperedge_proxy_floor', 0.25)))
+        self._hyperedge_pair_score_mode = str(getattr(
+            ma, 'hyperedge_pair_score_mode',
+            'endpoint_proxy')).strip().lower()
+        if self._hyperedge_pair_score_mode not in {
+                'endpoint_proxy', 'physical_reconstructable'}:
+            raise ValueError(
+                'hyperedge_pair_score_mode must be endpoint_proxy or '
+                'physical_reconstructable')
+        self._hyperedge_state_stream_enabled = bool(getattr(
+            ma, 'hyperedge_state_stream_enabled', False))
+        self._hyperedge_protocol_dim = (
+            7 if self._hyperedge_state_stream_enabled else 3)
+        self._hyperedge_consensus_rounds = max(1, int(getattr(
+            ma, 'hyperedge_consensus_rounds', 2)))
+        self._hyperedge_min_target_coverage = float(np.clip(getattr(
+            ma, 'hyperedge_min_target_coverage', 1.0), 0.0, 1.0))
+        self._hyperedge_safety_fallback = bool(getattr(
+            ma, 'hyperedge_safety_fallback_enabled', True))
+        if self._qpd_enabled:
+            if self._comm_mode != 'cost_aware':
+                raise ValueError('QPD-ISAC requires cost-aware communication')
+            if not self._joint_isac_power_enabled:
+                raise ValueError('QPD-ISAC requires joint ISAC power')
+            if self._comm_payload_mode != 'target_tokens':
+                raise ValueError('QPD-ISAC requires target-token payloads')
+            if self._comm_target_token_dim < 5:
+                raise ValueError(
+                    'QPD-ISAC protocol header requires >=5 dimensions/token')
+            if not self._distributed_target_commitment_enabled:
+                raise ValueError(
+                    'QPD-ISAC requires distributed target commitments')
+            if self._distributed_target_commitment_source != 'qpd':
+                raise ValueError(
+                    'QPD-ISAC requires commitment source=qpd')
+        if self._hyperedge_enabled:
+            if self._qpd_enabled:
+                raise ValueError(
+                    'hyperedge negotiation and QPD cannot be enabled together')
+            if self._comm_mode != 'cost_aware':
+                raise ValueError(
+                    'hyperedge negotiation requires cost-aware communication')
+            if not self._joint_isac_power_enabled:
+                raise ValueError(
+                    'hyperedge negotiation requires joint ISAC power')
+            if self._comm_payload_mode != 'target_tokens':
+                raise ValueError(
+                    'hyperedge negotiation requires target-token payloads')
+            if (self._hyperedge_pair_score_mode == 'physical_reconstructable'
+                    and not self._hyperedge_state_stream_enabled):
+                raise ValueError(
+                    'physical-reconstructable hyperedge scores require the '
+                    'position/velocity state stream')
+        self._p0_maxmin_pairing_enabled = bool(getattr(
+            ma, "p0_maxmin_pairing_enabled", False))
+        self._p0_maxmin_bypass_commitment_filter = bool(getattr(
+            ma, "p0_maxmin_bypass_commitment_filter", False))
+        self._p0_maxmin_pairing_hold_frames = max(1, int(getattr(
+            ma, "p0_maxmin_pairing_hold_frames", 1)))
+        self._p0_maxmin_local_fusion_enabled = bool(getattr(
+            ma, "p0_maxmin_local_fusion_enabled", False))
+        self._p0_maxmin_event_triggered_enabled = bool(getattr(
+            ma, "p0_maxmin_event_triggered_enabled", False))
         if (self._distributed_target_commitment_enabled
                 and not self._joint_isac_power_enabled):
             raise ValueError(
@@ -488,6 +656,7 @@ class EnvironmentCore:
         self._cached_p0_solution = None
         self._last_solve_frame = -1
         self._assignment_switched = False
+        self._last_p0_solve_time_s = 0.0
         self._prev_obs: Dict[int, np.ndarray] = {}  # per-agent previous obs for history stack
         self._comm_msgs: Dict[int, np.ndarray] = {}  # per-agent latent payloads
         # Cost-aware learned communication uses explicit outbound actions and a
@@ -498,6 +667,62 @@ class EnvironmentCore:
         self._pending_comm_token_masks: Dict[int, np.ndarray] = {}
         self._last_sent_comm_token_masks: Dict[int, np.ndarray] = {}
         self._last_sent_comm_target_claims: Dict[int, np.ndarray] = {}
+        self._persistent_commitment_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_old_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_last_switch = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._persistent_commitment_last_seen = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._persistent_commitment_handover_remaining = np.zeros(
+            self.K, dtype=np.int64)
+        self._persistent_commitment_effective_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_resolved_frame = -1
+        self._persistent_commitment_metrics: Dict[str, object] = {}
+        self._qpd_queue = np.zeros((self.K, self.Q), dtype=np.float64)
+        self._qpd_previous_queue = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_bid = np.zeros((self.K, self.Q), dtype=np.float64)
+        self._qpd_previous_bid = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        initial_qpd = min(
+            1.0, self._qpd_row_capacity / max(self.Q, 1))
+        self._qpd_primal = np.full(
+            (self.K, self.Q), initial_qpd, dtype=np.float64)
+        self._qpd_previous_primal = self._qpd_primal.copy()
+        self._qpd_target_price = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_capability = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_age = np.zeros((self.K, self.Q), dtype=np.int64)
+        self._qpd_send_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._pending_qpd_protocol: Dict[int, np.ndarray] = {}
+        self._qpd_commitment_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._qpd_received_primal = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._qpd_received_queue = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._qpd_received_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._qpd_metrics: Dict[str, object] = {}
+        self._qpd_last_submission_frame = -1
+        self._pending_hyperedge_protocol: Dict[int, np.ndarray] = {}
+        self._hyperedge_local_offer = np.zeros(
+            (self.K, self.Q, self._hyperedge_protocol_dim),
+            dtype=np.float64)
+        self._hyperedge_received_offer = np.zeros(
+            (self.K, self.K, self.Q, self._hyperedge_protocol_dim),
+            dtype=np.float64)
+        self._hyperedge_received_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._hyperedge_consensus_streak = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int64)
+        self._hyperedge_selected_set: Tuple[Tuple[int, int, int], ...] = tuple()
+        self._hyperedge_metrics: Dict[str, object] = {}
         self._pending_comm_power_fractions: Dict[int, float] = {}
         self._pending_sensing_weights: Dict[int, np.ndarray] = {}
         self._current_comm_power_w = np.zeros(self.K, dtype=np.float64)
@@ -632,6 +857,62 @@ class EnvironmentCore:
         self._pending_comm_token_masks = {}
         self._last_sent_comm_token_masks = {}
         self._last_sent_comm_target_claims = {}
+        self._persistent_commitment_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_old_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_last_switch = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._persistent_commitment_last_seen = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._persistent_commitment_handover_remaining = np.zeros(
+            self.K, dtype=np.int64)
+        self._persistent_commitment_effective_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._persistent_commitment_resolved_frame = -1
+        self._persistent_commitment_metrics = {}
+        self._qpd_queue = np.zeros((self.K, self.Q), dtype=np.float64)
+        self._qpd_previous_queue = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_bid = np.zeros((self.K, self.Q), dtype=np.float64)
+        self._qpd_previous_bid = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        initial_qpd = min(
+            1.0, self._qpd_row_capacity / max(self.Q, 1))
+        self._qpd_primal = np.full(
+            (self.K, self.Q), initial_qpd, dtype=np.float64)
+        self._qpd_previous_primal = self._qpd_primal.copy()
+        self._qpd_target_price = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_capability = np.zeros(
+            (self.K, self.Q), dtype=np.float64)
+        self._qpd_age = np.zeros((self.K, self.Q), dtype=np.int64)
+        self._qpd_send_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._pending_qpd_protocol = {}
+        self._qpd_commitment_mask = np.zeros(
+            (self.K, self.Q), dtype=bool)
+        self._qpd_received_primal = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._qpd_received_queue = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._qpd_received_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._qpd_metrics = {}
+        self._qpd_last_submission_frame = -1
+        self._pending_hyperedge_protocol = {}
+        self._hyperedge_local_offer = np.zeros(
+            (self.K, self.Q, self._hyperedge_protocol_dim),
+            dtype=np.float64)
+        self._hyperedge_received_offer = np.zeros(
+            (self.K, self.K, self.Q, self._hyperedge_protocol_dim),
+            dtype=np.float64)
+        self._hyperedge_received_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._hyperedge_consensus_streak = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int64)
+        self._hyperedge_selected_set = tuple()
+        self._hyperedge_metrics = {}
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
         self._current_comm_power_w = np.zeros(self.K, dtype=np.float64)
@@ -835,6 +1116,8 @@ class EnvironmentCore:
                     f'token mask for UAV {k} must have shape {(self.Q,)}')
             self._pending_comm_token_masks[int(k)] = (
                 mask > 0.5).astype(np.float64)
+        if self._qpd_enabled:
+            self._prepare_qpd_submission()
         if self._joint_isac_power_enabled:
             fractions = comm_power_fractions or {}
             weights = sensing_target_weights or {}
@@ -846,8 +1129,20 @@ class EnvironmentCore:
             }
             self._pending_sensing_weights = {}
             for k in range(self.K):
-                w = np.asarray(weights.get(
-                    k, np.ones(self.Q, dtype=np.float64)), dtype=np.float64)
+                if self._qpd_enabled and self._qpd_override_sensing_weights:
+                    # The optimizer changes only the target split.  The
+                    # actor's communication fraction remains intact in this
+                    # mechanism-only gate, and the exact 1 W projection below
+                    # still owns the comm/sensing total.
+                    qpd_weight = (
+                        np.maximum(self._qpd_primal[k], 0.0)
+                        * np.maximum(self._qpd_capability[k], 1e-6)
+                    )
+                    w = np.asarray(qpd_weight, dtype=np.float64)
+                else:
+                    w = np.asarray(weights.get(
+                        k, np.ones(self.Q, dtype=np.float64)),
+                        dtype=np.float64)
                 if w.shape != (self.Q,):
                     raise ValueError(
                         f'sensing weights for UAV {k} must have shape {(self.Q,)}')
@@ -856,6 +1151,301 @@ class EnvironmentCore:
                 self._pending_sensing_weights[k] = (
                     w / total if total > 1e-12
                     else np.full(self.Q, 1.0 / max(self.Q, 1)))
+        if self._hyperedge_enabled:
+            self._prepare_hyperedge_submission()
+
+    def _prepare_hyperedge_submission(self) -> None:
+        """Append a physically charged local Tx/Rx/deficit offer stream."""
+        if len(self.uavs) != self.K or len(self.targets) != self.Q:
+            return
+        uav_xy = np.asarray([uav.pos[:2] for uav in self.uavs])
+        target_xy = np.asarray([
+            target.get_position_3d()[:2] for target in self.targets])
+        distance = np.linalg.norm(
+            uav_xy[:, None, :] - target_xy[None, :, :], axis=-1)
+        geometry = np.exp(-distance / self._hyperedge_distance_scale_m)
+
+        self._pending_hyperedge_protocol = {}
+        for sender in range(self.K):
+            comm_fraction = float(self._pending_comm_power_fractions.get(
+                sender, 0.0))
+            sensing_weights = np.asarray(
+                self._pending_sensing_weights.get(
+                    sender, np.full(self.Q, 1.0 / max(self.Q, 1))),
+                dtype=np.float64,
+            )
+            # Tx capability includes the sender's actual remaining sensing
+            # fraction and target split. Rx capability is geometric because
+            # receive participation does not emit sensing RF power.
+            tx_capability = np.clip(
+                geometry[sender]
+                * np.sqrt(np.maximum(
+                    (1.0 - comm_fraction) * sensing_weights, 0.0)),
+                0.0,
+                1.0,
+            )
+            rx_capability = np.clip(geometry[sender], 0.0, 1.0)
+            local_pd = np.asarray(
+                self.prev_P_D_local.get(
+                    sender, np.zeros(self.Q, dtype=np.float64)),
+                dtype=np.float64,
+            )
+            if local_pd.shape != (self.Q,):
+                local_pd = np.zeros(self.Q, dtype=np.float64)
+            deficit = np.clip(1.0 - local_pd, 0.0, 1.0)
+            decoded = np.stack(
+                [tx_capability, rx_capability, deficit], axis=-1)
+            encoded = encode_offer_stream(
+                tx_capability, rx_capability, deficit)
+            if self._hyperedge_state_stream_enabled:
+                width = max(float(self.area_size[0]), 1e-9)
+                height = max(float(self.area_size[1]), 1e-9)
+                speed = max(float(self.cfg.uav.v_max), 1e-9)
+                state_normalized = np.array([
+                    np.clip(self.uavs[sender].pos[0] / width, 0.0, 1.0),
+                    np.clip(self.uavs[sender].pos[1] / height, 0.0, 1.0),
+                    np.clip(
+                        0.5 * (self.uavs[sender].vel[0] / speed + 1.0),
+                        0.0, 1.0),
+                    np.clip(
+                        0.5 * (self.uavs[sender].vel[1] / speed + 1.0),
+                        0.0, 1.0),
+                ], dtype=np.float64)
+                repeated_state = np.repeat(
+                    state_normalized[None, :], self.Q, axis=0)
+                decoded = np.concatenate(
+                    [decoded, repeated_state], axis=-1)
+                encoded = np.concatenate(
+                    [encoded, 2.0 * repeated_state - 1.0], axis=-1)
+            self._hyperedge_local_offer[sender] = decoded
+            self._pending_hyperedge_protocol[sender] = encoded
+
+            priority = deficit * np.maximum(
+                tx_capability, rx_capability)
+            order = np.argsort(-priority, kind='stable')
+            mask = np.zeros(self.Q, dtype=np.float64)
+            mask[order[:self._hyperedge_share_topk]] = 1.0
+            self._pending_comm_token_masks[sender] = mask
+
+    def _decode_hyperedge_packet(
+        self,
+        protocol: np.ndarray,
+        token_mask: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        stream = np.asarray(protocol, dtype=np.float64).reshape(
+            self.Q, self._hyperedge_protocol_dim)
+        active = (
+            np.ones(self.Q, dtype=bool)
+            if token_mask is None
+            else np.asarray(token_mask, dtype=np.float64).reshape(-1) > 0.5
+        )
+        decoded = decode_offer_stream(stream[:, :3])
+        if self._hyperedge_state_stream_enabled:
+            decoded = np.concatenate([
+                decoded,
+                np.clip(0.5 * (stream[:, 3:] + 1.0), 0.0, 1.0),
+            ], axis=-1)
+        return decoded, active
+
+    def _merge_received_hyperedge_packet(
+        self,
+        receiver: int,
+        sender: int,
+        protocol: np.ndarray,
+        token_mask: Optional[np.ndarray],
+    ) -> None:
+        decoded, active = self._decode_hyperedge_packet(
+            protocol, token_mask)
+        self._hyperedge_received_offer[
+            int(receiver), int(sender), active] = decoded[active]
+        self._hyperedge_received_last_seen[
+            int(receiver), int(sender), active] = self.t
+
+    def _prepare_qpd_submission(self) -> None:
+        """Build the local QPD control plane before physical transmission.
+
+        Five coordinates of each transmitted target token are the actual
+        protocol header ``[queue, bid, capability, primal, age]``.  They pass
+        through the same quantizer, sparse mask, channel and delay model as the
+        learned latent coordinates; no free side channel is introduced.
+        """
+        if self._qpd_last_submission_frame == self.t:
+            return
+        self._qpd_last_submission_frame = self.t
+        if len(self.uavs) != self.K or len(self.targets) != self.Q:
+            return
+
+        local_pd = np.zeros((self.K, self.Q), dtype=np.float64)
+        for k in range(self.K):
+            value = np.asarray(
+                self.prev_P_D_local.get(k, np.zeros(self.Q)),
+                dtype=np.float64,
+            ).reshape(-1)
+            if value.shape == (self.Q,):
+                local_pd[k] = np.clip(value, 0.0, 1.0)
+
+        self._qpd_previous_queue = self._qpd_queue.copy()
+        self._qpd_previous_bid = self._qpd_bid.copy()
+        for k in range(self.K):
+            self._qpd_queue[k] = update_virtual_queue(
+                self._qpd_queue[k],
+                local_pd[k],
+                self._qpd_qos_floor,
+                self._qpd_queue_step,
+                self._qpd_queue_max,
+            )
+        safe = local_pd >= self._qpd_qos_floor
+        self._qpd_age = np.where(safe, 0, self._qpd_age + 1)
+
+        uav_xy = np.asarray([u.pos[:2] for u in self.uavs])
+        target_xy = np.asarray([
+            target.get_position_3d()[:2] for target in self.targets])
+        distances = np.linalg.norm(
+            uav_xy[:, None, :] - target_xy[None, :, :], axis=-1)
+        self._qpd_capability = np.exp(
+            -distances / self._qpd_distance_scale_m)
+
+        queue_norm = self._qpd_queue / self._qpd_queue_max
+        marginal_proxy = (
+            self._qpd_capability * np.maximum(1.0 - local_pd, 0.0))
+        switch_amount = np.abs(
+            self._qpd_primal - self._qpd_previous_primal)
+        self._qpd_bid = (
+            queue_norm * marginal_proxy
+            - self._qpd_power_cost * (1.0 - self._qpd_capability)
+            - self._qpd_comm_cost
+            - self._qpd_switch_cost * switch_amount
+        )
+
+        trigger = (
+            np.abs(
+                self._qpd_queue - self._qpd_previous_queue
+            ) / self._qpd_queue_max
+            + self._qpd_bid_change_weight * np.abs(
+                self._qpd_bid - self._qpd_previous_bid)
+        )
+        self._qpd_send_mask = trigger > self._qpd_send_threshold
+        # A node with an unresolved deficit must expose at least its most
+        # valuable target; otherwise an initially quiet graph cannot bootstrap.
+        priority = queue_norm * np.maximum(self._qpd_capability, 1e-6)
+        for k in range(self.K):
+            if (not np.any(self._qpd_send_mask[k])
+                    and np.max(self._qpd_queue[k], initial=0.0) > 0.0):
+                self._qpd_send_mask[k, int(np.argmax(priority[k]))] = True
+
+        if self._qpd_override_token_mask:
+            self._pending_comm_token_masks = {
+                k: self._qpd_send_mask[k].astype(np.float64).copy()
+                for k in range(self.K)
+            }
+
+        self._pending_qpd_protocol = {}
+        for k in range(self.K):
+            protocol = np.zeros((self.Q, 5), dtype=np.float64)
+            protocol[:, 0] = np.clip(
+                2.0 * queue_norm[k] - 1.0, -1.0, 1.0)
+            protocol[:, 1] = np.tanh(self._qpd_bid[k])
+            protocol[:, 2] = np.clip(
+                2.0 * self._qpd_capability[k] - 1.0, -1.0, 1.0)
+            protocol[:, 3] = np.clip(
+                2.0 * self._qpd_primal[k] - 1.0, -1.0, 1.0)
+            age_norm = np.clip(
+                self._qpd_age[k]
+                / max(self._comm_message_ttl_frames, 1),
+                0.0,
+                1.0,
+            )
+            protocol[:, 4] = 2.0 * age_norm - 1.0
+            self._pending_qpd_protocol[k] = protocol
+            if (self._qpd_overwrite_protocol_header
+                    and k in self._pending_comm_messages):
+                payload = np.asarray(
+                    self._pending_comm_messages[k],
+                    dtype=np.float64,
+                ).reshape(self.Q, self._comm_target_token_dim).copy()
+                payload[:, :5] = protocol
+                self._pending_comm_messages[k] = payload.reshape(-1)
+
+    def _decode_qpd_protocol(
+        self,
+        message: np.ndarray,
+        token_mask: Optional[np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        """Decode an actually received, quantized QPD protocol header."""
+        payload = np.asarray(message, dtype=np.float64).reshape(
+            self.Q, self._comm_target_token_dim)
+        active = (
+            np.ones(self.Q, dtype=bool)
+            if token_mask is None
+            else np.asarray(token_mask).reshape(-1) > 0.5
+        )
+        if active.shape != (self.Q,):
+            raise ValueError('received QPD token mask has invalid shape')
+        return {
+            'queue': np.where(
+                active, 0.5 * (payload[:, 0] + 1.0), 0.0),
+            'bid': np.where(active, payload[:, 1], 0.0),
+            'capability': np.where(
+                active, 0.5 * (payload[:, 2] + 1.0), 0.0),
+            'primal': np.where(
+                active, 0.5 * (payload[:, 3] + 1.0), 0.0),
+            'age': np.where(
+                active, 0.5 * (payload[:, 4] + 1.0), 0.0),
+            'active': active,
+        }
+
+    def _decode_qpd_control_packet(
+        self,
+        protocol: np.ndarray,
+        token_mask: Optional[np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        """Decode a five-dimensional QPD stream appended to each token."""
+        packet = np.asarray(protocol, dtype=np.float64).reshape(self.Q, 5)
+        active = (
+            np.ones(self.Q, dtype=bool)
+            if token_mask is None
+            else np.asarray(token_mask).reshape(-1) > 0.5
+        )
+        return {
+            'queue': np.where(
+                active, 0.5 * (packet[:, 0] + 1.0), 0.0),
+            'bid': np.where(active, packet[:, 1], 0.0),
+            'capability': np.where(
+                active, 0.5 * (packet[:, 2] + 1.0), 0.0),
+            'primal': np.where(
+                active, 0.5 * (packet[:, 3] + 1.0), 0.0),
+            'age': np.where(
+                active, 0.5 * (packet[:, 4] + 1.0), 0.0),
+            'active': active,
+        }
+
+    def _merge_received_qpd_protocol(
+        self,
+        receiver: int,
+        sender: int,
+        message: np.ndarray,
+        token_mask: Optional[np.ndarray],
+    ) -> None:
+        """Merge an event packet without erasing silent target state."""
+        decoded = self._decode_qpd_protocol(message, token_mask)
+        self._merge_received_qpd_packet(
+            receiver, sender, decoded, decoded['active'])
+
+    def _merge_received_qpd_packet(
+        self,
+        receiver: int,
+        sender: int,
+        decoded: Dict[str, np.ndarray],
+        active: np.ndarray,
+    ) -> None:
+        """Merge a decoded in-band or appended protocol control stream."""
+        active = np.asarray(
+            decoded.get('active', active), dtype=bool)
+        self._qpd_received_primal[receiver, sender, active] = (
+            decoded['primal'][active])
+        self._qpd_received_queue[receiver, sender, active] = (
+            decoded['queue'][active])
+        self._qpd_received_last_seen[receiver, sender, active] = self.t
 
     def _process_learned_communications(
         self, uav_positions: np.ndarray,
@@ -894,6 +1484,22 @@ class EnvironmentCore:
         # This provides a physical message age (AoI) without inventing free data.
         inbox: Dict[int, Dict[int, np.ndarray]] = {k: {} for k in range(self.K)}
         inbox_meta: Dict[int, Dict[int, dict]] = {k: {} for k in range(self.K)}
+        if self._qpd_enabled:
+            expired_qpd = (
+                self.t - self._qpd_received_last_seen
+                > self._comm_message_ttl_frames
+            )
+            self._qpd_received_primal[expired_qpd] = 0.0
+            self._qpd_received_queue[expired_qpd] = 0.0
+            self._qpd_received_last_seen[expired_qpd] = -10**9
+        if self._hyperedge_enabled:
+            expired_hyperedge = (
+                self.t - self._hyperedge_received_last_seen
+                > self._comm_message_ttl_frames
+            )
+            self._hyperedge_received_offer[expired_hyperedge] = 0.0
+            self._hyperedge_received_last_seen[
+                expired_hyperedge] = -10**9
         for receiver in range(self.K):
             old_msgs = self._received_comm_msgs.get(receiver, {})
             old_meta = self._received_comm_meta.get(receiver, {})
@@ -911,10 +1517,70 @@ class EnvironmentCore:
                 md = dict(metadata)
                 md['age_frames'] = max(0, int(self.t - md.get('sent_frame', self.t)))
                 inbox_meta[int(receiver)][int(sender)] = md
+                if self._qpd_enabled:
+                    if 'qpd_protocol' in md:
+                        decoded = self._decode_qpd_control_packet(
+                            md['qpd_protocol'], md.get('token_mask'))
+                        self._merge_received_qpd_packet(
+                            int(receiver), int(sender),
+                            decoded, decoded['active'])
+                    elif self._qpd_overwrite_protocol_header:
+                        self._merge_received_qpd_protocol(
+                            int(receiver),
+                            int(sender),
+                            message,
+                            md.get('token_mask'),
+                        )
+                if (self._hyperedge_enabled
+                        and 'hyperedge_protocol' in md):
+                    self._merge_received_hyperedge_packet(
+                        int(receiver), int(sender),
+                        md['hyperedge_protocol'], md.get('token_mask'))
             else:
                 future_mail.append(
                     (due_frame, receiver, sender, message, metadata))
         self._comm_mailbox = future_mail
+
+        extra_dimensions = {}
+        quantized_qpd_protocol: Dict[int, np.ndarray] = {}
+        if self._qpd_enabled and not self._qpd_overwrite_protocol_header:
+            for sender, protocol in self._pending_qpd_protocol.items():
+                mask = np.asarray(self._pending_comm_token_masks.get(
+                    sender, np.ones(self.Q)), dtype=np.float64)
+                active_targets = int(np.sum(mask > 0.5))
+                extra_dimensions[sender] = 5 * active_targets
+                rate_index = int(self._pending_comm_rates.get(sender, 0))
+                quantized = self._inter_uav_comm.quantize_values(
+                    np.asarray(protocol).reshape(-1), rate_index,
+                ).reshape(self.Q, 5)
+                quantized[mask <= 0.5] = 0.0
+                quantized_qpd_protocol[sender] = quantized
+        quantized_hyperedge_protocol: Dict[int, np.ndarray] = {}
+        if self._hyperedge_enabled:
+            for sender, protocol in self._pending_hyperedge_protocol.items():
+                mask = np.asarray(self._pending_comm_token_masks.get(
+                    sender, np.ones(self.Q)), dtype=np.float64)
+                active_targets = int(np.sum(mask > 0.5))
+                extra_dimensions[sender] = (
+                    int(extra_dimensions.get(sender, 0))
+                    + self._hyperedge_protocol_dim * active_targets
+                )
+                rate_index = int(self._pending_comm_rates.get(sender, 0))
+                quantized = self._inter_uav_comm.quantize_values(
+                    np.asarray(protocol).reshape(-1), rate_index,
+                ).reshape(self.Q, self._hyperedge_protocol_dim)
+                quantized[mask <= 0.5] = 0.0
+                quantized_hyperedge_protocol[sender] = quantized
+                # Consensus must use public protocol state.  If the sender
+                # plans from an unquantized private copy while every neighbor
+                # plans from the transmitted 4-bit copy, tiny score changes
+                # can invert the discrete Tx/Rx partition and eliminate every
+                # mutual edge.  The sender therefore commits to the same
+                # quantized values placed on air.
+                decoded, active = self._decode_hyperedge_packet(
+                    quantized, mask)
+                self._hyperedge_local_offer[
+                    int(sender), active] = decoded[active]
 
         deliveries, stats = self._inter_uav_comm.transmit(
             self._pending_comm_messages,
@@ -922,6 +1588,7 @@ class EnvironmentCore:
             uav_positions,
             tx_powers_w=tx_powers_w,
             token_masks=self._pending_comm_token_masks,
+            extra_payload_dimensions=extra_dimensions,
         )
         # A sender always knows the sparse claim mask it just put on air. Keep
         # this local state through observation construction; peer copies still
@@ -961,12 +1628,41 @@ class EnvironmentCore:
             }
             if item.token_mask is not None:
                 metadata['token_mask'] = item.token_mask.copy()
+            if item.sender in quantized_qpd_protocol:
+                metadata['qpd_protocol'] = (
+                    quantized_qpd_protocol[item.sender].copy())
+            if item.sender in quantized_hyperedge_protocol:
+                metadata['hyperedge_protocol'] = (
+                    quantized_hyperedge_protocol[item.sender].copy())
             # A sub-frame transmission is available in the next observation;
             # longer delays remain in the mailbox until their due frame.
             due_frame = self.t + max(0, item.delay_frames - 1)
             if due_frame <= self.t:
                 inbox[item.receiver][item.sender] = item.message.copy()
                 inbox_meta[item.receiver][item.sender] = metadata
+                if self._qpd_enabled:
+                    if 'qpd_protocol' in metadata:
+                        decoded = self._decode_qpd_control_packet(
+                            metadata['qpd_protocol'],
+                            metadata.get('token_mask'))
+                        self._merge_received_qpd_packet(
+                            int(item.receiver), int(item.sender),
+                            decoded, decoded['active'])
+                    elif self._qpd_overwrite_protocol_header:
+                        self._merge_received_qpd_protocol(
+                            int(item.receiver),
+                            int(item.sender),
+                            item.message,
+                            metadata.get('token_mask'),
+                        )
+                if (self._hyperedge_enabled
+                        and 'hyperedge_protocol' in metadata):
+                    self._merge_received_hyperedge_packet(
+                        int(item.receiver),
+                        int(item.sender),
+                        metadata['hyperedge_protocol'],
+                        metadata.get('token_mask'),
+                    )
             else:
                 self._comm_mailbox.append((
                     due_frame, item.receiver, item.sender, item.message.copy(),
@@ -1008,12 +1704,360 @@ class EnvironmentCore:
         self._pending_comm_messages = {}
         self._pending_comm_rates = {}
         self._pending_comm_token_masks = {}
+        self._pending_qpd_protocol = {}
+        self._pending_hyperedge_protocol = {}
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
         self._received_comm_msgs = inbox
         self._received_comm_meta = inbox_meta
         self._last_comm_stats = stats
         return stats
+
+    def _resolve_persistent_token_commitments(self) -> np.ndarray:
+        """Return the sparse Token-derived commitment graph for this frame.
+
+        Each sender owns one local persistent intent. A newly observed local
+        sensing or transmitted mask may replace it only after the configured
+        minimum hold. During a
+        bounded handover, the old and new sparse masks coexist so receivers do
+        not lose the previous endpoint before learning the replacement.
+        Silence retains the last physically transmitted mask up to
+        ``max_age_frames``; after expiry the local sensing top-k is used as a
+        safe fallback. No target geometry or team reward enters this update.
+        """
+        if self._persistent_commitment_resolved_frame == self.t:
+            return self._persistent_commitment_effective_mask.copy()
+
+        fallback = np.zeros((self.K, self.Q), dtype=bool)
+        order = np.argsort(
+            -self._current_sensing_power_w, axis=1, kind='stable')
+        rows = np.arange(self.K)[:, None]
+        fallback[
+            rows,
+            order[:, :min(
+                self._distributed_target_commitment_topk, self.Q)],
+        ] = True
+
+        switches = 0
+        active_handover = 0
+        stale_fallbacks = 0
+        for k in range(self.K):
+            incoming_raw = (
+                fallback[k]
+                if self._distributed_target_commitment_source
+                == 'persistent_sensing'
+                else self._last_sent_comm_token_masks.get(k))
+            incoming = None
+            if incoming_raw is not None:
+                candidate = np.asarray(incoming_raw).reshape(-1) > 0.5
+                if candidate.shape != (self.Q,):
+                    raise ValueError(
+                        'sent target-token mask has invalid shape')
+                if np.any(candidate):
+                    incoming = candidate
+
+            current = self._persistent_commitment_mask[k]
+            initialized = bool(np.any(current))
+            if not initialized:
+                accepted = incoming if incoming is not None else fallback[k]
+                self._persistent_commitment_mask[k] = accepted
+                self._persistent_commitment_old_mask[k] = False
+                self._persistent_commitment_last_switch[k] = self.t
+                self._persistent_commitment_last_seen[k] = self.t
+                self._persistent_commitment_handover_remaining[k] = 0
+            elif incoming is not None:
+                self._persistent_commitment_last_seen[k] = self.t
+                changed = not np.array_equal(incoming, current)
+                held_frames = (
+                    self.t - self._persistent_commitment_last_switch[k])
+                if (changed
+                        and held_frames >= (
+                            self._distributed_target_commitment_min_hold_frames)):
+                    self._persistent_commitment_old_mask[k] = current.copy()
+                    self._persistent_commitment_mask[k] = incoming
+                    self._persistent_commitment_last_switch[k] = self.t
+                    self._persistent_commitment_handover_remaining[k] = (
+                        self._distributed_target_commitment_handover_frames)
+                    switches += 1
+            elif (self.t - self._persistent_commitment_last_seen[k]
+                  > self._distributed_target_commitment_max_age_frames):
+                stale_fallbacks += 1
+                if not np.array_equal(current, fallback[k]):
+                    self._persistent_commitment_old_mask[k] = current.copy()
+                    self._persistent_commitment_mask[k] = fallback[k]
+                    self._persistent_commitment_last_switch[k] = self.t
+                    self._persistent_commitment_handover_remaining[k] = (
+                        self._distributed_target_commitment_handover_frames)
+                    switches += 1
+                self._persistent_commitment_last_seen[k] = self.t
+
+            effective = self._persistent_commitment_mask[k].copy()
+            if self._persistent_commitment_handover_remaining[k] > 0:
+                effective |= self._persistent_commitment_old_mask[k]
+                self._persistent_commitment_handover_remaining[k] -= 1
+                active_handover += 1
+            else:
+                self._persistent_commitment_old_mask[k] = False
+            self._persistent_commitment_effective_mask[k] = effective
+
+        self._persistent_commitment_resolved_frame = self.t
+        self._persistent_commitment_metrics = {
+            'learned_comm_commitment_source': (
+                self._distributed_target_commitment_source),
+            'learned_comm_commitment_switch_rate': float(
+                switches / max(self.K, 1)),
+            'learned_comm_commitment_handover_rate': float(
+                active_handover / max(self.K, 1)),
+            'learned_comm_commitment_stale_fallback_rate': float(
+                stale_fallbacks / max(self.K, 1)),
+            'learned_comm_commitment_effective_claims_per_uav': float(
+                np.mean(self._persistent_commitment_effective_mask.sum(
+                    axis=1))),
+        }
+        return self._persistent_commitment_effective_mask.copy()
+
+    def _resolve_qpd_commitments(self) -> np.ndarray:
+        """Resolve one sparse commitment row per UAV from local inboxes only.
+
+        The environment loops over UAVs for simulation efficiency, but row
+        ``k`` is computed exclusively from UAV ``k``'s own QPD state and the
+        delayed/quantized packets in receiver ``k``'s physical inbox.
+        """
+        old_primal = self._qpd_primal.copy()
+        new_primal = np.zeros_like(old_primal)
+        new_price = np.zeros_like(self._qpd_target_price)
+        local_residuals = np.zeros(self.K, dtype=np.float64)
+        local_loads = np.zeros((self.K, self.Q), dtype=np.float64)
+        visible_peers = np.zeros(self.K, dtype=np.float64)
+        effective_bids = np.zeros((self.K, self.Q), dtype=np.float64)
+
+        for k in range(self.K):
+            peer_rows = self._qpd_received_primal[k].copy()
+            peer_rows[k] = 0.0
+            peer_primal = np.sum(peer_rows, axis=0)
+            visible_target = (
+                self._qpd_received_last_seen[k] > -10**8)
+            visible_target[k] = False
+            peer_queue = np.where(
+                visible_target,
+                self._qpd_received_queue[k],
+                0.0,
+            )
+            team_queue = (
+                self._qpd_queue[k] / self._qpd_queue_max
+                + np.sum(peer_queue, axis=0)
+            ) / (
+                1.0 + np.sum(visible_target, axis=0)
+            )
+            scarcity = team_queue - float(np.mean(team_queue))
+            effective_bid = (
+                np.tanh(self._qpd_bid[k])
+                + self._qpd_peer_deficit_gain * scarcity
+            )
+            effective_bids[k] = effective_bid
+            visible_peers[k] = float(np.sum(np.any(
+                self._qpd_received_last_seen[k] > -10**8,
+                axis=1,
+            )) - np.any(
+                self._qpd_received_last_seen[k, k] > -10**8))
+
+            result = local_primal_dual_update(
+                effective_bid,
+                peer_primal,
+                old_primal[k],
+                self._qpd_target_price[k],
+                row_capacity=self._qpd_row_capacity,
+                target_capacity=self._qpd_target_capacity,
+                primal_step=self._qpd_primal_step,
+                dual_step=self._qpd_dual_step,
+                rounds=self._qpd_rounds,
+                price_max=self._qpd_price_max,
+                exploration_floor=(
+                    self._qpd_primal_exploration_floor),
+            )
+            new_primal[k] = result.primal
+            new_price[k] = result.target_price
+            local_residuals[k] = result.kkt_residual
+            local_loads[k] = result.estimated_target_load
+
+        self._qpd_previous_primal = old_primal
+        self._qpd_primal = new_primal
+        self._qpd_target_price = new_price
+
+        committed = np.zeros((self.K, self.Q), dtype=bool)
+        max_claims = max(
+            1, min(self.Q, int(np.ceil(self._qpd_row_capacity))))
+        for k in range(self.K):
+            order = np.argsort(-new_primal[k], kind='stable')
+            committed[k, order[0]] = True
+            for q in order[1:max_claims]:
+                if new_primal[k, q] >= self._qpd_commitment_threshold:
+                    committed[k, q] = True
+        self._qpd_commitment_mask = committed
+
+        row_sums = np.sum(new_primal, axis=1)
+        target_load = np.sum(new_primal, axis=0)
+        target_error = np.abs(
+            target_load - np.minimum(
+                target_load, self._qpd_target_capacity))
+        probs = np.divide(
+            new_primal,
+            np.maximum(row_sums[:, None], 1e-12),
+            out=np.zeros_like(new_primal),
+            where=row_sums[:, None] > 1e-12,
+        )
+        if self.Q > 1:
+            entropy = -np.sum(
+                probs * np.log(np.maximum(probs, 1e-12)), axis=1
+            ) / np.log(float(self.Q))
+        else:
+            entropy = np.zeros(self.K, dtype=np.float64)
+        self._qpd_metrics = {
+            'qpd_enabled': 1.0,
+            'qpd_queue_mean': float(np.mean(self._qpd_queue)),
+            'qpd_queue_max': float(np.max(
+                self._qpd_queue, initial=0.0)),
+            'qpd_bid_mean': float(np.mean(self._qpd_bid)),
+            'qpd_bid_max': float(np.max(
+                self._qpd_bid, initial=0.0)),
+            'qpd_effective_bid_span': float(np.mean(
+                np.ptp(effective_bids, axis=1))),
+            'qpd_send_target_rate': float(np.mean(
+                self._qpd_send_mask)),
+            'qpd_active_claims_per_uav': float(np.mean(
+                committed.sum(axis=1))),
+            'qpd_visible_peers_per_uav': float(np.mean(visible_peers)),
+            'qpd_primal_row_sum_mean': float(np.mean(row_sums)),
+            'qpd_primal_row_sum_max': float(np.max(
+                row_sums, initial=0.0)),
+            'qpd_primal_entropy': float(np.mean(entropy)),
+            'qpd_target_load_min': float(np.min(
+                target_load)) if target_load.size else 0.0,
+            'qpd_target_load_max': float(np.max(
+                target_load, initial=0.0)),
+            'qpd_target_overload': float(np.max(
+                target_error, initial=0.0)),
+            'qpd_local_estimated_load_mean': float(np.mean(local_loads)),
+            'qpd_price_abs_mean': float(np.mean(np.abs(new_price))),
+            'qpd_kkt_residual_mean': float(np.mean(local_residuals)),
+            'qpd_kkt_residual_max': float(np.max(
+                local_residuals, initial=0.0)),
+            'qpd_local_iterations': float(self._qpd_rounds),
+        }
+        self._last_isac_metrics.update(self._qpd_metrics)
+        return committed.copy()
+
+    def _resolve_hyperedge_negotiation(
+        self,
+        physical_entries: list,
+    ) -> Tuple[Tuple[int, int, int], ...]:
+        """Resolve reciprocal directed plans from receiver-local offer views."""
+        physical_pair_value = None
+        if self._hyperedge_pair_score_mode == 'physical_reconstructable':
+            physical_pair_value = np.zeros(
+                (self.K, self.K, self.Q), dtype=np.float64)
+            for entry in physical_entries:
+                if int(entry.i) != int(entry.j):
+                    physical_pair_value[
+                        int(entry.i), int(entry.j), int(entry.q)] = max(
+                            float(entry.d_eff), 0.0)
+        local_plans = []
+        visible_peer_counts = []
+        local_min_proxy = []
+        for viewer in range(self.K):
+            tx_capability = np.zeros((self.K, self.Q), dtype=np.float64)
+            rx_capability = np.zeros((self.K, self.Q), dtype=np.float64)
+            deficit = np.zeros((self.K, self.Q), dtype=np.float64)
+            visible = np.zeros((self.K, self.Q), dtype=bool)
+
+            tx_capability[viewer] = self._hyperedge_local_offer[
+                viewer, :, 0]
+            rx_capability[viewer] = self._hyperedge_local_offer[
+                viewer, :, 1]
+            deficit[viewer] = self._hyperedge_local_offer[viewer, :, 2]
+            visible[viewer] = True
+
+            received = (
+                self._hyperedge_received_last_seen[viewer] > -10**8)
+            visible |= received
+            tx_capability[received] = self._hyperedge_received_offer[
+                viewer, :, :, 0][received]
+            rx_capability[received] = self._hyperedge_received_offer[
+                viewer, :, :, 1][received]
+            deficit[received] = self._hyperedge_received_offer[
+                viewer, :, :, 2][received]
+            visible_peer_counts.append(float(np.sum(
+                np.any(received, axis=1))))
+
+            # Each viewer uses a conservative maximum of the deficits it can
+            # actually see; missing targets retain its own local deficit.
+            visible_deficit = np.where(visible, deficit, -np.inf)
+            target_deficit = np.max(visible_deficit, axis=0)
+            target_deficit[~np.isfinite(target_deficit)] = (
+                self._hyperedge_local_offer[viewer, :, 2][
+                    ~np.isfinite(target_deficit)])
+            plan = plan_local_hyperedges(
+                tx_capability,
+                rx_capability,
+                visible,
+                target_deficit,
+                target_pair_limit=int(self.cfg.detection.K_q_max),
+                deficit_gain=self._hyperedge_deficit_gain,
+                proxy_floor=self._hyperedge_proxy_floor,
+                pair_value=physical_pair_value,
+            )
+            local_plans.append(plan)
+            local_min_proxy.append(float(np.min(
+                plan.proxy_target_value)) if self.Q else 0.0)
+
+        mutual = mutual_endpoint_consensus(
+            local_plans,
+            num_uavs=self.K,
+            num_targets=self.Q,
+            target_pair_limit=int(self.cfg.detection.K_q_max),
+        )
+        self._hyperedge_consensus_streak, stable = update_consensus_streak(
+            self._hyperedge_consensus_streak,
+            mutual,
+            consensus_rounds=self._hyperedge_consensus_rounds,
+        )
+
+        physical_lookup = {
+            (int(entry.i), int(entry.j), int(entry.q))
+            for entry in physical_entries
+            if int(entry.i) != int(entry.j) and float(entry.d_eff) > 0.0
+        }
+        active = tuple(
+            edge for edge in stable if edge in physical_lookup)
+        covered_targets = {target for _, _, target in active}
+        coverage = float(
+            len(covered_targets) / max(self.Q, 1))
+        use_protocol = bool(
+            active
+            and coverage + 1e-12
+            >= self._hyperedge_min_target_coverage
+        )
+        selected = active if use_protocol else tuple()
+        self._hyperedge_selected_set = selected
+        self._hyperedge_metrics = {
+            'hyperedge_enabled': 1.0,
+            'hyperedge_visible_peers_per_uav': float(np.mean(
+                visible_peer_counts or [0.0])),
+            'hyperedge_local_min_proxy': float(np.mean(
+                local_min_proxy or [0.0])),
+            'hyperedge_mutual_edges': float(len(mutual)),
+            'hyperedge_stable_edges': float(len(stable)),
+            'hyperedge_active_edges': float(len(active)),
+            'hyperedge_target_coverage': coverage,
+            'hyperedge_protocol_used': float(use_protocol),
+            'hyperedge_safety_fallback': float(
+                not use_protocol and self._hyperedge_safety_fallback),
+            'hyperedge_consensus_rounds': float(
+                self._hyperedge_consensus_rounds),
+            'hyperedge_pair_score_mode': self._hyperedge_pair_score_mode,
+        }
+        self._last_isac_metrics.update(self._hyperedge_metrics)
+        return selected
 
     def _coverage_potential(self, uav_pos: np.ndarray, tgt_pos: np.ndarray) -> float:
         """Φ(s) = -Σ_q min_k ||uav_k - target_q|| (2D). Higher (less negative)
@@ -1133,15 +2177,28 @@ class EnvironmentCore:
             )
         else:
             ranking_entries = deflection_entries
+        unfiltered_ranking_entries = ranking_entries
 
         # The policy's per-target sensing split is its local commitment. P0 may
         # rank only the resulting subgraph, while realized P_D is still read
         # from true-geometry entries after assignment.
         if self._distributed_target_commitment_enabled:
-            ranking_entries, commitment_metrics = (
+            explicit_commitment_mask = None
+            commitment_scores = self._current_sensing_power_w
+            if self._distributed_target_commitment_source == 'qpd':
+                explicit_commitment_mask = self._resolve_qpd_commitments()
+                # QPD's continuous primal is the graph-ranking confidence.
+                # Keep it separate from physical sensing power so the first
+                # gate can attribute scheduler and resource effects.
+                commitment_scores = self._qpd_primal
+            elif self._distributed_target_commitment_source in {
+                    'persistent_sensing', 'sent_token'}:
+                explicit_commitment_mask = (
+                    self._resolve_persistent_token_commitments())
+            filtered_ranking_entries, commitment_metrics = (
                 filter_deflection_by_local_commitments(
                     ranking_entries,
-                    self._current_sensing_power_w,
+                    commitment_scores,
                     topk=self._distributed_target_commitment_topk,
                     require_receiver=(
                         self._distributed_target_commitment_require_receiver),
@@ -1150,18 +2207,84 @@ class EnvironmentCore:
                         self._distributed_target_commitment_soft_floor),
                     uncertainty_relief=(
                         self._distributed_target_commitment_uncertainty_relief),
+                    commitment_mask=explicit_commitment_mask,
                 ))
+            commitment_metrics['learned_comm_commitment_source'] = (
+                self._distributed_target_commitment_source)
+            if explicit_commitment_mask is not None:
+                if self._distributed_target_commitment_source == 'qpd':
+                    commitment_metrics.update(self._qpd_metrics)
+                else:
+                    commitment_metrics.update(
+                        self._persistent_commitment_metrics)
             self._last_isac_metrics.update(commitment_metrics)
+            if not (self._p0_maxmin_pairing_enabled
+                    and self._p0_maxmin_bypass_commitment_filter):
+                ranking_entries = filtered_ranking_entries
+            else:
+                ranking_entries = unfiltered_ranking_entries
+
+        hyperedge_selected: Tuple[Tuple[int, int, int], ...] = tuple()
+        if self._hyperedge_enabled:
+            hyperedge_selected = self._resolve_hyperedge_negotiation(
+                unfiltered_ranking_entries)
 
         # 4. Inner P0 solver with assignment hold (reduces reward non-stationarity)
-        hold_frames = getattr(self.cfg.marl, 'assignment_hold_frames', 1)
+        hold_frames = (
+            self._p0_maxmin_pairing_hold_frames
+            if self._p0_maxmin_pairing_enabled
+            else getattr(self.cfg.marl, 'assignment_hold_frames', 1)
+        )
         # Commitments change at communication rate. Reusing an old solution
         # would bypass the current local choices, so always resolve this mode.
-        should_resolve = (self._distributed_target_commitment_enabled or
-                          self.t == 1 or
-                          self.t % hold_frames == 0 or
-                          self._cached_p0_solution is None)
+        if (self._p0_maxmin_pairing_enabled
+                and self._p0_maxmin_event_triggered_enabled
+                and self._cached_p0_solution is not None):
+            ranking_lookup = {
+                (int(entry.i), int(entry.j), int(entry.q)):
+                    float(entry.d_eff)
+                for entry in ranking_entries
+                if float(entry.d_eff) > 0.0
+            }
+            cached_receiver_D = np.zeros(
+                (self.K, self.Q), dtype=np.float64)
+            cached_graph_valid = bool(
+                self._cached_p0_solution.selected_set)
+            for edge in self._cached_p0_solution.selected_set:
+                key = tuple(int(value) for value in edge)
+                if key not in ranking_lookup:
+                    cached_graph_valid = False
+                    break
+                cached_receiver_D[key[1], key[2]] += ranking_lookup[key]
+            cached_D_q = (
+                np.max(cached_receiver_D, axis=0)
+                if self._p0_maxmin_local_fusion_enabled
+                else np.sum(cached_receiver_D, axis=0)
+            )
+            cached_worst_pd = float(np.min(
+                compute_detection_probabilities(
+                    cached_D_q, self.cfg.detection.P_FA)))
+            event_floor = float(getattr(
+                self.cfg.marl, "comm_qos_worst_min", 0.60))
+            event_due = (
+                not cached_graph_valid
+                or cached_worst_pd < event_floor
+            )
+            maximum_hold_due = (
+                self.t - self._last_solve_frame >= hold_frames)
+            should_resolve = bool(event_due or maximum_hold_due)
+        else:
+            should_resolve = (
+                (
+                    self._distributed_target_commitment_enabled
+                    and not self._p0_maxmin_pairing_enabled
+                )
+                or self.t == 1
+                or self.t % hold_frames == 0
+                or self._cached_p0_solution is None
+            )
         if should_resolve:
+            p0_solve_started = time.perf_counter()
             # B3: build uncertainty inputs for P0
             # Note: cov and AoI always come from LOCAL beliefs (BeliefManager).
             # The fused belief is NOT used here — B3 scoring is applied on top
@@ -1193,30 +2316,118 @@ class EnvironmentCore:
                     conf[q] = float(np.mean(tm.trust_score[:, :, q][mask]))
                 p0_fusion_conf = conf
 
-            p0_solution = self.inner_solver.solve(
-                ranking_entries, Q=self.Q, K=self.K,
-                enforce_single_role=(
-                    role_agnostic
-                    and not self._multistatic_subslot_enabled),
-                belief_cov_diag=p0_cov,
-                belief_aoi=p0_aoi,
-                beta_uncertainty=self.p0_beta_uncertainty,
-                eta_aoi=self.p0_eta_aoi,
-                fusion_confidence=p0_fusion_conf,
-                fusion_confidence_min=p0_conf_min,
-                du_enabled=bool(getattr(self.cfg.marl, 'du_enabled', False)),
-                du_ambiguity_threshold=float(getattr(self.cfg.marl, 'du_ambiguity_threshold', 3.0)),
-                du_ambiguity_bonus=float(getattr(self.cfg.marl, 'du_ambiguity_bonus', 0.1)),
-            )
+            if (self._hyperedge_enabled
+                    and (hyperedge_selected
+                         or not self._hyperedge_safety_fallback)):
+                lookup = {
+                    (int(entry.i), int(entry.j), int(entry.q)):
+                        float(entry.d_eff)
+                    for entry in unfiltered_ranking_entries
+                    if float(entry.d_eff) > 0.0
+                }
+                selected = tuple(
+                    edge for edge in hyperedge_selected if edge in lookup)
+                hyperedge_D_q = np.zeros(self.Q, dtype=np.float64)
+                z_selected = np.zeros(
+                    (self.K, self.K, self.Q), dtype=np.int32)
+                for i, j, q in selected:
+                    z_selected[i, j, q] = 1
+                    hyperedge_D_q[q] += lookup[(i, j, q)]
+                p0_solution = P0Solution(
+                    z_selected=z_selected,
+                    D_q_star=hyperedge_D_q,
+                    U_q=compute_target_utilities(
+                        hyperedge_D_q, self.cfg.detection.P_FA),
+                    selected_set=list(selected),
+                    total_bits=0.0,
+                    total_latency=0.0,
+                )
+            elif self._p0_maxmin_pairing_enabled:
+                reports_per_receiver = (
+                    max(1, int(
+                        self.cfg.p0_solver.capacity_per_rx
+                        // max(self.cfg.detection.B_q, 1)))
+                    if self.ground_communication_enabled
+                    else self.Q * self.cfg.detection.K_q_max
+                )
+                selected, maxmin_D_q = solve_maxmin_single_role_pairs(
+                    ranking_entries,
+                    num_uavs=self.K,
+                    num_targets=self.Q,
+                    target_pair_limit=self.cfg.detection.K_q_max,
+                    reports_per_receiver=reports_per_receiver,
+                    p_fa=self.cfg.detection.P_FA,
+                    p_d_floor=float(getattr(
+                        self.cfg.marl, "comm_qos_worst_min", 0.60)),
+                    target_priority=(
+                        np.exp(np.clip(
+                            float(getattr(
+                                self.cfg.marl,
+                                "p0_maxmin_deficit_priority_gain",
+                                3.0,
+                            ))
+                            * (
+                                float(getattr(
+                                    self.cfg.marl,
+                                    "comm_qos_worst_min",
+                                    0.60,
+                                ))
+                                - self._coord_pd_ema
+                            ),
+                            -6.0,
+                            6.0,
+                        ))
+                        if self._coord_pd_ema is not None
+                        else np.ones(self.Q, dtype=np.float64)
+                    ),
+                    fusion_mode=(
+                        "local_only"
+                        if self._p0_maxmin_local_fusion_enabled
+                        else "central_oracle"
+                    ),
+                )
+                z_selected = np.zeros(
+                    (self.K, self.K, self.Q), dtype=np.int32)
+                for i, j, q in selected:
+                    z_selected[i, j, q] = 1
+                p0_solution = P0Solution(
+                    z_selected=z_selected,
+                    D_q_star=maxmin_D_q,
+                    U_q=compute_target_utilities(
+                        maxmin_D_q, self.cfg.detection.P_FA),
+                    selected_set=list(selected),
+                    total_bits=float(
+                        len(selected) * self.cfg.detection.B_q),
+                    total_latency=0.0,
+                )
+            else:
+                p0_solution = self.inner_solver.solve(
+                    ranking_entries, Q=self.Q, K=self.K,
+                    enforce_single_role=(
+                        role_agnostic
+                        and not self._multistatic_subslot_enabled),
+                    belief_cov_diag=p0_cov,
+                    belief_aoi=p0_aoi,
+                    beta_uncertainty=self.p0_beta_uncertainty,
+                    eta_aoi=self.p0_eta_aoi,
+                    fusion_confidence=p0_fusion_conf,
+                    fusion_confidence_min=p0_conf_min,
+                    du_enabled=bool(getattr(self.cfg.marl, 'du_enabled', False)),
+                    du_ambiguity_threshold=float(getattr(self.cfg.marl, 'du_ambiguity_threshold', 3.0)),
+                    du_ambiguity_bonus=float(getattr(self.cfg.marl, 'du_ambiguity_bonus', 0.1)),
+                )
             if not self.ground_communication_enabled:
                 p0_solution = p0_solution._replace(
                     total_bits=0.0, total_latency=0.0)
             self._cached_p0_solution = p0_solution
             self._assignment_switched = True
             self._last_solve_frame = self.t
+            self._last_p0_solve_time_s = float(
+                time.perf_counter() - p0_solve_started)
         else:
             p0_solution = self._cached_p0_solution
             self._assignment_switched = False
+            self._last_p0_solve_time_s = 0.0
         self._last_selected_set = p0_solution.selected_set  # for next obs
 
         # Realized per-target deflection = TRUE d_eff of the SELECTED pairs.
@@ -1726,6 +2937,8 @@ class EnvironmentCore:
             valid_pair=bool(n_selected > 0),
             no_tx=bool(n_tx == 0),
             all_same_role=all_same_role,
+            p0_resolved=bool(self._assignment_switched),
+            p0_solve_time_s=float(self._last_p0_solve_time_s),
             learned_comm={
                 **comm_stats.as_dict(),
                 **self._last_isac_metrics,
@@ -2066,6 +3279,56 @@ class EnvironmentCore:
             'last_sent_comm_target_claims': {
                 k: v.copy() for k, v in
                 self._last_sent_comm_target_claims.items()},
+            'persistent_commitment_mask': (
+                self._persistent_commitment_mask.copy()),
+            'persistent_commitment_old_mask': (
+                self._persistent_commitment_old_mask.copy()),
+            'persistent_commitment_last_switch': (
+                self._persistent_commitment_last_switch.copy()),
+            'persistent_commitment_last_seen': (
+                self._persistent_commitment_last_seen.copy()),
+            'persistent_commitment_handover_remaining': (
+                self._persistent_commitment_handover_remaining.copy()),
+            'persistent_commitment_effective_mask': (
+                self._persistent_commitment_effective_mask.copy()),
+            'persistent_commitment_resolved_frame': int(
+                self._persistent_commitment_resolved_frame),
+            'persistent_commitment_metrics': copy.deepcopy(
+                self._persistent_commitment_metrics),
+            'qpd_queue': self._qpd_queue.copy(),
+            'qpd_previous_queue': self._qpd_previous_queue.copy(),
+            'qpd_bid': self._qpd_bid.copy(),
+            'qpd_previous_bid': self._qpd_previous_bid.copy(),
+            'qpd_primal': self._qpd_primal.copy(),
+            'qpd_previous_primal': self._qpd_previous_primal.copy(),
+            'qpd_target_price': self._qpd_target_price.copy(),
+            'qpd_capability': self._qpd_capability.copy(),
+            'qpd_age': self._qpd_age.copy(),
+            'qpd_send_mask': self._qpd_send_mask.copy(),
+            'pending_qpd_protocol': {
+                k: v.copy()
+                for k, v in self._pending_qpd_protocol.items()},
+            'qpd_commitment_mask': self._qpd_commitment_mask.copy(),
+            'qpd_received_primal': self._qpd_received_primal.copy(),
+            'qpd_received_queue': self._qpd_received_queue.copy(),
+            'qpd_received_last_seen': (
+                self._qpd_received_last_seen.copy()),
+            'qpd_metrics': copy.deepcopy(self._qpd_metrics),
+            'qpd_last_submission_frame': int(
+                self._qpd_last_submission_frame),
+            'pending_hyperedge_protocol': {
+                k: v.copy()
+                for k, v in self._pending_hyperedge_protocol.items()},
+            'hyperedge_local_offer': self._hyperedge_local_offer.copy(),
+            'hyperedge_received_offer': (
+                self._hyperedge_received_offer.copy()),
+            'hyperedge_received_last_seen': (
+                self._hyperedge_received_last_seen.copy()),
+            'hyperedge_consensus_streak': (
+                self._hyperedge_consensus_streak.copy()),
+            'hyperedge_selected_set': tuple(
+                self._hyperedge_selected_set),
+            'hyperedge_metrics': copy.deepcopy(self._hyperedge_metrics),
             'pending_comm_power_fractions': dict(
                 self._pending_comm_power_fractions),
             'pending_sensing_weights': {
@@ -2117,6 +3380,117 @@ class EnvironmentCore:
             int(k): np.asarray(v, dtype=np.float64).copy()
             for k, v in state.get(
                 'last_sent_comm_target_claims', {}).items()}
+        self._persistent_commitment_mask = np.asarray(state.get(
+            'persistent_commitment_mask',
+            np.zeros((self.K, self.Q), dtype=bool)),
+            dtype=bool).copy()
+        self._persistent_commitment_old_mask = np.asarray(state.get(
+            'persistent_commitment_old_mask',
+            np.zeros((self.K, self.Q), dtype=bool)),
+            dtype=bool).copy()
+        self._persistent_commitment_last_switch = np.asarray(state.get(
+            'persistent_commitment_last_switch',
+            np.full(self.K, -10**9, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._persistent_commitment_last_seen = np.asarray(state.get(
+            'persistent_commitment_last_seen',
+            np.full(self.K, -10**9, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._persistent_commitment_handover_remaining = np.asarray(state.get(
+            'persistent_commitment_handover_remaining',
+            np.zeros(self.K, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._persistent_commitment_effective_mask = np.asarray(state.get(
+            'persistent_commitment_effective_mask',
+            self._persistent_commitment_mask),
+            dtype=bool).copy()
+        self._persistent_commitment_resolved_frame = int(state.get(
+            'persistent_commitment_resolved_frame', -1))
+        self._persistent_commitment_metrics = copy.deepcopy(state.get(
+            'persistent_commitment_metrics', {}))
+        self._qpd_queue = np.asarray(state.get(
+            'qpd_queue', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_previous_queue = np.asarray(state.get(
+            'qpd_previous_queue', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_bid = np.asarray(state.get(
+            'qpd_bid', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_previous_bid = np.asarray(state.get(
+            'qpd_previous_bid', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        initial_qpd = min(
+            1.0, self._qpd_row_capacity / max(self.Q, 1))
+        self._qpd_primal = np.asarray(state.get(
+            'qpd_primal',
+            np.full((self.K, self.Q), initial_qpd)),
+            dtype=np.float64).copy()
+        self._qpd_previous_primal = np.asarray(state.get(
+            'qpd_previous_primal', self._qpd_primal),
+            dtype=np.float64).copy()
+        self._qpd_target_price = np.asarray(state.get(
+            'qpd_target_price', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_capability = np.asarray(state.get(
+            'qpd_capability', np.zeros((self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_age = np.asarray(state.get(
+            'qpd_age', np.zeros((self.K, self.Q))),
+            dtype=np.int64).copy()
+        self._qpd_send_mask = np.asarray(state.get(
+            'qpd_send_mask', np.zeros((self.K, self.Q))),
+            dtype=bool).copy()
+        self._pending_qpd_protocol = {
+            int(k): np.asarray(v, dtype=np.float64).copy()
+            for k, v in state.get(
+                'pending_qpd_protocol', {}).items()}
+        self._qpd_commitment_mask = np.asarray(state.get(
+            'qpd_commitment_mask', np.zeros((self.K, self.Q))),
+            dtype=bool).copy()
+        self._qpd_received_primal = np.asarray(state.get(
+            'qpd_received_primal',
+            np.zeros((self.K, self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_received_queue = np.asarray(state.get(
+            'qpd_received_queue',
+            np.zeros((self.K, self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._qpd_received_last_seen = np.asarray(state.get(
+            'qpd_received_last_seen',
+            np.full((self.K, self.K, self.Q), -10**9)),
+            dtype=np.int64).copy()
+        self._qpd_metrics = copy.deepcopy(state.get('qpd_metrics', {}))
+        self._qpd_last_submission_frame = int(state.get(
+            'qpd_last_submission_frame', -1))
+        self._pending_hyperedge_protocol = {
+            int(k): np.asarray(v, dtype=np.float64).copy()
+            for k, v in state.get(
+                'pending_hyperedge_protocol', {}).items()}
+        self._hyperedge_local_offer = np.asarray(state.get(
+            'hyperedge_local_offer',
+            np.zeros((
+                self.K, self.Q, self._hyperedge_protocol_dim))),
+            dtype=np.float64).copy()
+        self._hyperedge_received_offer = np.asarray(state.get(
+            'hyperedge_received_offer',
+            np.zeros((
+                self.K, self.K, self.Q,
+                self._hyperedge_protocol_dim))),
+            dtype=np.float64).copy()
+        self._hyperedge_received_last_seen = np.asarray(state.get(
+            'hyperedge_received_last_seen',
+            np.full((self.K, self.K, self.Q), -10**9)),
+            dtype=np.int64).copy()
+        self._hyperedge_consensus_streak = np.asarray(state.get(
+            'hyperedge_consensus_streak',
+            np.zeros((self.K, self.K, self.Q))),
+            dtype=np.int64).copy()
+        self._hyperedge_selected_set = tuple(
+            tuple(int(value) for value in edge)
+            for edge in state.get('hyperedge_selected_set', ()))
+        self._hyperedge_metrics = copy.deepcopy(state.get(
+            'hyperedge_metrics', {}))
         self._pending_comm_power_fractions = dict(
             state.get('pending_comm_power_fractions', {}))
         self._pending_sensing_weights = {

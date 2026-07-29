@@ -233,6 +233,63 @@ class MARLParams:
     distributed_target_commitment_mode: str = "hard"
     distributed_target_commitment_soft_floor: float = 0.25
     distributed_target_commitment_uncertainty_relief: float = 1.0
+    # Commitment graph source. ``sensing_power`` preserves the historical
+    # instantaneous top-k rule. ``persistent_sensing`` applies the local
+    # hold/handover state to that same sensing intent without changing Token
+    # content. ``sent_token`` instead consumes each physically transmitted
+    # sparse target-token mask and retains it locally across silence.
+    distributed_target_commitment_source: str = "sensing_power"
+    distributed_target_commitment_min_hold_frames: int = 0
+    distributed_target_commitment_handover_frames: int = 0
+    distributed_target_commitment_max_age_frames: int = 5
+    # Queue-driven distributed primal-dual Token negotiation (QPD-ISAC).
+    # The first gate is deliberately learning-free: geometric local capability
+    # stands in for the learned marginal detection-value scorer.  The mechanism
+    # is opt-in and leaves historical checkpoints bitwise unchanged when off.
+    qpd_isac_enabled: bool = False
+    qpd_qos_floor: float = 0.60
+    qpd_queue_step: float = 0.25
+    qpd_queue_max: float = 4.0
+    qpd_primal_step: float = 1.0
+    qpd_dual_step: float = 0.25
+    qpd_rounds: int = 2
+    qpd_row_capacity: float = 2.0
+    qpd_target_capacity: float = 2.0
+    qpd_price_max: float = 4.0
+    qpd_primal_exploration_floor: float = 0.02
+    qpd_peer_deficit_gain: float = 2.0
+    qpd_send_threshold: float = 0.05
+    qpd_bid_change_weight: float = 1.0
+    qpd_power_cost: float = 0.02
+    qpd_comm_cost: float = 0.01
+    qpd_switch_cost: float = 0.02
+    qpd_capability_distance_scale_m: float = 150.0
+    qpd_commitment_threshold: float = 0.25
+    qpd_override_token_mask: bool = True
+    qpd_overwrite_protocol_header: bool = True
+    qpd_override_sensing_weights: bool = True
+    # Learning-free local-view negotiation over directed (Tx, Rx, target)
+    # hyperedges. The protocol is appended to the ordinary learned Token, so
+    # latent content is preserved while all additional coordinates are charged.
+    hyperedge_negotiation_enabled: bool = False
+    hyperedge_share_topk: int = 4
+    hyperedge_distance_scale_m: float = 150.0
+    hyperedge_deficit_gain: float = 2.0
+    hyperedge_proxy_floor: float = 0.25
+    hyperedge_pair_score_mode: str = "endpoint_proxy"
+    hyperedge_state_stream_enabled: bool = False
+    hyperedge_consensus_rounds: int = 2
+    hyperedge_min_target_coverage: float = 1.0
+    hyperedge_safety_fallback_enabled: bool = True
+    # Diagnostic architecture gate: replace the average-utility greedy P0 with
+    # an exact single-role max-min MILP. Optionally bypass the learned local
+    # commitment filter to separate graph loss from solver-objective loss.
+    p0_maxmin_pairing_enabled: bool = False
+    p0_maxmin_bypass_commitment_filter: bool = False
+    p0_maxmin_pairing_hold_frames: int = 1
+    p0_maxmin_local_fusion_enabled: bool = False
+    p0_maxmin_event_triggered_enabled: bool = False
+    p0_maxmin_deficit_priority_gain: float = 3.0
     # P0 information source (B6). False (default) = ORACLE inner scheduler: P0 ranks
     # candidates on TRUE target geometry (upper bound). True = DEPLOYABLE: P0 ranks on
     # the fused belief estimate, while the realized deflection/P_D of the selected
@@ -539,6 +596,8 @@ class MARLParams:
     target_allocation_teacher_qos_weight: float = 2.0
     target_allocation_teacher_commitment_frames: int = 5
     target_allocation_teacher_height_m: float = 20.0
+    target_allocation_teacher_crisis_only_enabled: bool = False
+    target_allocation_teacher_crisis_floor: float = 0.60
     target_allocation_sinkhorn_enabled: bool = False
     # Capacitated decentralized matching. Sparse physical target tokens form
     # local rows of a UAV-target bid graph; alternating Sinkhorn projection
@@ -624,12 +683,41 @@ class MARLParams:
     risk_residual_gate_bias: float = -2.0
     risk_residual_learning_rate: float = 3.0e-5
     risk_residual_directional_basis_enabled: bool = False
+    # Architecture V2 removes parameter-level K/Q dependence from the
+    # deployed actor. Every target-dependent decision is produced by a shared
+    # scorer and pooled with a set operation; absolute UAV IDs are not inputs.
+    architecture_v2_enabled: bool = False
+    architecture_v2_prior_gain: float = 1.0
+    architecture_v2_distance_weight: float = 0.25
+    architecture_v2_qos_floor: float = 0.60
+    architecture_v2_comm_prior_gain: float = 2.0
+    architecture_v2_comm_crisis_threshold: float = 0.25
+    architecture_v2_consensus_enabled: bool = True
+    architecture_v2_matching_temperature: float = 0.35
+    architecture_v2_movement_consensus_blend: float = 1.0
+    architecture_v2_endpoint_consensus_gain: float = 2.0
+    architecture_v2_bid_residual_scale: float = 0.25
+    architecture_v2_sensing_aligned_claims_enabled: bool = False
+    # ADMN-inspired, but identity-free, modular coordination.  Shared experts
+    # alter only the slow bid/movement latent.  A set-pooled local router
+    # chooses their mixture from locally observable target/QoS context, so
+    # decentralized execution and target permutation equivariance are kept.
+    architecture_v2_modular_coordination_enabled: bool = False
+    architecture_v2_modular_num_experts: int = 3
+    architecture_v2_modular_gain: float = 0.25
+    architecture_v2_modular_temperature: float = 0.75
+    architecture_v2_modular_balance_coef: float = 0.01
+    architecture_v2_modular_specialization_coef: float = 0.002
+    architecture_v2_modular_lr_scale: float = 1.0
     # Cardinality-independent local communication decisions. The set pooling
     # consumes only one UAV's own outgoing per-target tokens.
     scale_equivariant_comm_heads_enabled: bool = False
     # Replace K-long agent one-hot input in round negotiation with the shared
     # proposal/response phase, preserving permutation equivariance.
     permutation_equivariant_round_encoding_enabled: bool = False
+    # Set-based scalar/per-target MAPPO value function. Unlike the auxiliary
+    # risk head, this is the main PPO baseline and has no fixed-width K/Q MLP.
+    equivariant_value_critic_enabled: bool = False
     # CTDE-only set/distributional risk critic.  Shared UAV/target encoders
     # remove absolute node identities; the module is absent from deployment.
     set_risk_critic_enabled: bool = False

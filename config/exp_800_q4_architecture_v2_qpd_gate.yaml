@@ -1,0 +1,38 @@
+# QPD-ISAC mechanism gate.
+#
+# The deployed Architecture-V2 actor is frozen.  A local geometric marginal
+# proxy, virtual QoS queues and two locally unrolled primal-dual iterations
+# generate the sparse commitment graph.  Existing max-min P0 remains only as
+# the final hard single-role feasibility projection in this first stage.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  distributed_target_commitment_source: qpd
+  # Keep the first mechanism gate differentiable and non-starving.  The QPD
+  # primal remains sparse, but low-confidence off-graph edges retain the
+  # existing 0.25 safety floor until distributed endpoint rendezvous is proven.
+  distributed_target_commitment_mode: soft
+  qpd_isac_enabled: true
+  qpd_qos_floor: 0.60
+  qpd_queue_step: 0.25
+  qpd_queue_max: 4.0
+  qpd_primal_step: 1.0
+  qpd_dual_step: 0.25
+  qpd_rounds: 2
+  qpd_row_capacity: 2.0
+  qpd_target_capacity: 2.0
+  qpd_price_max: 4.0
+  qpd_primal_exploration_floor: 0.0
+  qpd_peer_deficit_gain: 0.0
+  qpd_send_threshold: 0.05
+  qpd_bid_change_weight: 1.0
+  qpd_power_cost: 0.02
+  qpd_comm_cost: 0.01
+  qpd_switch_cost: 0.02
+  qpd_capability_distance_scale_m: 150.0
+  qpd_commitment_threshold: 0.25
+  qpd_override_token_mask: true
+  # Append the five protocol coordinates to the same physical packet instead
+  # of overwriting the checkpoint's learned 16-D latent content.
+  qpd_overwrite_protocol_header: false
+  qpd_override_sensing_weights: true

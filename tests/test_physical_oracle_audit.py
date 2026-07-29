@@ -1,0 +1,57 @@
+from types import SimpleNamespace
+
+import numpy as np
+
+from uav_isac.evaluation.physical_oracle_audit import (
+    per_watt_deflection_tensor,
+    summarize_physical_feasibility_oracles,
+)
+
+
+def test_per_watt_deflection_recovers_linear_gain():
+    entries = [
+        SimpleNamespace(i=0, j=1, q=0, d_eff=4.0),
+        SimpleNamespace(i=1, j=0, q=0, d_eff=3.0),
+    ]
+    power = np.array([[0.5], [0.25]])
+    coefficient = per_watt_deflection_tensor(
+        entries, power, num_uavs=2, num_targets=1)
+    assert coefficient[0, 1, 0] == 8.0
+    assert coefficient[1, 0, 0] == 12.0
+    assert coefficient[0, 0, 0] == 0.0
+
+
+def test_physical_oracle_summary_separates_pair_and_duplex_gaps():
+    row = {
+        "fusion_mode": "local_only",
+        "deployed_worst": 0.40,
+        "deployed_weak3": 0.60,
+        "deployed_steady": 0.70,
+        "pair_only_worst": 0.52,
+        "pair_only_weak3": 0.68,
+        "pair_only_steady": 0.75,
+        "power_only_worst": 0.48,
+        "power_only_weak3": 0.65,
+        "power_only_steady": 0.73,
+        "single_worst": 0.65,
+        "single_weak3": 0.75,
+        "single_steady": 0.80,
+        "duplex_worst": 0.75,
+        "duplex_weak3": 0.82,
+        "duplex_steady": 0.86,
+        "single_worst_gap": 0.25,
+        "pair_only_worst_gap": 0.12,
+        "power_only_worst_gap": 0.08,
+        "joint_over_best_isolated_worst_gap": 0.13,
+        "duplex_worst_gap": 0.35,
+        "duplex_over_single_worst_gap": 0.10,
+    }
+    summary = summarize_physical_feasibility_oracles(
+        [[dict(row)] for _ in range(10)],
+        bootstrap_samples=20,
+    )
+    assert summary["eval_physical_oracle_single_gate_pass"] is True
+    assert summary["eval_physical_oracle_pair_only_gate_pass"] is True
+    assert summary["eval_physical_oracle_duplex_gate_pass"] is True
+    assert summary["eval_physical_oracle_single_feasible_rate"] == 1.0
+    assert summary["eval_physical_oracle_fusion_modes"] == ["local_only"]

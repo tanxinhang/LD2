@@ -1,0 +1,8 @@
+# Communication-assisted sensing contract: the sparse Token mask is generated
+# from the exact sensing logits that determine the UAV's executed per-target
+# power split. P0 then consumes that transmitted contract without inferring a
+# second top-k variable.
+extends: exp_800_q4_architecture_v2_maxmin_token_commitment_gate.yaml
+
+marl:
+  architecture_v2_sensing_aligned_claims_enabled: true

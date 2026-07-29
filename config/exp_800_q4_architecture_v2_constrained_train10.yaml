@@ -1,0 +1,10 @@
+# Protected residual-learning gate.  The physical prior and distributed
+# matching remain authoritative while PPO learns bounded corrections.
+extends: exp_800_q4_architecture_v2_screen.yaml
+
+marl:
+  lr: 0.00003
+  critic_lr_mult: 50.0
+  num_episodes: 10
+  target_allocation_aux_epochs: 0
+  comm_rate_bonus_aux_coef: 0.0

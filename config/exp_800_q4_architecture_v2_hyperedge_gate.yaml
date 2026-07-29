@@ -1,0 +1,14 @@
+# Gate B: learning-free, physically accounted, directed Tx/Rx hyperedge offers.
+# The ordinary 16-D learned target Token remains intact. Three protocol
+# coordinates per active target are appended and charged at the chosen bit rate.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  hyperedge_negotiation_enabled: true
+  hyperedge_share_topk: 4
+  hyperedge_distance_scale_m: 150.0
+  hyperedge_deficit_gain: 2.0
+  hyperedge_proxy_floor: 0.25
+  hyperedge_consensus_rounds: 2
+  hyperedge_min_target_coverage: 1.0
+  hyperedge_safety_fallback_enabled: true

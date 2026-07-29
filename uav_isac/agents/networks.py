@@ -30,7 +30,7 @@ def sinkhorn_normalize(
 def exact_permutation_assignment(
     logits: torch.Tensor,
     temperature: float = 0.35,
-    max_exact_agents: int = 8,
+    max_exact_agents: int = 6,
 ) -> torch.Tensor:
     """Exact decentralized one-to-one projection with soft gradients.
 
@@ -377,6 +377,22 @@ class StructuredActorNetwork(nn.Module):
                  semantic_kinematic_field_gain: float = 0.15,
                  target_conditioned_movement_enabled: bool = False,
                  target_conditioned_movement_gain: float = 0.15,
+                 architecture_v2_enabled: bool = False,
+                 architecture_v2_prior_gain: float = 1.0,
+                 architecture_v2_distance_weight: float = 0.25,
+                 architecture_v2_qos_floor: float = 0.60,
+                 architecture_v2_comm_prior_gain: float = 2.0,
+                 architecture_v2_comm_crisis_threshold: float = 0.25,
+                 architecture_v2_consensus_enabled: bool = True,
+                 architecture_v2_matching_temperature: float = 0.35,
+                 architecture_v2_movement_consensus_blend: float = 1.0,
+                 architecture_v2_endpoint_consensus_gain: float = 2.0,
+                 architecture_v2_bid_residual_scale: float = 0.25,
+                 architecture_v2_sensing_aligned_claims_enabled: bool = False,
+                 architecture_v2_modular_coordination_enabled: bool = False,
+                 architecture_v2_modular_num_experts: int = 3,
+                 architecture_v2_modular_gain: float = 0.25,
+                 architecture_v2_modular_temperature: float = 0.75,
                  scale_equivariant_comm_heads_enabled: bool = False,
                  permutation_equivariant_round_encoding_enabled: bool = False,
                  comm_channel_feedback_rate_enabled: bool = False,
@@ -498,6 +514,46 @@ class StructuredActorNetwork(nn.Module):
             target_conditioned_movement_enabled and use_target_allocation)
         self._target_conditioned_movement_gain = max(
             0.0, float(target_conditioned_movement_gain))
+        self._architecture_v2_enabled = bool(architecture_v2_enabled)
+        self._architecture_v2_prior_gain = max(
+            0.0, float(architecture_v2_prior_gain))
+        self._architecture_v2_distance_weight = max(
+            0.0, float(architecture_v2_distance_weight))
+        self._architecture_v2_qos_floor = float(np.clip(
+            architecture_v2_qos_floor, 1e-3, 1.0))
+        self._architecture_v2_comm_prior_gain = max(
+            0.0, float(architecture_v2_comm_prior_gain))
+        self._architecture_v2_comm_crisis_threshold = float(np.clip(
+            architecture_v2_comm_crisis_threshold, 0.0, 1.0))
+        self._architecture_v2_consensus_enabled = bool(
+            architecture_v2_enabled and architecture_v2_consensus_enabled)
+        self._architecture_v2_matching_temperature = max(
+            1e-3, float(architecture_v2_matching_temperature))
+        self._architecture_v2_movement_consensus_blend = float(np.clip(
+            architecture_v2_movement_consensus_blend, 0.0, 1.0))
+        self._architecture_v2_endpoint_consensus_gain = max(
+            0.0, float(architecture_v2_endpoint_consensus_gain))
+        self._architecture_v2_bid_residual_scale = max(
+            0.0, float(architecture_v2_bid_residual_scale))
+        self._architecture_v2_sensing_aligned_claims_enabled = bool(
+            architecture_v2_enabled
+            and architecture_v2_sensing_aligned_claims_enabled)
+        self._architecture_v2_modular_coordination_enabled = bool(
+            architecture_v2_enabled
+            and architecture_v2_modular_coordination_enabled)
+        self._architecture_v2_modular_num_experts = max(
+            2, int(architecture_v2_modular_num_experts))
+        self._architecture_v2_modular_gain = max(
+            0.0, float(architecture_v2_modular_gain))
+        self._architecture_v2_modular_temperature = max(
+            1e-3, float(architecture_v2_modular_temperature))
+        if self._architecture_v2_enabled and not (
+                use_target_allocation
+                and comm_target_token_enabled
+                and use_comm_cross_attention):
+            raise ValueError(
+                'architecture_v2_enabled requires target allocation, '
+                'per-target token communication and cross-attention')
         if (self._semantic_kinematic_field_enabled
                 and self._target_conditioned_movement_enabled):
             raise ValueError(
@@ -517,10 +573,12 @@ class StructuredActorNetwork(nn.Module):
         self._comm_target_token_enabled = bool(comm_target_token_enabled)
         self.comm_target_token_dim = max(1, int(comm_target_token_dim))
         self._scale_equivariant_comm_heads_enabled = bool(
-            scale_equivariant_comm_heads_enabled
+            (scale_equivariant_comm_heads_enabled
+             or self._architecture_v2_enabled)
             and self._comm_target_token_enabled)
         self._permutation_equivariant_round_encoding_enabled = bool(
-            permutation_equivariant_round_encoding_enabled
+            (permutation_equivariant_round_encoding_enabled
+             or self._architecture_v2_enabled)
             and self._round_negotiation_enabled)
         self.last_comm_attention = None
         self.last_target_assignment = None
@@ -543,6 +601,20 @@ class StructuredActorNetwork(nn.Module):
         self.last_comm_semantic_pd = None
         self.last_comm_semantic_capacity_bias = None
         self.last_comm_semantic_extra_token_mask = None
+        self.last_v2_target_latent = None
+        self.last_v2_sensing_logits = None
+        self.last_v2_movement_gate = None
+        self.last_v2_physics_prior = None
+        self.last_v2_comm_crisis = None
+        self.last_v2_local_bids = None
+        self.last_v2_local_bid_logits = None
+        self.last_v2_peer_bids = None
+        self.last_v2_bid_agreement = None
+        self.last_v2_movement_consensus = None
+        self.last_v2_endpoint_consensus = None
+        self.last_v2_consensus_available = None
+        self.last_v2_module_routing = None
+        self.last_v2_module_residual_norm = None
         self.last_semantic_field_vector = None
         self.last_semantic_field_weights = None
         self.last_semantic_field_delta = None
@@ -616,6 +688,25 @@ class StructuredActorNetwork(nn.Module):
         if self._use_target_allocation:
             self.target_assignment_head = nn.Sequential(
                 nn.Linear(2 * D, D), nn.ReLU(), nn.Linear(D, 1))
+            if self._architecture_v2_enabled:
+                # A single shared target trunk produces every target-dependent
+                # action.  No parameter dimension depends on Q: permuting the
+                # local target set permutes these outputs, and a checkpoint can
+                # be reused at a different target cardinality.
+                self.v2_target_policy = nn.Sequential(
+                    nn.Linear(2 * D, D),
+                    nn.LayerNorm(D),
+                    nn.SiLU(),
+                    nn.Linear(D, D),
+                    nn.SiLU(),
+                )
+                self.v2_assignment_head = nn.Linear(D, 1)
+                self.v2_sensing_head = nn.Linear(D, 1)
+                self.v2_movement_head = nn.Linear(D, 2)
+                self.v2_target_attention = nn.Linear(D, 1)
+                self.v2_target_context = nn.Sequential(
+                    nn.Linear(D, D), nn.LayerNorm(D), nn.SiLU())
+                self.v2_movement_gate = nn.Linear(2 * D, 1)
             if self._hierarchical_dual_assignment_enabled:
                 # Independent slow commitment head.  Endpoint-capacity PPO and
                 # the one-target kinematic teacher no longer push the same
@@ -642,8 +733,9 @@ class StructuredActorNetwork(nn.Module):
             # A local synchronized phase bit is not inter-UAV information.  It
             # lets the same shared policy emit a proposal token in round 0 and
             # a response token after consuming the delivered proposal in round 1.
-            self.round_phase_enc = nn.Sequential(
-                nn.Linear(2 + self.K, D), nn.Tanh(), nn.Linear(D, D))
+            if not self._architecture_v2_enabled:
+                self.round_phase_enc = nn.Sequential(
+                    nn.Linear(2 + self.K, D), nn.Tanh(), nn.Linear(D, D))
             if self._permutation_equivariant_round_encoding_enabled:
                 # The phase is shared local protocol state, not an agent ID.
                 # Removing the K-dimensional one-hot makes this branch
@@ -663,15 +755,21 @@ class StructuredActorNetwork(nn.Module):
         if self._comm_target_token_enabled:
             self.comm_target_token_head = nn.Linear(
                 D, self.comm_target_token_dim)
-        self.comm_rate_head = nn.Linear(
-            self.comm_payload_dim, comm_num_rate_levels)
+        if not self._architecture_v2_enabled:
+            self.comm_rate_head = nn.Linear(
+                self.comm_payload_dim, comm_num_rate_levels)
         if self._comm_channel_feedback_rate_enabled:
             self.comm_rate_feedback_head = nn.Linear(
                 self.comm_channel_feedback_dim, comm_num_rate_levels)
+        comm_std_dim = (
+            self.comm_target_token_dim
+            if self._architecture_v2_enabled
+            else self.comm_payload_dim)
         self.comm_log_std = nn.Parameter(
-            torch.full((self.comm_payload_dim,), float(comm_log_std_init)))
-        self.isac_power_mean_head = nn.Linear(self.comm_payload_dim, 1)
-        self.isac_sensing_mean_head = nn.Linear(self.comm_payload_dim, Q)
+            torch.full((comm_std_dim,), float(comm_log_std_init)))
+        if not self._architecture_v2_enabled:
+            self.isac_power_mean_head = nn.Linear(self.comm_payload_dim, 1)
+            self.isac_sensing_mean_head = nn.Linear(self.comm_payload_dim, Q)
         if self._scale_equivariant_comm_heads_enabled:
             # Pool only this UAV's own per-target outgoing tokens. No raw
             # state or hidden representation from another UAV is available.
@@ -683,22 +781,51 @@ class StructuredActorNetwork(nn.Module):
                 self.comm_target_token_dim, 1)
         self.isac_power_log_std = nn.Parameter(torch.tensor(
             [float(isac_power_log_std_init)]))
+        sensing_std_dim = 1 if self._architecture_v2_enabled else Q
         self.isac_sensing_log_std = nn.Parameter(torch.full(
-            (Q,), float(sensing_allocation_log_std_init)))
-        self.intent_head = nn.Linear(self.comm_payload_dim, Q)
+            (sensing_std_dim,), float(sensing_allocation_log_std_init)))
+        if not self._architecture_v2_enabled:
+            self.intent_head = nn.Linear(self.comm_payload_dim, Q)
         self.role_head = nn.Linear(D, 3)
         self.dp_log_std = nn.Parameter(torch.zeros(2))
 
+        if self._architecture_v2_modular_coordination_enabled:
+            # Register optional experts only after every historical actor
+            # module. Combined with fork_rng, this makes all common parameters
+            # bitwise identical for the same seed in enabled/disabled actors.
+            # Thus a gate experiment cannot mistake constructor RNG drift for
+            # a modular-routing gain.
+            with torch.random.fork_rng(devices=[]):
+                router_input_dim = 2 * D + 3
+                self.v2_module_router = nn.Sequential(
+                    nn.Linear(router_input_dim, D),
+                    nn.SiLU(),
+                    nn.Linear(
+                        D, self._architecture_v2_modular_num_experts),
+                )
+                self.v2_coordination_experts = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(D, D),
+                        nn.SiLU(),
+                        nn.Linear(D, D),
+                    )
+                    for _ in range(
+                        self._architecture_v2_modular_num_experts)
+                ])
+
         self._init_weights()
-        nn.init.zeros_(self.comm_rate_head.weight)
-        nn.init.zeros_(self.comm_rate_head.bias)
+        if hasattr(self, 'comm_rate_head'):
+            nn.init.zeros_(self.comm_rate_head.weight)
+            nn.init.zeros_(self.comm_rate_head.bias)
         if self._comm_channel_feedback_rate_enabled:
             nn.init.zeros_(self.comm_rate_feedback_head.weight)
             nn.init.zeros_(self.comm_rate_feedback_head.bias)
-        nn.init.zeros_(self.isac_power_mean_head.weight)
-        nn.init.zeros_(self.isac_power_mean_head.bias)
-        nn.init.zeros_(self.isac_sensing_mean_head.weight)
-        nn.init.zeros_(self.isac_sensing_mean_head.bias)
+        if hasattr(self, 'isac_power_mean_head'):
+            nn.init.zeros_(self.isac_power_mean_head.weight)
+            nn.init.zeros_(self.isac_power_mean_head.bias)
+        if hasattr(self, 'isac_sensing_mean_head'):
+            nn.init.zeros_(self.isac_sensing_mean_head.weight)
+            nn.init.zeros_(self.isac_sensing_mean_head.bias)
         if self._scale_equivariant_comm_heads_enabled:
             # Uniform set pooling is the neutral cardinality-equivariant
             # initialization. Compatible checkpoint loading replaces the two
@@ -714,6 +841,31 @@ class StructuredActorNetwork(nn.Module):
             # PPO and the allocation auxiliary can open the residual gate.
             nn.init.zeros_(self.allocation_gate.weight)
             nn.init.constant_(self.allocation_gate.bias, -4.0)
+            if self._architecture_v2_enabled:
+                # Start from the explicit geometry/QoS prior. The learned
+                # target heads are residuals and can override it after PPO
+                # observes communication-conditioned improvements.
+                nn.init.zeros_(self.v2_assignment_head.weight)
+                nn.init.zeros_(self.v2_assignment_head.bias)
+                nn.init.zeros_(self.v2_sensing_head.weight)
+                nn.init.zeros_(self.v2_sensing_head.bias)
+                nn.init.zeros_(self.v2_movement_head.weight)
+                with torch.no_grad():
+                    self.v2_movement_head.bias.copy_(torch.tensor(
+                        [1.0, 0.0],
+                        dtype=self.v2_movement_head.bias.dtype))
+                nn.init.zeros_(self.v2_movement_gate.weight)
+                nn.init.constant_(self.v2_movement_gate.bias, 2.0)
+                if self._architecture_v2_modular_coordination_enabled:
+                    # Uniform routing makes the centered expert mixture an
+                    # exact no-op for migrated V2 checkpoints. Different small
+                    # expert bases still give the router a useful first-step
+                    # gradient under direct-bid supervision.
+                    nn.init.zeros_(self.v2_module_router[-1].weight)
+                    nn.init.zeros_(self.v2_module_router[-1].bias)
+                    for expert in self.v2_coordination_experts:
+                        nn.init.orthogonal_(expert[-1].weight, gain=0.02)
+                        nn.init.zeros_(expert[-1].bias)
             if self._target_conditioned_movement_enabled:
                 # Exact no-op for old checkpoints. PPO must earn any physical
                 # influence through target-wise movement credit.
@@ -980,6 +1132,61 @@ class StructuredActorNetwork(nn.Module):
                 comm_agg, pd_hist, comm_tokens, comm_mask,
                 channel_feedback)
 
+    def _route_v2_coordination_modules(
+        self,
+        target_latent: torch.Tensor,
+        local_target_latent: torch.Tensor,
+        qos_deficit: torch.Tensor,
+    ):
+        """Apply identity-free shared experts to the slow coordination latent.
+
+        The routing context is a permutation-invariant summary of this UAV's
+        local target set plus three local QoS-deficit statistics. The same
+        routing is used for message-conditioned and pre-message latents, so the
+        transmitted comparable bid remains receiver independent.
+
+        Expert outputs are mixed with ``routing - uniform``. A newly enabled
+        zero-initialized router is therefore an exact no-op while direct
+        bid/movement supervision can still break the routing symmetry.
+        """
+        if not self._architecture_v2_modular_coordination_enabled:
+            self.last_v2_module_routing = None
+            self.last_v2_module_residual_norm = None
+            return target_latent, local_target_latent
+
+        pooled_mean = local_target_latent.mean(dim=1)
+        pooled_max = local_target_latent.amax(dim=1)
+        deficit_stats = torch.stack([
+            qos_deficit.mean(dim=-1),
+            qos_deficit.amax(dim=-1),
+            qos_deficit.std(dim=-1, unbiased=False),
+        ], dim=-1)
+        router_input = torch.cat(
+            [pooled_mean, pooled_max, deficit_stats], dim=-1)
+        route_logits = self.v2_module_router(router_input)
+        routing = torch.softmax(
+            route_logits / self._architecture_v2_modular_temperature,
+            dim=-1)
+        centered_routing = routing - (
+            1.0 / float(self._architecture_v2_modular_num_experts))
+
+        def apply_experts(latent):
+            expert_outputs = torch.stack(
+                [expert(latent) for expert in self.v2_coordination_experts],
+                dim=2,
+            )
+            residual = torch.einsum(
+                'bm,bqmd->bqd', centered_routing, expert_outputs)
+            residual = self._architecture_v2_modular_gain * residual
+            return latent + residual, residual
+
+        routed_target, target_residual = apply_experts(target_latent)
+        routed_local, _ = apply_experts(local_target_latent)
+        self.last_v2_module_routing = routing
+        self.last_v2_module_residual_norm = (
+            target_residual.norm(dim=-1).mean(dim=-1).detach())
+        return routed_target, routed_local
+
     def forward(self, obs: torch.Tensor, h_prev: torch.Tensor = None,
                 detach_h_new: bool = True, window_mask: torch.Tensor = None,
                 comm_round_phase: torch.Tensor = None,
@@ -1048,6 +1255,8 @@ class StructuredActorNetwork(nn.Module):
         self.last_comm_semantic_pd = None
         self.last_comm_semantic_capacity_bias = None
         self.last_comm_semantic_extra_token_mask = None
+        self.last_v2_module_routing = None
+        self.last_v2_module_residual_norm = None
         local_te = te
         if (self._use_comm_cross_attention
                 and comm_tokens is not None and comm_tokens.shape[1] > 0):
@@ -1134,12 +1343,76 @@ class StructuredActorNetwork(nn.Module):
         # the masked per-sender communication context, so the allocation remains
         # local at execution time while being communication-aware.
         assignment_context = None
+        v2_local_bid_scores = None
+        v2_movement_consensus = None
+        v2_endpoint_consensus = None
+        v2_consensus_available = None
         if self._use_target_allocation:
             self_for_targets = se.expand(-1, self.Q, -1)
             assignment_features = torch.cat(
                 [negotiation_te, self_for_targets], dim=-1)
-            assignment_logits = self.target_assignment_head(
-                assignment_features).squeeze(-1)
+            if self._architecture_v2_enabled:
+                v2_target_latent = self.v2_target_policy(
+                    assignment_features)
+                normalized_distance = targets[
+                    ..., -1][:, :, 11].clamp_min(0.0)
+                qos_deficit = torch.relu(
+                    self._architecture_v2_qos_floor - pd_last
+                ) / self._architecture_v2_qos_floor
+                # A cardinality-invariant local crisis statistic supplies the
+                # communication-rate head with a deployment-time prior.  It
+                # removes the stochastic-training/deterministic-evaluation
+                # tie at initialization while still allowing silence after
+                # every locally observed target clears the QoS floor.
+                self.last_v2_comm_crisis = qos_deficit.amax(dim=-1)
+                physics_prior = (
+                    qos_deficit
+                    - self._architecture_v2_distance_weight
+                    * normalized_distance)
+                # The comparable bid must not depend on received messages:
+                # otherwise different receivers reconstruct different team
+                # matrices.  The shared scorer is evaluated on the pre-message
+                # local target representation for a stable proposal round.
+                local_assignment_features = torch.cat(
+                    [local_te, self_for_targets], dim=-1)
+                local_target_latent = self.v2_target_policy(
+                    local_assignment_features)
+                v2_target_latent, local_target_latent = (
+                    self._route_v2_coordination_modules(
+                        v2_target_latent,
+                        local_target_latent,
+                        qos_deficit,
+                    ))
+                learned_assignment = (
+                    self._architecture_v2_bid_residual_scale
+                    * torch.tanh(self.v2_assignment_head(
+                        v2_target_latent).squeeze(-1)))
+                local_assignment_logits = (
+                    self._architecture_v2_bid_residual_scale
+                    * torch.tanh(self.v2_assignment_head(
+                        local_target_latent).squeeze(-1))
+                    + self._architecture_v2_prior_gain * physics_prior)
+                v2_local_bid_scores = torch.tanh(local_assignment_logits)
+                # Non-detached logits are the causal variable encoded in the
+                # comparable Token header. CTDE may supervise this local
+                # intention directly instead of backpropagating through a
+                # saturated hard team matching result.
+                self.last_v2_local_bid_logits = local_assignment_logits
+                self.last_v2_local_bids = (
+                    v2_local_bid_scores.detach())
+                assignment_logits = (
+                    learned_assignment
+                    + self._architecture_v2_prior_gain * physics_prior)
+                self.last_v2_target_latent = v2_target_latent
+                self.last_v2_sensing_logits = (
+                    self.v2_sensing_head(
+                        v2_target_latent).squeeze(-1)
+                    + self._architecture_v2_prior_gain * physics_prior)
+                self.last_v2_physics_prior = physics_prior.detach()
+            else:
+                self.last_v2_comm_crisis = None
+                assignment_logits = self.target_assignment_head(
+                    assignment_features).squeeze(-1)
             if self._hierarchical_dual_assignment_enabled:
                 movement_features = assignment_features + torch.tanh(
                     self.movement_feature_adapter(assignment_features))
@@ -1171,7 +1444,113 @@ class StructuredActorNetwork(nn.Module):
                 self.last_peer_claim_load = peer_load.detach()
             else:
                 self.last_peer_claim_load = None
-            if (self._round_negotiation_enabled
+            if self._architecture_v2_enabled:
+                # Reserve one token coordinate as a scale-free coordination
+                # header.  Each node compares its local bid with delivered
+                # peer bids using only its own inbox.  The remaining token
+                # coordinates remain unconstrained latent semantics.
+                if (msg_entities is not None and valid is not None
+                        and msg_entities.shape[1]
+                        == (self.K - 1) * self.Q):
+                    peer_content = comm_tokens[
+                        ..., :self.comm_target_token_dim].reshape(
+                            B, self.K - 1, self.Q,
+                            self.comm_target_token_dim)
+                    peer_bids = peer_content[..., 0]
+                    peer_valid = valid.reshape(B, self.K - 1, self.Q)
+                    margin = (
+                        v2_local_bid_scores.unsqueeze(1) - peer_bids
+                    ) / self._round_negotiation_temperature
+                    win_log = torch.nn.functional.logsigmoid(margin)
+                    win_log = win_log * peer_valid.to(win_log.dtype)
+                    peer_count = peer_valid.sum(
+                        dim=1).clamp_min(1).to(win_log.dtype)
+                    agreement = win_log.sum(dim=1) / peer_count
+                    assignment_logits = (
+                        assignment_logits
+                        + self._round_negotiation_strength * agreement)
+                    movement_logits = (
+                        movement_logits
+                        + self._round_negotiation_strength * agreement)
+                    self.last_v2_peer_bids = peer_bids.detach()
+                    self.last_v2_bid_agreement = agreement.detach()
+                    if self._architecture_v2_consensus_enabled:
+                        # Every receiver sees the same set of sender bids up to
+                        # row permutation.  Exact assignment (small square
+                        # teams) and Sinkhorn fallback are row-equivariant, so
+                        # the receiver can select its first/local row without
+                        # an absolute UAV ID or central coordinator.
+                        # Use this UAV's physically transmitted previous bid,
+                        # not a newly recomputed one.  Peers received that same
+                        # bid, so every node reconstructs exactly the same
+                        # sparse matrix up to row order despite message delay.
+                        # The fixed local-memory block supports the intended
+                        # Q<=8 scaling range (including the 8/8 experiment).
+                        if comm_agg.shape[-1] >= 2 * self.Q:
+                            own_memory_bid = comm_agg[:, :self.Q]
+                            own_memory_valid = (
+                                comm_agg[:, self.Q:2 * self.Q] > 0.5)
+                        else:
+                            own_memory_bid = v2_local_bid_scores
+                            own_memory_valid = torch.zeros(
+                                B, self.Q, dtype=torch.bool,
+                                device=obs.device)
+                        team_bids = torch.cat([
+                            own_memory_bid.unsqueeze(1),
+                            peer_bids,
+                        ], dim=1)
+                        team_valid = torch.cat([
+                            own_memory_valid.unsqueeze(1),
+                            peer_valid,
+                        ], dim=1)
+                        feasible_bids = torch.where(
+                            team_valid,
+                            team_bids,
+                            torch.full_like(team_bids, -12.0))
+                        movement_team = exact_permutation_assignment(
+                            feasible_bids,
+                            temperature=(
+                                self._architecture_v2_matching_temperature),
+                        )
+                        v2_movement_consensus = movement_team[:, 0, :]
+
+                        endpoint_capacity = min(
+                            float(self._sparse_claim_desired_endpoints),
+                            float(self.K))
+                        row_capacity = (
+                            endpoint_capacity * float(self.Q)
+                            / float(self.K))
+                        endpoint_team = capacity_sinkhorn_normalize(
+                            feasible_bids,
+                            row_capacity=row_capacity,
+                            column_capacity=endpoint_capacity,
+                            iterations=16,
+                            temperature=(
+                                self._architecture_v2_matching_temperature),
+                        )
+                        v2_endpoint_consensus = endpoint_team[:, 0, :]
+                        v2_endpoint_consensus = (
+                            v2_endpoint_consensus
+                            / v2_endpoint_consensus.sum(
+                                dim=-1, keepdim=True).clamp_min(1e-8))
+                        v2_consensus_available = (
+                            own_memory_valid.any(dim=-1, keepdim=True)
+                            & peer_valid.any(
+                                dim=-1).all(dim=-1, keepdim=True))
+                        self.last_v2_movement_consensus = (
+                            movement_team.detach())
+                        self.last_v2_endpoint_consensus = (
+                            endpoint_team.detach())
+                        self.last_v2_consensus_available = (
+                            v2_consensus_available.detach())
+                else:
+                    self.last_v2_peer_bids = None
+                    self.last_v2_bid_agreement = None
+                    self.last_v2_movement_consensus = None
+                    self.last_v2_endpoint_consensus = None
+                    self.last_v2_consensus_available = None
+                self.last_round_peer_claims = None
+            elif (self._round_negotiation_enabled
                     and msg_entities is not None and valid is not None
                     and msg_entities.shape[1]
                     == (self.K - 1) * self.Q):
@@ -1211,6 +1590,33 @@ class StructuredActorNetwork(nn.Module):
             movement_probs = torch.softmax(
                 movement_logits / self._target_allocation_temperature,
                 dim=-1)
+            if (v2_movement_consensus is not None
+                    and v2_consensus_available is not None):
+                movement_blend = (
+                    self._architecture_v2_movement_consensus_blend)
+                consensus_movement = (
+                    (1.0 - movement_blend) * movement_probs
+                    + movement_blend * v2_movement_consensus)
+                movement_probs = torch.where(
+                    v2_consensus_available,
+                    consensus_movement,
+                    movement_probs)
+            if (v2_endpoint_consensus is not None
+                    and v2_consensus_available is not None):
+                assignment_probs = torch.where(
+                    v2_consensus_available,
+                    v2_endpoint_consensus,
+                    assignment_probs)
+                endpoint_logits = torch.log(
+                    v2_endpoint_consensus.clamp_min(1e-8))
+                endpoint_logits = (
+                    endpoint_logits
+                    - endpoint_logits.mean(dim=-1, keepdim=True))
+                self.last_v2_sensing_logits = (
+                    self.last_v2_sensing_logits
+                    + self._architecture_v2_endpoint_consensus_gain
+                    * endpoint_logits
+                    * v2_consensus_available.to(endpoint_logits.dtype))
             # Preserve the intrinsic local bid before any team projection.
             # This is what must be communicated in the next negotiation round;
             # rebroadcasting the projected one-hot winner creates a positive
@@ -1397,7 +1803,8 @@ class StructuredActorNetwork(nn.Module):
                         assignment_probs,
                     )
             self.last_target_assignment = assignment_probs
-            if not self._hierarchical_dual_assignment_enabled:
+            if (not self._hierarchical_dual_assignment_enabled
+                    and not self._architecture_v2_enabled):
                 movement_probs = assignment_probs
             self.last_movement_assignment = movement_probs
             if self._target_allocation_straight_through:
@@ -1414,14 +1821,29 @@ class StructuredActorNetwork(nn.Module):
             assignment_context = torch.sum(
                 movement_assignment.unsqueeze(-1) * negotiation_te, dim=1)
             if self._sparse_claim_enabled:
-                bid_mix = self._movement_team_matching_intrinsic_bid_mix
-                team_bid_probs = (
-                    bid_mix * local_movement_probs
-                    + (1.0 - bid_mix) * movement_probs)
-                shared_claim_probs = (
-                    team_bid_probs
-                    if self._movement_team_matching_enabled
-                    else assignment_probs)
+                if (self._architecture_v2_sensing_aligned_claims_enabled
+                        and self.last_v2_sensing_logits is not None):
+                    sensing_claim_logits = self.last_v2_sensing_logits
+                    if (self._comm_aided_sensing_enabled
+                            and self.last_comm_sensing_logits is not None
+                            and self.last_comm_sensing_logits.shape
+                            == sensing_claim_logits.shape):
+                        sensing_claim_logits = (
+                            sensing_claim_logits
+                            + self._comm_aided_sensing_blend
+                            * self.last_comm_sensing_logits)
+                    shared_claim_probs = torch.softmax(
+                        sensing_claim_logits, dim=-1)
+                    team_bid_probs = shared_claim_probs
+                else:
+                    bid_mix = self._movement_team_matching_intrinsic_bid_mix
+                    team_bid_probs = (
+                        bid_mix * local_movement_probs
+                        + (1.0 - bid_mix) * movement_probs)
+                    shared_claim_probs = (
+                        team_bid_probs
+                        if self._movement_team_matching_enabled
+                        else assignment_probs)
                 self.last_sparse_claim_scores = shared_claim_probs.detach()
                 top_idx = torch.topk(
                     shared_claim_probs,
@@ -1468,7 +1890,19 @@ class StructuredActorNetwork(nn.Module):
                 self.last_outgoing_token_mask = outgoing_mask.detach()
                 outgoing_target_tokens = (
                     outgoing_target_tokens * outgoing_mask.unsqueeze(-1))
-                if self._movement_team_matching_enabled:
+                if self._architecture_v2_enabled:
+                    # The comparable header is computed before peer agreement
+                    # modifies the local responsibility.  Rebroadcasting the
+                    # negotiated result would create a positive feedback loop.
+                    bid_channel = v2_local_bid_scores * outgoing_mask
+                    if self.comm_target_token_dim == 1:
+                        outgoing_target_tokens = bid_channel.unsqueeze(-1)
+                    else:
+                        outgoing_target_tokens = torch.cat([
+                            bid_channel.unsqueeze(-1),
+                            outgoing_target_tokens[..., 1:],
+                        ], dim=-1)
+                elif self._movement_team_matching_enabled:
                     # Reserve one continuous channel in every learned target
                     # token for a comparable movement bid. The remaining token
                     # dimensions stay latent and continue to condition sensing.
@@ -1484,6 +1918,18 @@ class StructuredActorNetwork(nn.Module):
             else:
                 self.last_outgoing_token_mask = None
                 self.last_sparse_claim_scores = None
+                if self._architecture_v2_enabled:
+                    # Dense V2 communication uses the same coordination
+                    # header; sparse top-k merely masks which headers leave
+                    # the sender.
+                    if self.comm_target_token_dim == 1:
+                        outgoing_target_tokens = (
+                            v2_local_bid_scores.unsqueeze(-1))
+                    else:
+                        outgoing_target_tokens = torch.cat([
+                            v2_local_bid_scores.unsqueeze(-1),
+                            outgoing_target_tokens[..., 1:],
+                        ], dim=-1)
         else:
             self.last_target_assignment = None
             self.last_movement_assignment = None
@@ -1493,6 +1939,11 @@ class StructuredActorNetwork(nn.Module):
             self.last_peer_claim_load = None
             self.last_outgoing_token_mask = None
             self.last_sparse_claim_scores = None
+            self.last_v2_local_bids = None
+            self.last_v2_local_bid_logits = None
+            self.last_v2_movement_consensus = None
+            self.last_v2_endpoint_consensus = None
+            self.last_v2_consensus_available = None
 
         # Streaming GRU for neighbors: (B*Nn, 1, 9) with per-neighbor state
         Nn = neighbors.shape[1]
@@ -1524,10 +1975,68 @@ class StructuredActorNetwork(nn.Module):
 
         self.last_policy_latent = h.detach()
         dp_mean = self.dp_head(h)
+        if (self._architecture_v2_enabled
+                and assignment_context is not None
+                and self.last_v2_target_latent is not None):
+            # Shared target-conditioned kinematics.  Each target proposes a
+            # radial/tangential action in the UAV's local frame; the
+            # communication-refined responsibility distribution combines the
+            # proposals.  Both the scorer and the aggregation are target
+            # permutation equivariant and independent of Q.
+            target_rel_xy = targets[..., -1][:, :, 9:11]
+            target_rel_norm = target_rel_xy.norm(dim=-1, keepdim=True)
+            radial_direction = (
+                target_rel_xy / target_rel_norm.clamp_min(1e-8))
+            radial_direction = torch.where(
+                target_rel_norm > 1e-8,
+                radial_direction,
+                torch.zeros_like(radial_direction))
+            tangent_direction = torch.stack(
+                [-radial_direction[..., 1], radial_direction[..., 0]],
+                dim=-1)
+            raw_coefficients = self.v2_movement_head(
+                self.last_v2_target_latent)
+            # A committed UAV may learn how strongly to approach and how much
+            # tangential baseline to create, but it cannot learn an action
+            # that actively flees its assigned target.  This converts the
+            # communication assignment into a kinematic safety constraint
+            # rather than a weak hidden-state suggestion.
+            coefficients = torch.cat([
+                torch.sigmoid(raw_coefficients[..., :1]),
+                0.5 * torch.tanh(raw_coefficients[..., 1:]),
+            ], dim=-1)
+            coefficient_norm = coefficients.norm(dim=-1, keepdim=True)
+            coefficients = coefficients / coefficient_norm.clamp_min(1.0)
+            candidates = (
+                coefficients[..., :1] * radial_direction
+                + coefficients[..., 1:] * tangent_direction)
+            target_action = torch.sum(
+                movement_probs.unsqueeze(-1) * candidates, dim=1)
+
+            target_attention = torch.softmax(
+                self.v2_target_attention(
+                    self.last_v2_target_latent).squeeze(-1), dim=-1)
+            pooled_target = torch.sum(
+                target_attention.unsqueeze(-1)
+                * self.last_v2_target_latent, dim=1)
+            pooled_target = self.v2_target_context(pooled_target)
+            movement_gate = torch.sigmoid(self.v2_movement_gate(
+                torch.cat([h, pooled_target], dim=-1)))
+            base_action = torch.tanh(dp_mean)
+            blended_action = torch.clamp(
+                (1.0 - movement_gate) * base_action
+                + movement_gate * target_action,
+                -0.999, 0.999)
+            dp_mean = torch.atanh(blended_action)
+            self.last_v2_movement_gate = movement_gate.detach()
+            self.last_target_movement_candidates = candidates.detach()
+            self.last_target_movement_residual = (
+                blended_action - base_action).detach()
         self.last_semantic_field_vector = None
         self.last_semantic_field_weights = None
         self.last_semantic_field_delta = None
         if (assignment_context is not None
+                and not self._architecture_v2_enabled
                 and self._target_allocation_movement_blend > 0.0):
             # Geometry fields 9:11 are the normalized local dx/dy from this UAV
             # to each target.  A straight-through committed target therefore
@@ -1568,6 +2077,7 @@ class StructuredActorNetwork(nn.Module):
                 self.last_effective_movement_blend = blend.detach()
             dp_mean = (1.0 - blend) * dp_mean + blend * guidance_raw
         if (self._semantic_kinematic_field_enabled
+                and not self._architecture_v2_enabled
                 and assignment_context is not None
                 and self.last_peer_claim_load is not None
                 and valid_any is not None):
@@ -1620,6 +2130,7 @@ class StructuredActorNetwork(nn.Module):
             self.last_semantic_field_weights = field_weights.detach()
             self.last_semantic_field_delta = field_delta.detach()
         if (self._target_conditioned_movement_enabled
+                and not self._architecture_v2_enabled
                 and assignment_context is not None):
             # CTMH: every communication-refined target entity proposes a local
             # radial/tangential motion. Negotiated responsibilities combine the
@@ -1687,11 +2198,33 @@ class StructuredActorNetwork(nn.Module):
         to the selected rate.
         """
         comm_log_std = torch.clamp(self.comm_log_std, -4.0, 1.0)
+        if self._architecture_v2_enabled:
+            # One learned uncertainty vector is shared by every target token.
+            # Repetition changes only the sampled action width, not the model
+            # parameters, so the same actor state dict works for any Q.
+            comm_log_std = comm_log_std.repeat(self.Q)
         if self._scale_equivariant_comm_heads_enabled:
             summary = self._pool_local_target_tokens(comm_mean)
             rate_logits = self.comm_set_rate_head(summary)
         else:
             rate_logits = self.comm_rate_head(comm_mean)
+        if (self._architecture_v2_enabled
+                and self.last_v2_comm_crisis is not None
+                and rate_logits.shape[-1] > 1):
+            # General value-of-information prior: a node should communicate
+            # while its local target set contains a material QoS deficit, but
+            # the learned set head may override the prior when communication
+            # is costly or redundant.  Centering the two groups preserves the
+            # logit scale and works for any number of active precision levels.
+            active_margin = self._architecture_v2_comm_prior_gain * (
+                self.last_v2_comm_crisis
+                - self._architecture_v2_comm_crisis_threshold)
+            rate_logits = rate_logits.clone()
+            rate_logits[:, 0] = (
+                rate_logits[:, 0] - 0.5 * active_margin)
+            rate_logits[:, 1:] = (
+                rate_logits[:, 1:]
+                + 0.5 * active_margin.unsqueeze(-1))
         feedback = self.last_comm_channel_feedback
         if (self._comm_channel_feedback_rate_enabled
                 and feedback is not None
@@ -1766,7 +2299,15 @@ class StructuredActorNetwork(nn.Module):
             power_mean = self.isac_set_power_head(summary).squeeze(-1)
         else:
             power_mean = self.isac_power_mean_head(comm_mean).squeeze(-1)
-        sensing_mean = self.isac_sensing_mean_head(comm_mean)
+        if self._architecture_v2_enabled:
+            sensing_mean = self.last_v2_sensing_logits
+            if (sensing_mean is None
+                    or sensing_mean.shape != (comm_mean.shape[0], self.Q)):
+                raise RuntimeError(
+                    'architecture V2 resource parameters require a matching '
+                    'actor forward pass before sensing allocation')
+        else:
+            sensing_mean = self.isac_sensing_mean_head(comm_mean)
         comm_sensing_logits = self.last_comm_sensing_logits
         if (self._comm_aided_sensing_enabled
                 and comm_sensing_logits is not None
@@ -1787,6 +2328,8 @@ class StructuredActorNetwork(nn.Module):
         power_log_std = torch.clamp(self.isac_power_log_std, -4.0, 1.0)
         sensing_log_std = torch.clamp(
             self.isac_sensing_log_std, -4.0, 1.0)
+        if self._architecture_v2_enabled:
+            sensing_log_std = sensing_log_std.expand(self.Q)
         return power_mean, power_log_std, sensing_mean, sensing_log_std
 
 
@@ -1814,6 +2357,10 @@ HEAD_PARAM_PREFIXES = (
     'comm_sensing_gate.', 'comm_sensing_head.',
     'comm_semantic_decoder.',
     'target_movement_head.',
+    'v2_target_policy.', 'v2_assignment_head.', 'v2_sensing_head.',
+    'v2_movement_head.', 'v2_target_attention.', 'v2_target_context.',
+    'v2_movement_gate.', 'v2_module_router.',
+    'v2_coordination_experts.',
     'dp_log_std',  # nn.Parameter, no trailing dot
 )
 ATTENTION_PARAM_PREFIXES = (
@@ -1906,6 +2453,7 @@ class CriticNetwork(nn.Module):
         num_agents: int = 4,
         comm_dim: int = 0,
         num_targets: int = 0,
+        equivariant_value_critic_enabled: bool = False,
         set_risk_critic_enabled: bool = False,
         risk_hidden_dim: int = 128,
         risk_num_quantiles: int = 16,
@@ -1917,16 +2465,65 @@ class CriticNetwork(nn.Module):
         self.num_agents = num_agents
         self.comm_dim = comm_dim
         self.num_targets = num_targets
+        self.equivariant_value_critic_enabled = bool(
+            equivariant_value_critic_enabled)
         self.set_risk_critic_enabled = bool(set_risk_critic_enabled)
         self.risk_num_quantiles = max(2, int(risk_num_quantiles))
         self.risk_cvar_alpha = float(np.clip(risk_cvar_alpha, 1e-6, 1.0))
         self.risk_monotonic_quantiles_enabled = bool(
             risk_monotonic_quantiles_enabled)
         input_dim = state_dim + num_agents + comm_dim
-        # Shared trunk: full MLP
-        self.shared = mlp(input_dim, hidden_layers, hidden_layers[-1])
-        last_dim = hidden_layers[-1]
-        # Scalar value head
+        self.shared = None
+        self.value_uav_encoder = None
+        self.value_target_encoder = None
+        self.value_uav_attention = None
+        self.value_target_attention = None
+        self.value_team_context = None
+        self.value_target_context = None
+        self.target_value_head = None
+        if self.equivariant_value_critic_enabled:
+            expected_state_dim = (
+                8 * int(num_agents) + 8 * int(num_targets) + 1)
+            if int(state_dim) != expected_state_dim:
+                raise ValueError(
+                    'equivariant value critic requires the centralized '
+                    f'global-state layout of width {expected_state_dim}, '
+                    f'got {state_dim}')
+            value_hidden = max(16, int(hidden_layers[-1]))
+            self.value_uav_encoder = nn.Sequential(
+                nn.Linear(8, value_hidden),
+                nn.LayerNorm(value_hidden),
+                nn.SiLU(),
+                nn.Linear(value_hidden, value_hidden),
+                nn.SiLU(),
+            )
+            self.value_target_encoder = nn.Sequential(
+                nn.Linear(8, value_hidden),
+                nn.LayerNorm(value_hidden),
+                nn.SiLU(),
+                nn.Linear(value_hidden, value_hidden),
+                nn.SiLU(),
+            )
+            self.value_uav_attention = nn.Linear(value_hidden, 1)
+            self.value_target_attention = nn.Linear(value_hidden, 1)
+            self.value_team_context = nn.Sequential(
+                nn.Linear(
+                    2 * value_hidden + 1 + int(comm_dim), value_hidden),
+                nn.LayerNorm(value_hidden),
+                nn.SiLU(),
+            )
+            self.value_target_context = nn.Sequential(
+                nn.Linear(2 * value_hidden, value_hidden),
+                nn.LayerNorm(value_hidden),
+                nn.SiLU(),
+            )
+            self.target_value_head = nn.Linear(value_hidden, 1)
+            last_dim = value_hidden
+        else:
+            # Legacy fixed-width value path retained for old checkpoints.
+            self.shared = mlp(
+                input_dim, hidden_layers, hidden_layers[-1])
+            last_dim = hidden_layers[-1]
         self.value_head = nn.Linear(last_dim, 1)
         # CTDE-only action-head credit baselines. These do not enter the actor
         # observation or deployed policy; they only reduce variance for the
@@ -1937,7 +2534,7 @@ class CriticNetwork(nn.Module):
         ])
         # Per-target value heads (S3: target-wise critic)
         self.target_heads = None
-        if num_targets > 0:
+        if num_targets > 0 and not self.equivariant_value_critic_enabled:
             self.target_heads = nn.ModuleList([
                 nn.Linear(last_dim, 1) for _ in range(num_targets)
             ])
@@ -2009,23 +2606,90 @@ class CriticNetwork(nn.Module):
                 nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
                 nn.init.constant_(module.bias, 0.0)
 
+    def _forward_equivariant_value_features(
+        self, state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a centralized state without absolute node identities.
+
+        Returns a permutation-invariant team feature and target-equivariant
+        target features.  The deployed actor never calls this CTDE-only path.
+        """
+        if not self.equivariant_value_critic_enabled:
+            raise RuntimeError('equivariant value critic is disabled')
+        expected_width = self.state_dim + self.num_agents + self.comm_dim
+        if state.ndim != 2 or state.shape[-1] != expected_width:
+            raise ValueError(
+                'equivariant value critic input must be [base global state, '
+                'agent one-hot, communication summary] with width '
+                f'{expected_width}')
+
+        batch = state.shape[0]
+        base = state[:, :self.state_dim]
+        uav_end = 8 * self.num_agents
+        target_motion_end = uav_end + 6 * self.num_targets
+        uav = base[:, :uav_end].reshape(batch, self.num_agents, 8)
+        target_motion = base[:, uav_end:target_motion_end].reshape(
+            batch, self.num_targets, 6)
+        time_fraction = base[:, target_motion_end:target_motion_end + 1]
+        uncertainty_start = target_motion_end + 1
+        uncertainty = base[
+            :, uncertainty_start:uncertainty_start + self.num_targets]
+        pd_start = uncertainty_start + self.num_targets
+        previous_pd = base[:, pd_start:pd_start + self.num_targets]
+        target = torch.cat([
+            target_motion,
+            uncertainty.unsqueeze(-1),
+            previous_pd.unsqueeze(-1),
+        ], dim=-1)
+
+        uav_h = self.value_uav_encoder(uav)
+        target_h = self.value_target_encoder(target)
+        uav_weight = torch.softmax(
+            self.value_uav_attention(uav_h), dim=1)
+        target_weight = torch.softmax(
+            self.value_target_attention(target_h), dim=1)
+        uav_pool = torch.sum(uav_weight * uav_h, dim=1)
+        target_pool = torch.sum(target_weight * target_h, dim=1)
+
+        # The absolute-agent one-hot is deliberately skipped.  Communication
+        # is already sender-averaged by the trainer.
+        comm_start = self.state_dim + self.num_agents
+        comm = state[:, comm_start:comm_start + self.comm_dim]
+        team_h = self.value_team_context(torch.cat(
+            [uav_pool, target_pool, time_fraction, comm], dim=-1))
+        target_context = self.value_target_context(torch.cat([
+            target_h,
+            team_h.unsqueeze(1).expand(-1, self.num_targets, -1),
+        ], dim=-1))
+        return team_h, target_context
+
     def forward(self, state: torch.Tensor):
         """Returns scalar V(s) for backward compatibility."""
-        h = self.shared(state)
+        if self.equivariant_value_critic_enabled:
+            h, _ = self._forward_equivariant_value_features(state)
+        else:
+            h = self.shared(state)
         return self.value_head(h).squeeze(-1)
 
     def forward_with_targets(self, state: torch.Tensor):
         """Returns (scalar_v, per_target_v) for S3 diagnostics."""
-        h = self.shared(state)
-        scalar_v = self.value_head(h).squeeze(-1)
         target_v = None
+        if self.equivariant_value_critic_enabled:
+            h, target_h = self._forward_equivariant_value_features(state)
+            target_v = self.target_value_head(target_h).squeeze(-1)
+        else:
+            h = self.shared(state)
+        scalar_v = self.value_head(h).squeeze(-1)
         if self.target_heads is not None:
             target_v = torch.stack([head(h).squeeze(-1) for head in self.target_heads], dim=-1)
         return scalar_v, target_v
 
     def forward_with_credit(self, state: torch.Tensor):
         """Return the legacy scalar value and four action-head baselines."""
-        h = self.shared(state)
+        if self.equivariant_value_critic_enabled:
+            h, _ = self._forward_equivariant_value_features(state)
+        else:
+            h = self.shared(state)
         scalar_v = self.value_head(h).squeeze(-1)
         credit_v = torch.stack([
             head(h).squeeze(-1) for head in self.credit_heads

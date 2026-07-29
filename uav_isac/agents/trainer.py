@@ -29,13 +29,22 @@ from uav_isac.evaluation.temporal_credit_audit import (
     summarize_temporal_credit_proxy,
 )
 from uav_isac.evaluation.target_choice_audit import (
+    apply_sensing_choice_intervention,
+    evaluate_joint_sensing_pair_intervention,
+    evaluate_sensing_choice_intervention,
     evaluate_target_choice_intervention,
+    summarize_joint_sensing_pair_interventions,
+    summarize_sensing_choice_interventions,
     summarize_target_choice_interventions,
 )
 from uav_isac.evaluation.evidence_oracle_audit import (
     receiver_local_and_global_pd,
     summarize_evidence_oracle,
     summarize_lossless_topk_capacity,
+)
+from uav_isac.evaluation.physical_oracle_audit import (
+    evaluate_physical_feasibility_oracles,
+    summarize_physical_feasibility_oracles,
 )
 
 
@@ -1903,6 +1912,17 @@ class MAPPTrainer:
         self._target_allocation_teacher_height_m = max(0.0, float(getattr(
             ma, 'target_allocation_teacher_height_m',
             self.cfg.scenario.height)))
+        self._target_allocation_teacher_crisis_only_enabled = bool(getattr(
+            ma, 'target_allocation_teacher_crisis_only_enabled', False))
+        self._target_allocation_teacher_crisis_floor = float(np.clip(getattr(
+            ma, 'target_allocation_teacher_crisis_floor', 0.60),
+            0.0, 1.0))
+        self._v2_modular_balance_coef = max(0.0, float(getattr(
+            ma, 'architecture_v2_modular_balance_coef', 0.0)))
+        self._v2_modular_specialization_coef = max(0.0, float(getattr(
+            ma, 'architecture_v2_modular_specialization_coef', 0.0)))
+        self._v2_modular_lr_scale = max(0.0, float(getattr(
+            ma, 'architecture_v2_modular_lr_scale', 1.0)))
         self._adv_mode = getattr(ma, 'advantage_mode', 'scalar')
         self._resp_tau_m = getattr(ma, 'target_responsibility_tau_m', 50.0)
         self._risk_tail_fraction = float(np.clip(getattr(
@@ -2073,6 +2093,17 @@ class MAPPTrainer:
                 'round_peer_claim_head.',
                 'comm_sensing_gate.', 'comm_sensing_head.',
                 'target_movement_head.',
+                # Architecture V2 slow intent is deliberately separated from
+                # its shared target encoder and sensing head.  CTDE
+                # distillation may update bids and kinematics without moving
+                # the physical/QoS prior or executed sensing-power policy.
+                'v2_assignment_head.',
+                'v2_movement_head.',
+                'v2_target_attention.',
+                'v2_target_context.',
+                'v2_movement_gate.',
+                'v2_module_router.',
+                'v2_coordination_experts.',
             )
             allocation_params = [
                 p for name, p in agents[0].actor.named_parameters()
@@ -2081,8 +2112,35 @@ class MAPPTrainer:
                         for prefix in allocation_prefixes)
             ]
             if allocation_params:
+                modular_prefixes = (
+                    'v2_module_router.',
+                    'v2_coordination_experts.',
+                )
+                modular_params = [
+                    p for name, p in agents[0].actor.named_parameters()
+                    if p.requires_grad
+                    and any(name.startswith(prefix)
+                            for prefix in modular_prefixes)
+                ]
+                modular_param_ids = {id(p) for p in modular_params}
+                regular_params = [
+                    p for p in allocation_params
+                    if id(p) not in modular_param_ids]
+                optimizer_groups = []
+                if regular_params:
+                    optimizer_groups.append({
+                        'params': regular_params,
+                        'lr': self._target_allocation_aux_lr,
+                    })
+                if modular_params:
+                    optimizer_groups.append({
+                        'params': modular_params,
+                        'lr': (
+                            self._target_allocation_aux_lr
+                            * self._v2_modular_lr_scale),
+                    })
                 self._target_allocation_aux_optimizer = torch.optim.Adam(
-                    allocation_params, lr=self._target_allocation_aux_lr)
+                    optimizer_groups)
 
     def _effective_comm(self, comm_msgs: torch.Tensor) -> torch.Tensor:
         """Return zeroed comm if comm_off, else original. Single entry point."""
@@ -4114,8 +4172,12 @@ class MAPPTrainer:
             transition_masks = data.get('masks')
             if transition_masks is not None:
                 transition_masks = transition_masks.to(self.device)
+            pd_targets_all = data.get('per_target_rewards_raw')
+            if pd_targets_all is not None:
+                pd_targets_all = pd_targets_all.to(self.device)
             allocation_selector = torch.ones(
                 obs.shape[0], dtype=torch.bool, device=self.device)
+            teacher_crisis_fraction = 1.0
             if self._target_allocation_movement_only:
                 allocation_selector = movement_action_masks > 0.5
                 # Team-grouped losses require complete K-row teams.  Rollout
@@ -4123,14 +4185,30 @@ class MAPPTrainer:
                 if int(allocation_selector.sum().item()) % self.K != 0:
                     raise RuntimeError(
                         'movement-only allocation mask split a UAV team')
+            if (self._target_allocation_teacher_enabled
+                    and self._target_allocation_teacher_crisis_only_enabled):
+                if pd_targets_all is None:
+                    raise RuntimeError(
+                        'crisis-only teacher requires per-target rollout QoS')
+                crisis_rows = (
+                    pd_targets_all.amin(dim=-1)
+                    < self._target_allocation_teacher_crisis_floor)
+                allocation_selector = allocation_selector & crisis_rows
+                teacher_crisis_fraction = float(
+                    crisis_rows.float().mean().item())
+                if int(allocation_selector.sum().item()) % self.K != 0:
+                    raise RuntimeError(
+                        'crisis-only teacher split a UAV team')
             temporal_loss = torch.zeros((), device=self.device)
             comm_sensing_aux_loss = torch.zeros((), device=self.device)
             comm_sensing_counterfactual_loss = torch.zeros(
                 (), device=self.device)
             comm_sensing_weak_boost = torch.zeros((), device=self.device)
-            pd_targets_all = data.get('per_target_rewards_raw')
-            if pd_targets_all is not None:
-                pd_targets_all = pd_targets_all.to(self.device)
+            modular_balance_loss = torch.zeros((), device=self.device)
+            modular_specialization_loss = torch.zeros(
+                (), device=self.device)
+            modular_route_entropy = torch.zeros((), device=self.device)
+            modular_route_usage_span = torch.zeros((), device=self.device)
             aux_agent_identity = torch.arange(
                 obs.shape[0], dtype=torch.long,
                 device=self.device) % self.K
@@ -4186,15 +4264,27 @@ class MAPPTrainer:
                     break
                 assignment_for_loss = assignment_probs[allocation_selector]
                 if assignment_for_loss.numel() == 0:
+                    assignment_probs = None
                     break
                 transition_masks_for_loss = (
                     transition_masks[allocation_selector]
                     if transition_masks is not None else None)
                 if self._target_allocation_teacher_enabled:
-                    label_loss = torch.nn.functional.nll_loss(
-                        torch.log(assignment_for_loss.clamp_min(1e-8)),
-                        teacher_labels[allocation_selector],
-                    )
+                    local_bid_logits = getattr(
+                        agent.actor, 'last_v2_local_bid_logits', None)
+                    if (local_bid_logits is not None
+                            and local_bid_logits.shape
+                            == assignment_probs.shape):
+                        label_loss = torch.nn.functional.cross_entropy(
+                            local_bid_logits[allocation_selector],
+                            teacher_labels[allocation_selector],
+                        )
+                    else:
+                        label_loss = torch.nn.functional.nll_loss(
+                            torch.log(
+                                assignment_for_loss.clamp_min(1e-8)),
+                            teacher_labels[allocation_selector],
+                        )
                     max_dp = self.cfg.uav.v_max * self.cfg.scenario.dt
                     movement_loss = torch.nn.functional.smooth_l1_loss(
                         torch.tanh(aux_dp_mean[allocation_selector]),
@@ -4326,6 +4416,34 @@ class MAPPTrainer:
                         + self._comm_aided_sensing_counterfactual_coef
                         * comm_sensing_counterfactual_loss
                     )
+                module_routing = getattr(
+                    agent.actor, 'last_v2_module_routing', None)
+                if module_routing is not None:
+                    selected_routing = module_routing[allocation_selector]
+                    if selected_routing.numel() > 0:
+                        num_experts = selected_routing.shape[-1]
+                        mean_usage = selected_routing.mean(dim=0)
+                        uniform_usage = 1.0 / float(num_experts)
+                        modular_balance_loss = (
+                            float(num_experts)
+                            * (mean_usage - uniform_usage).square().sum())
+                        modular_route_entropy = (
+                            -(selected_routing.clamp_min(1e-8)
+                              * selected_routing.clamp_min(1e-8).log())
+                            .sum(dim=-1).mean()
+                            / np.log(float(num_experts)))
+                        # Minimizing normalized entropy encourages a UAV to
+                        # choose a distinct coordination path; the aggregate
+                        # balance term prevents all UAVs choosing the same one.
+                        modular_specialization_loss = modular_route_entropy
+                        modular_route_usage_span = (
+                            mean_usage.max() - mean_usage.min())
+                        allocation_loss = (
+                            allocation_loss
+                            + self._v2_modular_balance_coef
+                            * modular_balance_loss
+                            + self._v2_modular_specialization_coef
+                            * modular_specialization_loss)
                 # Selective-plasticity probes may intentionally freeze every
                 # target-allocation parameter while leaving the PPO rate head
                 # trainable. In that case this auxiliary is observational and
@@ -4349,8 +4467,13 @@ class MAPPTrainer:
                     allocation_loss.item())
                 if self._target_allocation_teacher_enabled:
                     with torch.no_grad():
+                        teacher_prediction = (
+                            local_bid_logits[allocation_selector].argmax(
+                                dim=-1)
+                            if local_bid_logits is not None
+                            else assignment_for_loss.argmax(dim=-1))
                         accuracy = (
-                            assignment_for_loss.argmax(dim=-1)
+                            teacher_prediction
                             == teacher_labels[allocation_selector]
                         ).float().mean()
                     metrics['target_teacher_label_loss'] = float(
@@ -4360,6 +4483,24 @@ class MAPPTrainer:
                     metrics['target_teacher_message_loss'] = float(
                         message_loss.item())
                     metrics['target_teacher_accuracy'] = float(accuracy.item())
+                    metrics['target_teacher_crisis_fraction'] = float(
+                        teacher_crisis_fraction)
+                    if getattr(
+                            agent.actor, 'last_v2_module_routing', None
+                    ) is not None:
+                        metrics['v2_modular_balance_loss'] = float(
+                            modular_balance_loss.item())
+                        metrics['v2_modular_route_entropy'] = float(
+                            modular_route_entropy.item())
+                        metrics['v2_modular_route_usage_span'] = float(
+                            modular_route_usage_span.item())
+                        residual_norm = getattr(
+                            agent.actor,
+                            'last_v2_module_residual_norm',
+                            None)
+                        if residual_norm is not None:
+                            metrics['v2_modular_residual_norm'] = float(
+                                residual_norm.mean().item())
                 else:
                     metrics['target_allocation_balance'] = float(
                         balance_loss.item())
@@ -4553,6 +4694,12 @@ class MAPPTrainer:
                   dp_deterministic: bool = True, role_deterministic: bool = True,
                   eval_seeds: Optional[List[int]] = None,
                   target_choice_audit_stride: int = 0,
+                  sensing_choice_audit_stride: int = 0,
+                  sensing_residual_blend: float = 0.25,
+                  sensing_audit_horizon: int = 0,
+                  sensing_oracle_control: bool = False,
+                  joint_sensing_pair_audit_stride: int = 0,
+                  physical_oracle_stride: int = 0,
                   evidence_trace_output: Optional[str] = None) -> Dict[str, float]:
         """Evaluation on fixed replayable scenarios (no exploration noise).
 
@@ -4581,6 +4728,9 @@ class MAPPTrainer:
         ep_trimmed_worst = []      # per-episode bottom-2 target average
         ep_tstd = []              # per-episode steady-window target std
         ep_per_target = []        # (n_eps, Q) steady-window per-target means
+        ep_commitment_coverage = []
+        ep_hard_commitment_coverage = []
+        ep_p0_target_coverage = []
         vp_frames = notx_frames = samerole_frames = total_frames = 0
         duplex_endpoint_frames = 0
         duplex_endpoint_nodes = []
@@ -4590,6 +4740,8 @@ class MAPPTrainer:
         eval_comm_delivery = []
         eval_comm_active = []
         eval_comm_violation = []
+        eval_p0_resolved = []
+        eval_p0_solve_time = []
         eval_evidence_comm_bits = []
         eval_evidence_comm_energy = []
         eval_evidence_comm_latency = []
@@ -4604,6 +4756,12 @@ class MAPPTrainer:
         eval_isac_sensing_power = []
         eval_isac_balance_error = []
         eval_isac_target_power = []
+        eval_hyperedge_visible_peers = []
+        eval_hyperedge_mutual_edges = []
+        eval_hyperedge_active_edges = []
+        eval_hyperedge_target_coverage = []
+        eval_hyperedge_protocol_used = []
+        eval_hyperedge_safety_fallback = []
         eval_cacsr_gate_rate = []
         eval_cacsr_delta_abs = []
         eval_risk_residual_gate = []
@@ -4611,6 +4769,9 @@ class MAPPTrainer:
         eval_risk_direction_scale_abs = []
         eval_adaptive_topk_values = []
         eval_adaptive_topk_switches = []
+        eval_token_sensing_jaccard = []
+        eval_token_sensing_exact = []
+        eval_token_sensing_power_mass = []
         # Actor allocation diagnostics.  These are computed from the actor's
         # original movement output before any evaluation-only intervention.
         actor_move_unique_target = []
@@ -4637,7 +4798,11 @@ class MAPPTrainer:
         eval_responsibility_pd_histories = []
         eval_movement_reward_histories = []
         eval_target_choice_intervention_episodes = []
+        eval_sensing_choice_intervention_episodes = []
+        eval_joint_sensing_pair_intervention_episodes = []
+        eval_physical_oracle_episodes = []
         target_choice_audit_counter = 0
+        sensing_choice_audit_counter = 0
         eval_evidence_global_histories = []
         eval_evidence_local_histories = []
         eval_evidence_top1_histories = []
@@ -4664,15 +4829,23 @@ class MAPPTrainer:
             eval_cacsr_ema = None
             eval_cacsr_history = []
             eval_previous_topk = np.full(K, -1, dtype=np.int64)
+            eval_sensing_oracle_hold = None
+            eval_sensing_oracle_until = -1
             episode_risk_quantiles = []
             episode_risk_logits = []
             episode_responsibility_records = []
             episode_movement_rewards = []
             episode_target_choice_interventions = []
+            episode_sensing_choice_interventions = []
+            episode_joint_sensing_pair_interventions = []
+            episode_physical_oracles = []
             episode_evidence_global = []
             episode_evidence_local = []
             episode_evidence_top1 = []
             episode_evidence_top2 = []
+            episode_commitment_coverage = []
+            episode_hard_commitment_coverage = []
+            episode_p0_target_coverage = []
             eval_ring = None
             eval_wmask = None
             if self._use_window:
@@ -5050,6 +5223,32 @@ class MAPPTrainer:
                         k: eval_token_mask[k].detach().cpu().numpy()
                         for k in range(K)}
                     if self._joint_isac_power_enabled:
+                        sensing_np = (
+                            eval_sensing_weights.detach().cpu().numpy())
+                        commitment_topk = min(max(int(getattr(
+                            self.cfg.marl,
+                            'distributed_target_commitment_topk',
+                            1)), 1), Q)
+                        sensing_order = np.argsort(
+                            -sensing_np, axis=1, kind='stable')
+                        sensing_mask = np.zeros((K, Q), dtype=bool)
+                        sensing_mask[
+                            np.arange(K)[:, None],
+                            sensing_order[:, :commitment_topk],
+                        ] = True
+                        transmitted_mask = np.stack([
+                            eval_token_masks[k] > 0.5 for k in range(K)])
+                        intersection = np.logical_and(
+                            transmitted_mask, sensing_mask).sum(axis=1)
+                        union = np.logical_or(
+                            transmitted_mask, sensing_mask).sum(axis=1)
+                        eval_token_sensing_jaccard.extend(
+                            (intersection / np.maximum(union, 1)).tolist())
+                        eval_token_sensing_exact.extend(np.all(
+                            transmitted_mask == sensing_mask,
+                            axis=1).astype(np.float64).tolist())
+                        eval_token_sensing_power_mass.extend(np.sum(
+                            sensing_np * transmitted_mask, axis=1).tolist())
                         submit_args = (
                             eval_messages, eval_rates,
                             {k: float(eval_comm_fraction[k].item())
@@ -5076,6 +5275,16 @@ class MAPPTrainer:
                     eval_env.core._comm_msgs = {
                         k: legacy_comm[k].copy() for k in range(K)
                     }
+                if (sensing_oracle_control
+                        and eval_sensing_oracle_hold is not None
+                        and int(eval_env.core.t) < eval_sensing_oracle_until):
+                    held_agent, held_target = eval_sensing_oracle_hold
+                    apply_sensing_choice_intervention(
+                        eval_env,
+                        held_agent,
+                        held_target,
+                        sensing_residual_blend,
+                    )
                 risk_quantiles_step = None
                 risk_logits_step = None
                 if self._set_risk_critic_enabled:
@@ -5134,6 +5343,70 @@ class MAPPTrainer:
                         )
                     )
                     target_choice_audit_counter += 1
+                sensing_audit_stride = max(
+                    0, int(sensing_choice_audit_stride))
+                if (sensing_audit_stride > 0
+                        and int(eval_env.core.t) % sensing_audit_stride == 0):
+                    sensing_horizon = (
+                        max(1, int(sensing_audit_horizon))
+                        if int(sensing_audit_horizon) > 0
+                        else self.movement_decision_interval
+                    )
+                    sensing_agent = (
+                        sensing_choice_audit_counter % max(K, 1))
+                    sensing_intervention = (
+                        evaluate_sensing_choice_intervention(
+                            eval_env,
+                            actions,
+                            agent_index=sensing_agent,
+                            num_targets=Q,
+                            horizon=sensing_horizon,
+                            residual_blend=sensing_residual_blend,
+                        )
+                    )
+                    episode_sensing_choice_interventions.append(
+                        sensing_intervention)
+                    if sensing_oracle_control:
+                        best_sensing_choice = int(
+                            sensing_intervention["best_choice"])
+                        if best_sensing_choice >= 0:
+                            eval_sensing_oracle_hold = (
+                                sensing_agent,
+                                best_sensing_choice,
+                            )
+                            eval_sensing_oracle_until = (
+                                int(eval_env.core.t)
+                                + sensing_horizon
+                            )
+                            apply_sensing_choice_intervention(
+                                eval_env,
+                                sensing_agent,
+                                best_sensing_choice,
+                                sensing_residual_blend,
+                            )
+                        else:
+                            eval_sensing_oracle_hold = None
+                            eval_sensing_oracle_until = -1
+                    sensing_choice_audit_counter += 1
+                joint_sensing_audit_stride = max(
+                    0, int(joint_sensing_pair_audit_stride))
+                if (joint_sensing_audit_stride > 0
+                        and int(eval_env.core.t)
+                        % joint_sensing_audit_stride == 0):
+                    joint_sensing_horizon = (
+                        max(1, int(sensing_audit_horizon))
+                        if int(sensing_audit_horizon) > 0
+                        else self.movement_decision_interval
+                    )
+                    episode_joint_sensing_pair_interventions.append(
+                        evaluate_joint_sensing_pair_intervention(
+                            eval_env,
+                            actions,
+                            num_targets=Q,
+                            horizon=joint_sensing_horizon,
+                            residual_blend=sensing_residual_blend,
+                        )
+                    )
                 responsibility_pre_pd = (
                     None
                     if eval_env.core.prev_P_D is None
@@ -5148,6 +5421,56 @@ class MAPPTrainer:
                     pd_q = info['P_D_q'].copy()
                     pd_hist.append(np.mean(pd_q))
                     pd_per_target.append(pd_q)
+                    episode_commitment_coverage.append(float(info.get(
+                        'learned_comm_commitment_target_coverage', 0.0)))
+                    episode_hard_commitment_coverage.append(float(info.get(
+                        'learned_comm_commitment_hard_target_coverage', 0.0)))
+                    episode_p0_target_coverage.append(float(info.get(
+                        'p0_target_coverage', 0.0)))
+                    physical_stride = max(
+                        0, int(physical_oracle_stride))
+                    if (physical_stride > 0
+                            and int(eval_env.core.t)
+                            % physical_stride == 0):
+                        current_sensing_power = np.asarray(
+                            eval_env.core._current_sensing_power_w,
+                            dtype=np.float64,
+                        )
+                        current_comm_power = np.asarray(
+                            eval_env.core._current_comm_power_w,
+                            dtype=np.float64,
+                        )
+                        reports_per_receiver = (
+                            max(1, int(
+                                self.cfg.p0_solver.capacity_per_rx
+                                // max(self.cfg.detection.B_q, 1)))
+                            if eval_env.core.ground_communication_enabled
+                            else Q
+                        )
+                        episode_physical_oracles.append(
+                            evaluate_physical_feasibility_oracles(
+                                eval_env.current_step_info.deflection_entries,
+                                current_sensing_power,
+                                pd_q,
+                                eval_env.current_step_info.p0_solution.selected_set,
+                                num_uavs=K,
+                                num_targets=Q,
+                                p_fa=self.cfg.detection.P_FA,
+                                total_power_w=float(
+                                    eval_env.core._isac_total_power_w),
+                                communication_reserve_w=float(
+                                    np.mean(current_comm_power)),
+                                target_pair_limit=int(
+                                    self.cfg.detection.K_q_max),
+                                reports_per_receiver=reports_per_receiver,
+                                detection_fusion_mode=str(
+                                    eval_env.core._detection_fusion_mode),
+                                seed=(
+                                    int(ep_seed) * 1000
+                                    + int(eval_env.core.t)
+                                ),
+                            )
+                        )
                     evidence_oracle = receiver_local_and_global_pd(
                         eval_env.current_step_info.p0_solution.selected_set,
                         eval_env.current_step_info.deflection_entries,
@@ -5316,6 +5639,10 @@ class MAPPTrainer:
                             'learned_comm_deadline_violation_rate', 0.0)))
                     eval_comm_active.append(float(
                         info.get('learned_comm_active_senders', 0.0)))
+                    eval_p0_resolved.append(float(
+                        info.get('p0_resolved', False)))
+                    eval_p0_solve_time.append(float(
+                        info.get('p0_solve_time_s', 0.0)))
                     eval_evidence_comm_bits.append(float(
                         info.get('evidence_comm_bits', 0.0)))
                     eval_evidence_comm_energy.append(float(
@@ -5351,6 +5678,19 @@ class MAPPTrainer:
                         eval_isac_target_power.append(np.asarray(
                             info.get('isac_target_power_w', np.zeros(Q)),
                             dtype=np.float64))
+                    if float(info.get('hyperedge_enabled', 0.0)) > 0.0:
+                        eval_hyperedge_visible_peers.append(float(info.get(
+                            'hyperedge_visible_peers_per_uav', 0.0)))
+                        eval_hyperedge_mutual_edges.append(float(info.get(
+                            'hyperedge_mutual_edges', 0.0)))
+                        eval_hyperedge_active_edges.append(float(info.get(
+                            'hyperedge_active_edges', 0.0)))
+                        eval_hyperedge_target_coverage.append(float(info.get(
+                            'hyperedge_target_coverage', 0.0)))
+                        eval_hyperedge_protocol_used.append(float(info.get(
+                            'hyperedge_protocol_used', 0.0)))
+                        eval_hyperedge_safety_fallback.append(float(info.get(
+                            'hyperedge_safety_fallback', 0.0)))
                     if (term.get('__all__', False)
                             or trunc.get('__all__', False)):
                         episode_done = True
@@ -5372,6 +5712,12 @@ class MAPPTrainer:
                 ep_weak3.append(float(np.mean(sorted_q[:3])))
                 ep_trimmed_worst.append(float(np.mean(sorted_q[:min(2, Q)])))
                 ep_tstd.append(float(steady_per_target.std()))
+                ep_commitment_coverage.append(float(np.mean(
+                    episode_commitment_coverage[-w:] or [0.0])))
+                ep_hard_commitment_coverage.append(float(np.mean(
+                    episode_hard_commitment_coverage[-w:] or [0.0])))
+                ep_p0_target_coverage.append(float(np.mean(
+                    episode_p0_target_coverage[-w:] or [0.0])))
                 if episode_risk_quantiles:
                     initial_quantiles = np.asarray(
                         episode_risk_quantiles[0])
@@ -5395,6 +5741,12 @@ class MAPPTrainer:
                 episode_movement_rewards, dtype=np.float64))
             eval_target_choice_intervention_episodes.append(
                 episode_target_choice_interventions)
+            eval_sensing_choice_intervention_episodes.append(
+                episode_sensing_choice_interventions)
+            eval_joint_sensing_pair_intervention_episodes.append(
+                episode_joint_sensing_pair_interventions)
+            eval_physical_oracle_episodes.append(
+                episode_physical_oracles)
             eval_evidence_global_histories.append(np.asarray(
                 episode_evidence_global, dtype=np.float64))
             eval_evidence_local_histories.append(np.asarray(
@@ -5464,6 +5816,21 @@ class MAPPTrainer:
         )
         target_choice_stats = summarize_target_choice_interventions(
             eval_target_choice_intervention_episodes,
+            bootstrap_samples=self._checkpoint_bootstrap_samples,
+        )
+        sensing_choice_stats = summarize_sensing_choice_interventions(
+            eval_sensing_choice_intervention_episodes,
+            bootstrap_samples=self._checkpoint_bootstrap_samples,
+        )
+        joint_sensing_pair_stats = (
+            summarize_joint_sensing_pair_interventions(
+                eval_joint_sensing_pair_intervention_episodes,
+                bootstrap_samples=self._checkpoint_bootstrap_samples,
+            )
+        )
+        physical_oracle_stats = summarize_physical_feasibility_oracles(
+            eval_physical_oracle_episodes,
+            worst_floor=float(self._comm_qos_targets[2]),
             bootstrap_samples=self._checkpoint_bootstrap_samples,
         )
         evidence_oracle_stats = summarize_evidence_oracle(
@@ -5567,10 +5934,30 @@ class MAPPTrainer:
             **robust_stats,
             # Per-target identity tracking
             'eval_per_target': per_target_avg.tolist(),
+            'eval_episode_seeds': [
+                int(seed) for seed in eval_seeds[:n_eps_completed]],
+            'eval_episode_steady_values': [
+                float(value) for value in ep_steady_means],
+            'eval_episode_weak3_values': [
+                float(value) for value in ep_weak3],
+            'eval_episode_worst_values': [
+                float(value) for value in ep_worst],
+            'eval_episode_commitment_coverage': [
+                float(value) for value in ep_commitment_coverage],
+            'eval_episode_hard_commitment_coverage': [
+                float(value) for value in ep_hard_commitment_coverage],
+            'eval_episode_p0_target_coverage': [
+                float(value) for value in ep_p0_target_coverage],
+            'eval_episode_worst_nearest_distance_m': [
+                float(np.max(value))
+                for value in ep_nearest_target_distance],
             **risk_stats,
             **responsibility_stats,
             **temporal_credit_stats,
             **target_choice_stats,
+            **sensing_choice_stats,
+            **joint_sensing_pair_stats,
+            **physical_oracle_stats,
             **evidence_oracle_stats,
             **evidence_topk_capacity_stats,
             # Actor target-allocation and geometric coverage diagnostics.
@@ -5616,6 +6003,19 @@ class MAPPTrainer:
             'eval_comm_active_senders': float(np.mean(eval_comm_active)),
             'eval_comm_deadline_violation_rate': float(
                 np.mean(eval_comm_violation or [0.0])),
+            'eval_token_sensing_jaccard': float(np.mean(
+                eval_token_sensing_jaccard or [0.0])),
+            'eval_token_sensing_exact_match_rate': float(np.mean(
+                eval_token_sensing_exact or [0.0])),
+            'eval_token_sensing_power_mass': float(np.mean(
+                eval_token_sensing_power_mass or [0.0])),
+            'eval_p0_resolve_frame_rate': float(np.mean(
+                eval_p0_resolved or [0.0])),
+            'eval_p0_solve_time_s_per_frame': float(np.mean(
+                eval_p0_solve_time or [0.0])),
+            'eval_p0_solve_time_s_per_resolve': float(
+                np.sum(eval_p0_solve_time)
+                / max(np.sum(eval_p0_resolved), 1.0)),
             'eval_evidence_comm_bits_per_frame': float(np.mean(
                 eval_evidence_comm_bits or [0.0])),
             'eval_evidence_comm_energy_j_per_frame': float(np.mean(
@@ -5658,6 +6058,18 @@ class MAPPTrainer:
             'eval_isac_per_target_power_w': (
                 np.mean(np.asarray(eval_isac_target_power), axis=0).tolist()
                 if eval_isac_target_power else np.zeros(Q).tolist()),
+            'eval_hyperedge_visible_peers_per_uav': float(np.mean(
+                eval_hyperedge_visible_peers or [0.0])),
+            'eval_hyperedge_mutual_edges_per_frame': float(np.mean(
+                eval_hyperedge_mutual_edges or [0.0])),
+            'eval_hyperedge_active_edges_per_frame': float(np.mean(
+                eval_hyperedge_active_edges or [0.0])),
+            'eval_hyperedge_target_coverage': float(np.mean(
+                eval_hyperedge_target_coverage or [0.0])),
+            'eval_hyperedge_protocol_use_rate': float(np.mean(
+                eval_hyperedge_protocol_used or [0.0])),
+            'eval_hyperedge_safety_fallback_rate': float(np.mean(
+                eval_hyperedge_safety_fallback or [0.0])),
             'eval_cacsr_gate_rate': float(np.mean(
                 eval_cacsr_gate_rate or [0.0])),
             'eval_cacsr_delta_abs': float(np.mean(

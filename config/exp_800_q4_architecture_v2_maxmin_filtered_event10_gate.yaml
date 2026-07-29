@@ -1,0 +1,8 @@
+# Event-triggered scheduler: a pair may persist for at most ten frames, but is
+# recomputed immediately if its edge disappears or predicted worst falls below
+# the deployment floor.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  p0_maxmin_pairing_hold_frames: 10
+  p0_maxmin_event_triggered_enabled: true

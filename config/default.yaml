@@ -76,6 +76,53 @@ marl:
   distributed_target_commitment_mode: hard
   distributed_target_commitment_soft_floor: 0.25
   distributed_target_commitment_uncertainty_relief: 1.0
+  distributed_target_commitment_source: sensing_power
+  distributed_target_commitment_min_hold_frames: 0
+  distributed_target_commitment_handover_frames: 0
+  distributed_target_commitment_max_age_frames: 5
+  # QPD-ISAC is an opt-in distributed optimization gate. The queue uses
+  # z <- [z + eta(P_floor-P_local)]_+; low local QoS therefore raises price.
+  qpd_isac_enabled: false
+  qpd_qos_floor: 0.60
+  qpd_queue_step: 0.25
+  qpd_queue_max: 4.0
+  qpd_primal_step: 1.0
+  qpd_dual_step: 0.25
+  qpd_rounds: 2
+  qpd_row_capacity: 2.0
+  qpd_target_capacity: 2.0
+  qpd_price_max: 4.0
+  qpd_primal_exploration_floor: 0.02
+  qpd_peer_deficit_gain: 2.0
+  qpd_send_threshold: 0.05
+  qpd_bid_change_weight: 1.0
+  qpd_power_cost: 0.02
+  qpd_comm_cost: 0.01
+  qpd_switch_cost: 0.02
+  qpd_capability_distance_scale_m: 150.0
+  qpd_commitment_threshold: 0.25
+  qpd_override_token_mask: true
+  qpd_overwrite_protocol_header: true
+  qpd_override_sensing_weights: true
+  # Learning-free directed Tx/Rx hyperedge negotiation. The three-field
+  # [tx capability, rx capability, local QoS deficit] stream is appended to
+  # physically transmitted target tokens and charged at the selected rate.
+  hyperedge_negotiation_enabled: false
+  hyperedge_share_topk: 4
+  hyperedge_distance_scale_m: 150.0
+  hyperedge_deficit_gain: 2.0
+  hyperedge_proxy_floor: 0.25
+  hyperedge_pair_score_mode: endpoint_proxy
+  hyperedge_state_stream_enabled: false
+  hyperedge_consensus_rounds: 2
+  hyperedge_min_target_coverage: 1.0
+  hyperedge_safety_fallback_enabled: true
+  p0_maxmin_pairing_enabled: false
+  p0_maxmin_bypass_commitment_filter: false
+  p0_maxmin_pairing_hold_frames: 1
+  p0_maxmin_local_fusion_enabled: false
+  p0_maxmin_event_triggered_enabled: false
+  p0_maxmin_deficit_priority_gain: 3.0
   tracking_enabled: false      # fixed mission-known sensing targets; no Kalman tracking loop
   detection_fusion_mode: local_only # legacy_global | central_oracle | local_only | u2u_distributed
   evidence_packet_topk: 1
@@ -239,6 +286,8 @@ marl:
   target_allocation_teacher_qos_weight: 2.0
   target_allocation_teacher_commitment_frames: 5
   target_allocation_teacher_height_m: 20.0
+  target_allocation_teacher_crisis_only_enabled: false
+  target_allocation_teacher_crisis_floor: 0.60
   target_allocation_sinkhorn_enabled: false
   capacity_matching_enabled: false
   capacity_matching_row_capacity: 2
@@ -332,8 +381,31 @@ marl:
   risk_residual_gate_bias: -2.0
   risk_residual_learning_rate: 3.0e-5
   risk_residual_directional_basis_enabled: false
+  architecture_v2_enabled: false
+  architecture_v2_prior_gain: 1.0
+  architecture_v2_distance_weight: 0.25
+  architecture_v2_qos_floor: 0.60
+  architecture_v2_comm_prior_gain: 2.0
+  architecture_v2_comm_crisis_threshold: 0.25
+  architecture_v2_consensus_enabled: true
+  architecture_v2_matching_temperature: 0.35
+  architecture_v2_movement_consensus_blend: 1.0
+  architecture_v2_endpoint_consensus_gain: 2.0
+  architecture_v2_bid_residual_scale: 0.25
+  architecture_v2_sensing_aligned_claims_enabled: false
+  # Identity-free, constraint-driven modular coordination. Shared experts are
+  # routed from each UAV's local target set and QoS deficits. Disabled by
+  # default so Architecture V2 checkpoints preserve their exact behavior.
+  architecture_v2_modular_coordination_enabled: false
+  architecture_v2_modular_num_experts: 3
+  architecture_v2_modular_gain: 0.25
+  architecture_v2_modular_temperature: 0.75
+  architecture_v2_modular_balance_coef: 0.01
+  architecture_v2_modular_specialization_coef: 0.002
+  architecture_v2_modular_lr_scale: 1.0
   scale_equivariant_comm_heads_enabled: false
   permutation_equivariant_round_encoding_enabled: false
+  equivariant_value_critic_enabled: false
   # Training-only set/distributional CVaR and QoS-constraint critic.
   # It ignores the appended absolute UAV identity and is not deployed.
   set_risk_critic_enabled: false

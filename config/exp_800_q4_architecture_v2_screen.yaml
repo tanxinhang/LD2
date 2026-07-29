@@ -1,0 +1,17 @@
+# Bounded learning-direction screen for Architecture V2.
+# Ten PPO updates are sufficient to reject broken credit/optimization paths,
+# but are not used as paper-level performance evidence.
+extends: exp_800_q4_architecture_v2.yaml
+
+marl:
+  rollout_steps: 256
+  minibatch_size: 128
+  num_envs: 4
+  num_episodes: 10
+  eval_interval: 100
+  eval_episodes: 2
+  early_stop: false
+  checkpoint_confirmation_enabled: false
+  training_seed_replay_enabled: true
+  target_allocation_aux_epochs: 2
+

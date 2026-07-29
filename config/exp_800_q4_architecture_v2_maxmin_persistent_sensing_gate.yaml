@@ -1,0 +1,10 @@
+# Isolated temporal-mechanism gate. Preserve the frozen actor and its original
+# Token payload/mask exactly; apply hold and handover only to the local sensing
+# top-k commitment consumed by P0.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  distributed_target_commitment_source: persistent_sensing
+  distributed_target_commitment_min_hold_frames: 5
+  distributed_target_commitment_handover_frames: 2
+  distributed_target_commitment_max_age_frames: 5

@@ -1,0 +1,9 @@
+# Architecture-only gate: collect one rollout but keep the actor fixed.
+# This isolates the geometry/QoS prior plus distributed consensus from PPO.
+extends: exp_800_q4_architecture_v2_screen.yaml
+
+marl:
+  lr: 0.0
+  num_episodes: 1
+  target_allocation_aux_epochs: 0
+  comm_rate_bonus_aux_coef: 0.0

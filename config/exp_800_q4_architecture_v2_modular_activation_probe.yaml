@@ -1,0 +1,10 @@
+# Learnability gate for the identity-free modular coordination path. Historical
+# V2 coordination heads retain the exact crisis-distillation learning rate;
+# only new router/expert parameters receive a 20x auxiliary rate. The sharper
+# temperature tests whether the route can become state-dependent in the same
+# three-update budget. This is not an admitted performance configuration.
+extends: exp_800_q4_architecture_v2_modular_crisis_bid_distill3_select10.yaml
+
+marl:
+  architecture_v2_modular_temperature: 0.15
+  architecture_v2_modular_lr_scale: 20.0

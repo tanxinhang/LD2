@@ -1,0 +1,6 @@
+# Temporal-stability control for the receiver-local full-graph P0.  This
+# isolates role/receiver-owner churn without changing the learned policy.
+extends: exp_800_q4_architecture_v2_maxmin_local_fusion_fullgraph_gate.yaml
+
+marl:
+  p0_maxmin_pairing_hold_frames: 5

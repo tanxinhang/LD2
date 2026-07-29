@@ -1,0 +1,6 @@
+# Upper control for graph filtering: receiver-local P0 may inspect the complete
+# physical candidate graph while movement, communication, and power stay fixed.
+extends: exp_800_q4_architecture_v2_maxmin_local_fusion_gate.yaml
+
+marl:
+  p0_maxmin_bypass_commitment_filter: true

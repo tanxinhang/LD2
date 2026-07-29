@@ -1,0 +1,9 @@
+# Gate B1 diagnostic: transmit per-node position/velocity with the directed
+# endpoint offers, then use the physically reconstructable bistatic edge score.
+# This is still learning-free. It tests whether sufficient local physical
+# information repairs the failed three-scalar endpoint proxy.
+extends: exp_800_q4_architecture_v2_hyperedge_gate.yaml
+
+marl:
+  hyperedge_pair_score_mode: physical_reconstructable
+  hyperedge_state_stream_enabled: true

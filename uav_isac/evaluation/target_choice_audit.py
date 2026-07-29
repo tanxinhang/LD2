@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import combinations
 from typing import Dict, List, Sequence
 
 import numpy as np
@@ -116,6 +117,177 @@ def evaluate_target_choice_intervention(
         "weak3_value_range": float(np.ptp(candidate_weak3)),
         "weak3_oracle_gap": float(
             np.max(candidate_weak3) - candidate_weak3[actual_choice]),
+    }
+
+
+def blend_sensing_allocation(
+    base_weights: np.ndarray,
+    target_index: int,
+    residual_blend: float,
+) -> np.ndarray:
+    """Move bounded sensing mass toward one target without changing total power."""
+    base = np.asarray(base_weights, dtype=np.float64).reshape(-1)
+    if base.size == 0:
+        raise ValueError("sensing allocation cannot be empty")
+    base = np.maximum(base, 0.0)
+    base = base / max(float(np.sum(base)), 1.0e-12)
+    target_index = int(np.clip(target_index, 0, base.size - 1))
+    blend = float(np.clip(residual_blend, 0.0, 1.0))
+    candidate = (1.0 - blend) * base
+    candidate[target_index] += blend
+    return candidate / max(float(np.sum(candidate)), 1.0e-12)
+
+
+def apply_sensing_choice_intervention(
+    env,
+    agent_index: int,
+    target_index: int,
+    residual_blend: float,
+) -> np.ndarray:
+    """Replace one queued sensing allocation while preserving all other actions."""
+    queued = _pending_communication(env.core)
+    agent_index = int(agent_index)
+    if agent_index not in queued["sensing"]:
+        raise RuntimeError("sensing intervention requires queued ISAC resources")
+    candidate = blend_sensing_allocation(
+        queued["sensing"][agent_index],
+        target_index,
+        residual_blend,
+    )
+    queued["sensing"][agent_index] = candidate
+    env.core.submit_learned_communications(
+        queued["messages"],
+        queued["rates"],
+        queued["fractions"],
+        queued["sensing"],
+        token_masks=queued["masks"],
+    )
+    return candidate
+
+
+def evaluate_sensing_choice_intervention(
+    env,
+    actions: Dict[str, Dict],
+    agent_index: int,
+    num_targets: int,
+    horizon: int,
+    residual_blend: float = 0.25,
+) -> Dict[str, object]:
+    """Enumerate a bounded single-UAV sensing residual under common randomness.
+
+    Movement, roles, messages, rates, communication power and every other
+    UAV's sensing allocation remain fixed. Only a bounded fraction of this
+    UAV's normalized sensing mass is redirected to candidate target ``q``.
+    """
+    agent_index = int(agent_index)
+    horizon = max(1, int(horizon))
+    queued = _pending_communication(env.core)
+    if agent_index not in queued["sensing"]:
+        raise RuntimeError("sensing intervention requires queued ISAC resources")
+    base_sensing = np.asarray(
+        queued["sensing"][agent_index], dtype=np.float64).reshape(-1)
+    if base_sensing.size != int(num_targets):
+        raise ValueError("queued sensing allocation does not match target count")
+
+    def rollout(sensing_allocations: Dict[int, np.ndarray]) -> np.ndarray:
+        branch = deepcopy(env)
+        branch_actions = {
+            key: {
+                "delta_p": np.asarray(value["delta_p"]).copy(),
+                "role": int(value["role"]),
+            }
+            for key, value in actions.items()
+        }
+        pd_rows = []
+        for _ in range(horizon):
+            branch.core.submit_learned_communications(
+                queued["messages"],
+                queued["rates"],
+                queued["fractions"],
+                sensing_allocations,
+                token_masks=queued["masks"],
+            )
+            _, _, terminated, truncated, info = branch.step(branch_actions)
+            pd_rows.append(np.asarray(info["P_D_q"], dtype=np.float64))
+            if (terminated.get("__all__", False)
+                    or truncated.get("__all__", False)):
+                break
+        per_target = np.mean(np.asarray(pd_rows), axis=0)
+        branch.close()
+        return per_target
+
+    baseline_per_target = rollout({
+        int(k): np.asarray(value).copy()
+        for k, value in queued["sensing"].items()
+    })
+    baseline_ordered = np.sort(baseline_per_target)
+    baseline_worst = float(baseline_ordered[0])
+    baseline_weak3 = float(np.mean(
+        baseline_ordered[:min(3, baseline_ordered.size)]))
+    baseline_steady = float(np.mean(baseline_per_target))
+
+    candidate_worst = np.zeros(num_targets, dtype=np.float64)
+    candidate_weak3 = np.zeros(num_targets, dtype=np.float64)
+    candidate_steady = np.zeros(num_targets, dtype=np.float64)
+    for q in range(num_targets):
+        candidate_sensing = {
+            int(k): np.asarray(value).copy()
+            for k, value in queued["sensing"].items()
+        }
+        candidate_sensing[agent_index] = blend_sensing_allocation(
+            base_sensing, q, residual_blend)
+        per_target = rollout(candidate_sensing)
+        ordered = np.sort(per_target)
+        candidate_worst[q] = ordered[0]
+        candidate_weak3[q] = np.mean(ordered[:min(3, ordered.size)])
+        candidate_steady[q] = np.mean(per_target)
+
+    # A verified residual is admissible only when it is Pareto-safe for the
+    # two deployment constraints. No-op is an explicit member of the action
+    # set, so a harmful residual is never forced into the oracle.
+    safe_candidates = np.logical_and(
+        candidate_weak3 >= baseline_weak3 - 1.0e-9,
+        candidate_steady >= baseline_steady - 1.0e-9,
+    )
+    safe_worst = np.where(safe_candidates, candidate_worst, -np.inf)
+    best_candidate = int(np.argmax(safe_worst))
+    best_choice = (
+        best_candidate
+        if (safe_candidates[best_candidate]
+            and candidate_worst[best_candidate] > baseline_worst + 1.0e-9)
+        else -1
+    )
+    safe_best_worst = (
+        float(candidate_worst[best_choice])
+        if best_choice >= 0 else baseline_worst
+    )
+    safe_best_weak3 = max(
+        [baseline_weak3] + [
+            float(candidate_weak3[q])
+            for q in range(num_targets) if safe_candidates[q]
+        ])
+    all_worst = np.concatenate([
+        np.asarray([baseline_worst]), candidate_worst])
+    all_weak3 = np.concatenate([
+        np.asarray([baseline_weak3]), candidate_weak3])
+    return {
+        "agent_index": agent_index,
+        "actual_choice": -1,
+        "best_choice": best_choice,
+        "baseline_worst": baseline_worst,
+        "baseline_weak3": baseline_weak3,
+        "baseline_steady": baseline_steady,
+        "candidate_worst": candidate_worst.tolist(),
+        "candidate_weak3": candidate_weak3.tolist(),
+        "candidate_steady": candidate_steady.tolist(),
+        "candidate_safe": safe_candidates.astype(float).tolist(),
+        "worst_value_std": float(np.std(all_worst)),
+        "worst_value_range": float(np.ptp(all_worst)),
+        "worst_oracle_gap": float(safe_best_worst - baseline_worst),
+        "actual_is_best": float(best_choice < 0),
+        "weak3_value_range": float(np.ptp(all_weak3)),
+        "weak3_oracle_gap": float(safe_best_weak3 - baseline_weak3),
+        "residual_blend": float(np.clip(residual_blend, 0.0, 1.0)),
     }
 
 
@@ -252,5 +424,180 @@ def summarize_target_choice_interventions(
         "at least 20 ineffective-duplicate interventions from at least 10 "
         "episodes and their mean actual-to-oracle worst gap 95% lower bound "
         "> 0.02"
+    )
+    return summary
+
+
+def summarize_sensing_choice_interventions(
+    episodes: Sequence[Sequence[Dict[str, object]]],
+    bootstrap_samples: int = 2000,
+    bootstrap_seed: int = 20260723,
+) -> Dict[str, object]:
+    """Apply the clustered causal gate with sensing-specific metric names."""
+    target_summary = summarize_target_choice_interventions(
+        episodes,
+        bootstrap_samples=bootstrap_samples,
+        bootstrap_seed=bootstrap_seed,
+    )
+    summary = {
+        key.replace("eval_target_cf_", "eval_sensing_cf_"): value
+        for key, value in target_summary.items()
+    }
+    summary["eval_sensing_cf_note"] = (
+        "common-random-number bounded sensing-power intervention; movement, "
+        "communication, total RF power and all other UAV allocations held fixed"
+    )
+    return summary
+
+
+def evaluate_joint_sensing_pair_intervention(
+    env,
+    actions: Dict[str, Dict],
+    num_targets: int,
+    horizon: int,
+    residual_blend: float = 0.25,
+) -> Dict[str, object]:
+    """Enumerate two-UAV residual options for the baseline weakest target.
+
+    This intervention matches the bistatic structure: both endpoints redirect
+    bounded sensing mass to the same target. No-op remains an explicit option,
+    and candidates are admitted only when steady and weak3 do not decrease.
+    """
+    horizon = max(1, int(horizon))
+    queued = _pending_communication(env.core)
+    agent_indices = sorted(int(k) for k in queued["sensing"])
+    pairs = list(combinations(agent_indices, 2))
+    if not pairs:
+        raise RuntimeError("joint sensing audit requires at least two UAVs")
+
+    def rollout(sensing_allocations: Dict[int, np.ndarray]) -> np.ndarray:
+        branch = deepcopy(env)
+        branch_actions = {
+            key: {
+                "delta_p": np.asarray(value["delta_p"]).copy(),
+                "role": int(value["role"]),
+            }
+            for key, value in actions.items()
+        }
+        pd_rows = []
+        for _ in range(horizon):
+            branch.core.submit_learned_communications(
+                queued["messages"],
+                queued["rates"],
+                queued["fractions"],
+                sensing_allocations,
+                token_masks=queued["masks"],
+            )
+            _, _, terminated, truncated, info = branch.step(branch_actions)
+            pd_rows.append(np.asarray(info["P_D_q"], dtype=np.float64))
+            if (terminated.get("__all__", False)
+                    or truncated.get("__all__", False)):
+                break
+        per_target = np.mean(np.asarray(pd_rows), axis=0)
+        branch.close()
+        return per_target
+
+    baseline_sensing = {
+        int(k): np.asarray(value).copy()
+        for k, value in queued["sensing"].items()
+    }
+    baseline_per_target = rollout(baseline_sensing)
+    target_index = int(np.argmin(baseline_per_target))
+    baseline_ordered = np.sort(baseline_per_target)
+    baseline_worst = float(baseline_ordered[0])
+    baseline_weak3 = float(np.mean(
+        baseline_ordered[:min(3, baseline_ordered.size)]))
+    baseline_steady = float(np.mean(baseline_per_target))
+
+    candidate_worst = np.zeros(len(pairs), dtype=np.float64)
+    candidate_weak3 = np.zeros(len(pairs), dtype=np.float64)
+    candidate_steady = np.zeros(len(pairs), dtype=np.float64)
+    for pair_index, pair in enumerate(pairs):
+        candidate_sensing = {
+            int(k): np.asarray(value).copy()
+            for k, value in baseline_sensing.items()
+        }
+        for agent_index in pair:
+            candidate_sensing[agent_index] = blend_sensing_allocation(
+                baseline_sensing[agent_index],
+                target_index,
+                residual_blend,
+            )
+        per_target = rollout(candidate_sensing)
+        ordered = np.sort(per_target)
+        candidate_worst[pair_index] = ordered[0]
+        candidate_weak3[pair_index] = np.mean(
+            ordered[:min(3, ordered.size)])
+        candidate_steady[pair_index] = np.mean(per_target)
+
+    safe_candidates = np.logical_and(
+        candidate_weak3 >= baseline_weak3 - 1.0e-9,
+        candidate_steady >= baseline_steady - 1.0e-9,
+    )
+    safe_worst = np.where(safe_candidates, candidate_worst, -np.inf)
+    best_candidate = int(np.argmax(safe_worst))
+    best_pair_index = (
+        best_candidate
+        if (safe_candidates[best_candidate]
+            and candidate_worst[best_candidate] > baseline_worst + 1.0e-9)
+        else -1
+    )
+    safe_best_worst = (
+        float(candidate_worst[best_pair_index])
+        if best_pair_index >= 0 else baseline_worst
+    )
+    safe_best_weak3 = max(
+        [baseline_weak3] + [
+            float(candidate_weak3[index])
+            for index in range(len(pairs)) if safe_candidates[index]
+        ])
+    all_worst = np.concatenate([
+        np.asarray([baseline_worst]), candidate_worst])
+    all_weak3 = np.concatenate([
+        np.asarray([baseline_weak3]), candidate_weak3])
+    return {
+        "agent_pairs": [list(pair) for pair in pairs],
+        "target_index": target_index,
+        "actual_choice": -1,
+        "best_choice": best_pair_index,
+        "best_pair": (
+            list(pairs[best_pair_index])
+            if best_pair_index >= 0 else []
+        ),
+        "baseline_worst": baseline_worst,
+        "baseline_weak3": baseline_weak3,
+        "baseline_steady": baseline_steady,
+        "candidate_worst": candidate_worst.tolist(),
+        "candidate_weak3": candidate_weak3.tolist(),
+        "candidate_steady": candidate_steady.tolist(),
+        "candidate_safe": safe_candidates.astype(float).tolist(),
+        "worst_value_std": float(np.std(all_worst)),
+        "worst_value_range": float(np.ptp(all_worst)),
+        "worst_oracle_gap": float(safe_best_worst - baseline_worst),
+        "actual_is_best": float(best_pair_index < 0),
+        "weak3_value_range": float(np.ptp(all_weak3)),
+        "weak3_oracle_gap": float(safe_best_weak3 - baseline_weak3),
+        "residual_blend": float(np.clip(residual_blend, 0.0, 1.0)),
+    }
+
+
+def summarize_joint_sensing_pair_interventions(
+    episodes: Sequence[Sequence[Dict[str, object]]],
+    bootstrap_samples: int = 2000,
+    bootstrap_seed: int = 20260723,
+) -> Dict[str, object]:
+    """Apply the clustered causal gate to paired bistatic interventions."""
+    target_summary = summarize_target_choice_interventions(
+        episodes,
+        bootstrap_samples=bootstrap_samples,
+        bootstrap_seed=bootstrap_seed,
+    )
+    summary = {
+        key.replace("eval_target_cf_", "eval_joint_sensing_cf_"): value
+        for key, value in target_summary.items()
+    }
+    summary["eval_joint_sensing_cf_note"] = (
+        "common-random-number no-op-controlled two-UAV sensing residual "
+        "toward the baseline weakest target; steady and weak3 Pareto safety"
     )
     return summary

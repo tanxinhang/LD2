@@ -1,0 +1,8 @@
+# Upper diagnostic: exact max-min pairing on the complete physical candidate
+# graph. The actor still chooses movement, communication and sensing power.
+extends: exp_800_q4_architecture_v2_prior_gate.yaml
+
+marl:
+  p0_maxmin_pairing_enabled: true
+  p0_maxmin_bypass_commitment_filter: true
+  p0_maxmin_pairing_hold_frames: 1

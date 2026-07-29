@@ -1,0 +1,11 @@
+# Non-deployable diagnostic upper bound: keep the deterministic deficit-aware
+# max-min pair scheduler, but replace the learned movement action at evaluation
+# time with the existing QoS-aware bistatic assignment teacher.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  eval_qos_bistatic_assignment_movement: true
+  target_allocation_teacher_commitment_frames: 5
+  target_allocation_teacher_qos_floor: 0.60
+  target_allocation_teacher_qos_weight: 2.0
+  target_allocation_teacher_switching_penalty_m: 0.0

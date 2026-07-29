@@ -1,0 +1,6 @@
+# Slow persistent version of the sensing-aligned Token contract.
+extends: exp_800_q4_architecture_v2_maxmin_sensing_token_gate.yaml
+
+marl:
+  distributed_target_commitment_min_hold_frames: 5
+  distributed_target_commitment_handover_frames: 2

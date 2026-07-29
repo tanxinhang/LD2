@@ -1,0 +1,8 @@
+# Diagnostic: retain the distributed Top-2 agreement graph, but replace the
+# average-utility greedy P0 with exact single-role max-min pair selection.
+extends: exp_800_q4_architecture_v2_prior_gate.yaml
+
+marl:
+  p0_maxmin_pairing_enabled: true
+  p0_maxmin_bypass_commitment_filter: false
+  p0_maxmin_pairing_hold_frames: 1

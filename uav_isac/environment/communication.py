@@ -138,8 +138,14 @@ class InterUAVCommunicationModel:
         bits_per_dim = self.rate_bits_per_dim[idx]
         if bits_per_dim <= 0:
             return 0
-        dims = (self.message_dim if active_dimensions is None else int(np.clip(
-            active_dimensions, 0, self.message_dim)))
+        # ``active_dimensions`` may include an appended in-band control stream
+        # (for example the QPD protocol header), so it is not capped at the
+        # learned latent message width.
+        dims = (
+            self.message_dim
+            if active_dimensions is None
+            else max(0, int(active_dimensions))
+        )
         if dims <= 0:
             return 0
         return self.header_bits + dims * bits_per_dim
@@ -158,14 +164,21 @@ class InterUAVCommunicationModel:
 
     def quantize(self, message: np.ndarray, rate_index: int) -> np.ndarray:
         """Uniformly quantize a learned message to the selected precision."""
-        idx = int(np.clip(rate_index, 0, len(self.rate_bits_per_dim) - 1))
-        bits = self.rate_bits_per_dim[idx]
         msg = np.asarray(message, dtype=np.float64).reshape(-1)
         if msg.size != self.message_dim:
             raise ValueError(
                 f'expected {self.message_dim}-D communication message, got {msg.size}')
+        return self.quantize_values(msg, rate_index)
+
+    def quantize_values(
+        self, values: np.ndarray, rate_index: int,
+    ) -> np.ndarray:
+        """Quantize an arbitrary appended control stream at the packet rate."""
+        idx = int(np.clip(rate_index, 0, len(self.rate_bits_per_dim) - 1))
+        bits = self.rate_bits_per_dim[idx]
+        msg = np.asarray(values, dtype=np.float64)
         if bits <= 0:
-            return np.zeros(self.message_dim, dtype=np.float64)
+            return np.zeros_like(msg)
         clipped = np.clip(msg, -1.0, 1.0)
         levels = max(2, (1 << bits))
         code = np.rint((clipped + 1.0) * 0.5 * (levels - 1))
@@ -195,6 +208,7 @@ class InterUAVCommunicationModel:
         positions: np.ndarray,
         tx_powers_w: Dict[int, float] = None,
         token_masks: Dict[int, np.ndarray] = None,
+        extra_payload_dimensions: Dict[int, int] = None,
     ) -> tuple[List[DeliveredMessage], CommunicationStepStats]:
         """Transport one learned broadcast per active sender.
 
@@ -204,9 +218,13 @@ class InterUAVCommunicationModel:
         """
         K = int(positions.shape[0])
         masks = token_masks or {}
+        extra_dims = extra_payload_dimensions or {}
         active = []
         for k in range(K):
-            active_dims = self._active_dimensions(masks.get(k))
+            active_dims = (
+                self._active_dimensions(masks.get(k))
+                + max(0, int(extra_dims.get(k, 0)))
+            )
             if (k in messages and self.payload_bits(
                     rate_indices.get(k, 0), active_dims) > 0):
                 active.append(k)
@@ -221,7 +239,10 @@ class InterUAVCommunicationModel:
         for sender in active:
             rate_idx = int(rate_indices.get(sender, 0))
             sender_mask = masks.get(sender)
-            active_dims = self._active_dimensions(sender_mask)
+            active_dims = (
+                self._active_dimensions(sender_mask)
+                + max(0, int(extra_dims.get(sender, 0)))
+            )
             n_bits = self.payload_bits(rate_idx, active_dims)
             quantized = self.quantize(messages[sender], rate_idx)
             if sender_mask is not None:

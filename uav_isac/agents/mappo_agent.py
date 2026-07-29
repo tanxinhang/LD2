@@ -88,10 +88,27 @@ class MAPPOAgent(BaseAgent):
         semantic_kinematic_field_gain: float = 0.15,
         target_conditioned_movement_enabled: bool = False,
         target_conditioned_movement_gain: float = 0.15,
+        architecture_v2_enabled: bool = False,
+        architecture_v2_prior_gain: float = 1.0,
+        architecture_v2_distance_weight: float = 0.25,
+        architecture_v2_qos_floor: float = 0.60,
+        architecture_v2_comm_prior_gain: float = 2.0,
+        architecture_v2_comm_crisis_threshold: float = 0.25,
+        architecture_v2_consensus_enabled: bool = True,
+        architecture_v2_matching_temperature: float = 0.35,
+        architecture_v2_movement_consensus_blend: float = 1.0,
+        architecture_v2_endpoint_consensus_gain: float = 2.0,
+        architecture_v2_bid_residual_scale: float = 0.25,
+        architecture_v2_sensing_aligned_claims_enabled: bool = False,
+        architecture_v2_modular_coordination_enabled: bool = False,
+        architecture_v2_modular_num_experts: int = 3,
+        architecture_v2_modular_gain: float = 0.25,
+        architecture_v2_modular_temperature: float = 0.75,
         scale_equivariant_comm_heads_enabled: bool = False,
         permutation_equivariant_round_encoding_enabled: bool = False,
         comm_channel_feedback_rate_enabled: bool = False,
         comm_channel_feedback_dim: int = 6,
+        equivariant_value_critic_enabled: bool = False,
         set_risk_critic_enabled: bool = False,
         risk_critic_hidden_dim: int = 128,
         risk_critic_num_quantiles: int = 16,
@@ -133,6 +150,10 @@ class MAPPOAgent(BaseAgent):
             raise ValueError(
                 'set_risk_critic_enabled requires MAPPO centralized training; '
                 'the risk critic is removed at decentralized execution')
+        if equivariant_value_critic_enabled and not centralized_critic:
+            raise ValueError(
+                'equivariant_value_critic_enabled requires MAPPO '
+                'centralized training')
         critic_state_dim = global_state_dim if centralized_critic else obs_dim
         self._critic_base_state_dim = int(critic_state_dim)
         self._critic_aux_dim = int(num_agents + 16)
@@ -220,6 +241,35 @@ class MAPPOAgent(BaseAgent):
                     target_conditioned_movement_enabled),
                 target_conditioned_movement_gain=(
                     target_conditioned_movement_gain),
+                architecture_v2_enabled=architecture_v2_enabled,
+                architecture_v2_prior_gain=architecture_v2_prior_gain,
+                architecture_v2_distance_weight=(
+                    architecture_v2_distance_weight),
+                architecture_v2_qos_floor=architecture_v2_qos_floor,
+                architecture_v2_comm_prior_gain=(
+                    architecture_v2_comm_prior_gain),
+                architecture_v2_comm_crisis_threshold=(
+                    architecture_v2_comm_crisis_threshold),
+                architecture_v2_consensus_enabled=(
+                    architecture_v2_consensus_enabled),
+                architecture_v2_matching_temperature=(
+                    architecture_v2_matching_temperature),
+                architecture_v2_movement_consensus_blend=(
+                    architecture_v2_movement_consensus_blend),
+                architecture_v2_endpoint_consensus_gain=(
+                    architecture_v2_endpoint_consensus_gain),
+                architecture_v2_bid_residual_scale=(
+                    architecture_v2_bid_residual_scale),
+                architecture_v2_sensing_aligned_claims_enabled=(
+                    architecture_v2_sensing_aligned_claims_enabled),
+                architecture_v2_modular_coordination_enabled=(
+                    architecture_v2_modular_coordination_enabled),
+                architecture_v2_modular_num_experts=(
+                    architecture_v2_modular_num_experts),
+                architecture_v2_modular_gain=(
+                    architecture_v2_modular_gain),
+                architecture_v2_modular_temperature=(
+                    architecture_v2_modular_temperature),
                 scale_equivariant_comm_heads_enabled=(
                     scale_equivariant_comm_heads_enabled),
                 permutation_equivariant_round_encoding_enabled=(
@@ -251,6 +301,8 @@ class MAPPOAgent(BaseAgent):
             num_agents=num_agents,
             comm_dim=16,
             num_targets=num_targets,
+            equivariant_value_critic_enabled=(
+                equivariant_value_critic_enabled),
             set_risk_critic_enabled=set_risk_critic_enabled,
             risk_hidden_dim=risk_critic_hidden_dim,
             risk_num_quantiles=risk_critic_num_quantiles,
@@ -698,6 +750,20 @@ class MAPPOAgent(BaseAgent):
         current = self.actor.state_dict()
         token_dim = int(getattr(
             self.actor, 'comm_target_token_dim', 0))
+
+        # The identity-free modular residual is behavior-neutral because its
+        # router starts exactly uniform and expert outputs are mixed after
+        # subtracting that uniform distribution. Preserve its distinct small
+        # expert bases during checkpoint migration; generic zero-init would
+        # make both the router and every expert zero and block first-step
+        # teacher gradients.
+        if getattr(
+                self.actor,
+                '_architecture_v2_modular_coordination_enabled', False):
+            for key, value in current.items():
+                if (key.startswith('v2_module_router.')
+                        or key.startswith('v2_coordination_experts.')):
+                    migrated.setdefault(key, value.clone())
 
         # Convert fixed-Q flattened heads into local set heads. With uniform
         # pooling, summing the legacy per-target blocks is the least-assumption

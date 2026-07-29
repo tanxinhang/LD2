@@ -1,0 +1,69 @@
+# Architecture V2: cardinality-equivariant distributed ISAC MAPPO.
+#
+# The actor is trained from scratch.  Every target-dependent output is emitted
+# by a shared per-target trunk; team-level movement, communication rate and
+# total ISAC power use set pooling.  The main MAPPO value function is also a
+# set model.  No absolute UAV identity is available to either architecture.
+extends: exp_800_q4_u2u_sparse_claim_top2.yaml
+
+marl:
+  architecture_v2_enabled: true
+  architecture_v2_distance_weight: 2.0
+  scale_equivariant_comm_heads_enabled: true
+  permutation_equivariant_round_encoding_enabled: true
+  equivariant_value_critic_enabled: true
+  architecture_v2_comm_prior_gain: 2.0
+  architecture_v2_comm_crisis_threshold: 0.25
+  architecture_v2_consensus_enabled: true
+  architecture_v2_matching_temperature: 0.35
+  architecture_v2_movement_consensus_blend: 1.0
+  architecture_v2_endpoint_consensus_gain: 2.0
+  architecture_v2_bid_residual_scale: 0.25
+
+  # Retain the empirically deployable precision.  The policy still decides
+  # whether to communicate, but an active packet always uses 4 bit/dimension.
+  comm_rate_bits_per_dim: [0, 4]
+  comm_qos_min_rate_bits: 4
+  comm_rate_bonus_enabled: false
+  comm_eval_force_rate_bits: -1
+
+  # V2 directly produces target sensing logits and target-conditioned motion;
+  # disable legacy additive adapters and fixed-cardinality matching layers.
+  target_allocation_resource_blend: 0.0
+  target_allocation_movement_blend: 0.0
+  target_allocation_movement_blend_start: 0.0
+  target_allocation_movement_blend_end: 0.0
+  target_allocation_movement_blend_anneal_frames: 0
+  hierarchical_dual_assignment_enabled: false
+  capacity_matching_enabled: false
+  movement_team_matching_enabled: false
+  semantic_kinematic_field_enabled: false
+  target_conditioned_movement_enabled: false
+
+  # Measured target-wise bottleneck advantages route actor gradients.  The
+  # calibrated binary violation branch remains an auxiliary CTDE constraint;
+  # the previously uncalibrated distributional/CVaR loss is disabled.
+  advantage_mode: bottleneck_risk
+  risk_tail_fraction: 0.50
+  risk_target_temperature: 0.10
+  risk_target_floor: 0.60
+  risk_scalar_mix: 0.25
+  set_risk_critic_enabled: true
+  risk_critic_quantile_coef: 0.0
+  risk_critic_constraint_coef: 0.10
+  risk_critic_only_training: false
+
+  # Avoid legacy multi-head credit paths while the new joint representation is
+  # being validated.  They can be reintroduced only after a positive gate.
+  headwise_credit_enabled: false
+  causal_ccp_enabled: false
+
+  # One UAV has one exact 1 W RF budget; at least half remains available for
+  # sensing even when communication is active.
+  comm_power_fraction_min: 0.0
+  comm_power_fraction_max: 0.50
+
+  # This is a from-scratch architecture comparison, not a warm-start hot swap.
+  ppo_clip: 0.10
+  ppo_epochs: 2
+  target_kl: 0.02

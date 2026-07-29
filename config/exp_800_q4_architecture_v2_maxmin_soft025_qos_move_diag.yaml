@@ -1,0 +1,12 @@
+# Factorial interaction diagnostic: the QoS movement teacher changes the
+# intended target before the frozen communication commitment can adapt, so
+# retain the distributed commitment as a soft edge prior during this
+# non-deployable upper-bound evaluation.
+extends: exp_800_q4_architecture_v2_maxmin_soft025_gate.yaml
+
+marl:
+  eval_qos_bistatic_assignment_movement: true
+  target_allocation_teacher_commitment_frames: 5
+  target_allocation_teacher_qos_floor: 0.60
+  target_allocation_teacher_qos_weight: 2.0
+  target_allocation_teacher_switching_penalty_m: 0.0

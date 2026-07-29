@@ -108,6 +108,74 @@ def test_local_commitment_filter_topk_relaxes_rendezvous_without_fallback():
     assert [e.q for e in relaxed] == [1]
 
 
+def test_explicit_token_commitment_mask_overrides_sensing_power_topk():
+    entries = [_entry(0, 1, q) for q in range(3)]
+    power = np.array([
+        [0.9, 0.08, 0.02],
+        [0.8, 0.15, 0.05],
+    ])
+    token_mask = np.array([
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+    ])
+    ranked, metrics = filter_deflection_by_local_commitments(
+        entries,
+        power,
+        topk=1,
+        require_receiver=True,
+        commitment_mask=token_mask,
+    )
+    assert [entry.q for entry in ranked] == [2]
+    np.testing.assert_array_equal(
+        metrics['learned_comm_commitment_mask'],
+        token_mask.astype(bool),
+    )
+    assert metrics['learned_comm_commitment_claims_per_uav'] == 1.0
+
+
+def test_token_commitment_hold_and_handover_are_persistent_and_sparse():
+    cfg = load_config('config/exp_800_q4_u2u_joint_isac.yaml')
+    cfg.marl.distributed_target_commitment_source = 'sent_token'
+    cfg.marl.distributed_target_commitment_topk = 1
+    cfg.marl.distributed_target_commitment_min_hold_frames = 2
+    cfg.marl.distributed_target_commitment_handover_frames = 2
+    cfg.marl.distributed_target_commitment_max_age_frames = 5
+    env = UAVISACEnv(cfg, seed=17)
+    env.reset(seed=17)
+    core = env.core
+    core._current_sensing_power_w = np.tile(
+        np.array([0.7, 0.2, 0.08, 0.02]), (core.K, 1))
+
+    first = np.array([1.0, 0.0, 0.0, 0.0])
+    second = np.array([0.0, 1.0, 0.0, 0.0])
+    core.t = 0
+    core._last_sent_comm_token_masks = {0: first}
+    mask0 = core._resolve_persistent_token_commitments()
+    np.testing.assert_array_equal(mask0[0], first.astype(bool))
+
+    core.t = 1
+    core._last_sent_comm_token_masks = {0: second}
+    held = core._resolve_persistent_token_commitments()
+    np.testing.assert_array_equal(held[0], first.astype(bool))
+
+    core.t = 2
+    handed = core._resolve_persistent_token_commitments()
+    np.testing.assert_array_equal(
+        handed[0], np.logical_or(first, second))
+    assert core._persistent_commitment_metrics[
+        'learned_comm_commitment_switch_rate'] == 1.0 / core.K
+
+    core.t = 3
+    grace = core._resolve_persistent_token_commitments()
+    np.testing.assert_array_equal(
+        grace[0], np.logical_or(first, second))
+
+    core.t = 4
+    settled = core._resolve_persistent_token_commitments()
+    np.testing.assert_array_equal(settled[0], second.astype(bool))
+    assert settled[0].sum() == 1
+
+
 def test_soft_local_commitment_keeps_graph_and_relaxes_uncertain_claims():
     entries = [_entry(0, 1, q) for q in range(3)]
     uniform = np.full((2, 3), 1.0 / 3.0)

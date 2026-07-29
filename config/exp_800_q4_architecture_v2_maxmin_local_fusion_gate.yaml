@@ -1,0 +1,7 @@
+# Diagnostic control: keep the frozen actor, learned commitment graph, RF
+# allocation, and single-role constraint, but make P0 optimize the same
+# receiver-local evidence statistic used by deployment.
+extends: exp_800_q4_architecture_v2_maxmin_filtered_gate.yaml
+
+marl:
+  p0_maxmin_local_fusion_enabled: true

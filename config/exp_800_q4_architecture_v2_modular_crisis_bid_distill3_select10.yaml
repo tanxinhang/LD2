@@ -1,0 +1,14 @@
+# ADMN-inspired screening variant. Unlike ADMN, routing consumes no absolute
+# UAV identity and does not modularize the full value/policy network. Three
+# shared experts modify only the slow coordination latent, using a
+# permutation-invariant local target/QoS summary. The sensing/resource policy,
+# communication PHY and max-min scheduler remain unchanged.
+extends: exp_800_q4_architecture_v2_qos_crisis_bid_distill3_select10.yaml
+
+marl:
+  architecture_v2_modular_coordination_enabled: true
+  architecture_v2_modular_num_experts: 3
+  architecture_v2_modular_gain: 0.25
+  architecture_v2_modular_temperature: 0.75
+  architecture_v2_modular_balance_coef: 0.01
+  architecture_v2_modular_specialization_coef: 0.002

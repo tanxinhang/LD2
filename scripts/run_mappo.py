@@ -47,6 +47,25 @@ def main():
                     help="at movement boundaries, run a common-random-number "
                          "single-UAV target-direction intervention every N "
                          "frames; 0 disables the expensive diagnostic")
+    ap.add_argument("--sensing-choice-audit-stride", type=int, default=0,
+                    help="run a common-random-number bounded single-UAV "
+                         "sensing-allocation intervention every N frames; "
+                         "0 disables the expensive diagnostic")
+    ap.add_argument("--sensing-residual-blend", type=float, default=0.25,
+                    help="fraction of one UAV's sensing mass redirected to "
+                         "each candidate target during the causal audit")
+    ap.add_argument("--sensing-audit-horizon", type=int, default=0,
+                    help="candidate rollout horizon in frames; 0 uses the "
+                         "movement decision interval")
+    ap.add_argument("--sensing-oracle-control", action="store_true",
+                    help="execute the best future-horizon sensing candidate "
+                         "between audits; noncausal diagnostic upper bound")
+    ap.add_argument("--joint-sensing-pair-audit-stride", type=int, default=0,
+                    help="enumerate no-op-controlled two-UAV sensing residuals "
+                         "toward the weakest target every N frames")
+    ap.add_argument("--physical-oracle-stride", type=int, default=0,
+                    help="solve same-geometry single-role and full-duplex "
+                         "pair/power upper bounds every N evaluation frames")
     ap.add_argument(
         "--evidence-trace-output",
         default=None,
@@ -224,6 +243,46 @@ def main():
                 config.marl, 'target_conditioned_movement_enabled', False)),
             target_conditioned_movement_gain=float(getattr(
                 config.marl, 'target_conditioned_movement_gain', 0.15)),
+            architecture_v2_enabled=bool(getattr(
+                config.marl, 'architecture_v2_enabled', False)),
+            architecture_v2_prior_gain=float(getattr(
+                config.marl, 'architecture_v2_prior_gain', 1.0)),
+            architecture_v2_distance_weight=float(getattr(
+                config.marl, 'architecture_v2_distance_weight', 0.25)),
+            architecture_v2_qos_floor=float(getattr(
+                config.marl, 'architecture_v2_qos_floor', 0.60)),
+            architecture_v2_comm_prior_gain=float(getattr(
+                config.marl, 'architecture_v2_comm_prior_gain', 2.0)),
+            architecture_v2_comm_crisis_threshold=float(getattr(
+                config.marl,
+                'architecture_v2_comm_crisis_threshold', 0.25)),
+            architecture_v2_consensus_enabled=bool(getattr(
+                config.marl, 'architecture_v2_consensus_enabled', True)),
+            architecture_v2_matching_temperature=float(getattr(
+                config.marl,
+                'architecture_v2_matching_temperature', 0.35)),
+            architecture_v2_movement_consensus_blend=float(getattr(
+                config.marl,
+                'architecture_v2_movement_consensus_blend', 1.0)),
+            architecture_v2_endpoint_consensus_gain=float(getattr(
+                config.marl,
+                'architecture_v2_endpoint_consensus_gain', 2.0)),
+            architecture_v2_bid_residual_scale=float(getattr(
+                config.marl,
+                'architecture_v2_bid_residual_scale', 0.25)),
+            architecture_v2_sensing_aligned_claims_enabled=bool(getattr(
+                config.marl,
+                'architecture_v2_sensing_aligned_claims_enabled', False)),
+            architecture_v2_modular_coordination_enabled=bool(getattr(
+                config.marl,
+                'architecture_v2_modular_coordination_enabled', False)),
+            architecture_v2_modular_num_experts=int(getattr(
+                config.marl, 'architecture_v2_modular_num_experts', 3)),
+            architecture_v2_modular_gain=float(getattr(
+                config.marl, 'architecture_v2_modular_gain', 0.25)),
+            architecture_v2_modular_temperature=float(getattr(
+                config.marl,
+                'architecture_v2_modular_temperature', 0.75)),
             scale_equivariant_comm_heads_enabled=bool(getattr(
                 config.marl,
                 'scale_equivariant_comm_heads_enabled', False)),
@@ -235,6 +294,9 @@ def main():
                 'comm_channel_feedback_rate_enabled', False)),
             comm_channel_feedback_dim=int(getattr(
                 config.marl, 'comm_channel_feedback_dim', 6)),
+            equivariant_value_critic_enabled=bool(getattr(
+                config.marl,
+                'equivariant_value_critic_enabled', False)),
             set_risk_critic_enabled=bool(getattr(
                 config.marl, 'set_risk_critic_enabled', False)),
             risk_critic_hidden_dim=int(getattr(
@@ -556,6 +618,33 @@ def main():
             config.marl.distributed_target_commitment_soft_floor),
         "distributed_target_commitment_uncertainty_relief": (
             config.marl.distributed_target_commitment_uncertainty_relief),
+        "distributed_target_commitment_source": (
+            config.marl.distributed_target_commitment_source),
+        "p0_maxmin_pairing_enabled": (
+            config.marl.p0_maxmin_pairing_enabled),
+        "p0_maxmin_bypass_commitment_filter": (
+            config.marl.p0_maxmin_bypass_commitment_filter),
+        "p0_maxmin_pairing_hold_frames": (
+            config.marl.p0_maxmin_pairing_hold_frames),
+        "p0_maxmin_local_fusion_enabled": (
+            config.marl.p0_maxmin_local_fusion_enabled),
+        "p0_maxmin_deficit_priority_gain": (
+            config.marl.p0_maxmin_deficit_priority_gain),
+        "hyperedge_negotiation": {
+            "enabled": config.marl.hyperedge_negotiation_enabled,
+            "share_topk": config.marl.hyperedge_share_topk,
+            "distance_scale_m": config.marl.hyperedge_distance_scale_m,
+            "deficit_gain": config.marl.hyperedge_deficit_gain,
+            "proxy_floor": config.marl.hyperedge_proxy_floor,
+            "pair_score_mode": config.marl.hyperedge_pair_score_mode,
+            "state_stream_enabled": (
+                config.marl.hyperedge_state_stream_enabled),
+            "consensus_rounds": config.marl.hyperedge_consensus_rounds,
+            "min_target_coverage": (
+                config.marl.hyperedge_min_target_coverage),
+            "safety_fallback_enabled": (
+                config.marl.hyperedge_safety_fallback_enabled),
+        },
         "round_negotiation_enabled": config.marl.round_negotiation_enabled,
         "round_negotiation_strength": config.marl.round_negotiation_strength,
         "round_negotiation_temperature": (
@@ -612,6 +701,44 @@ def main():
             config.marl.target_conditioned_movement_enabled),
         "target_conditioned_movement_gain": (
             config.marl.target_conditioned_movement_gain),
+        "architecture_v2_enabled": (
+            config.marl.architecture_v2_enabled),
+        "architecture_v2_prior_gain": (
+            config.marl.architecture_v2_prior_gain),
+        "architecture_v2_distance_weight": (
+            config.marl.architecture_v2_distance_weight),
+        "architecture_v2_qos_floor": (
+            config.marl.architecture_v2_qos_floor),
+        "architecture_v2_comm_prior_gain": (
+            config.marl.architecture_v2_comm_prior_gain),
+        "architecture_v2_comm_crisis_threshold": (
+            config.marl.architecture_v2_comm_crisis_threshold),
+        "architecture_v2_consensus_enabled": (
+            config.marl.architecture_v2_consensus_enabled),
+        "architecture_v2_matching_temperature": (
+            config.marl.architecture_v2_matching_temperature),
+        "architecture_v2_movement_consensus_blend": (
+            config.marl.architecture_v2_movement_consensus_blend),
+        "architecture_v2_endpoint_consensus_gain": (
+            config.marl.architecture_v2_endpoint_consensus_gain),
+        "architecture_v2_bid_residual_scale": (
+            config.marl.architecture_v2_bid_residual_scale),
+        "architecture_v2_modular_coordination_enabled": (
+            config.marl.architecture_v2_modular_coordination_enabled),
+        "architecture_v2_modular_num_experts": (
+            config.marl.architecture_v2_modular_num_experts),
+        "architecture_v2_modular_gain": (
+            config.marl.architecture_v2_modular_gain),
+        "architecture_v2_modular_temperature": (
+            config.marl.architecture_v2_modular_temperature),
+        "architecture_v2_modular_balance_coef": (
+            config.marl.architecture_v2_modular_balance_coef),
+        "architecture_v2_modular_specialization_coef": (
+            config.marl.architecture_v2_modular_specialization_coef),
+        "architecture_v2_modular_lr_scale": (
+            config.marl.architecture_v2_modular_lr_scale),
+        "equivariant_value_critic_enabled": (
+            config.marl.equivariant_value_critic_enabled),
         "P_isac_total": config.uav.P_isac_total,
         "comm_power_fraction_bounds": [
             config.marl.comm_power_fraction_min,
@@ -785,6 +912,17 @@ def main():
         "max_final_eval_seeds": max(0, int(args.max_final_eval_seeds)),
         "target_choice_audit_stride": max(
             0, int(args.target_choice_audit_stride)),
+        "sensing_choice_audit_stride": max(
+            0, int(args.sensing_choice_audit_stride)),
+        "sensing_residual_blend": float(np.clip(
+            args.sensing_residual_blend, 0.0, 1.0)),
+        "sensing_audit_horizon": max(
+            0, int(args.sensing_audit_horizon)),
+        "sensing_oracle_control": bool(args.sensing_oracle_control),
+        "joint_sensing_pair_audit_stride": max(
+            0, int(args.joint_sensing_pair_audit_stride)),
+        "physical_oracle_stride": max(
+            0, int(args.physical_oracle_stride)),
         "evidence_trace_output": args.evidence_trace_output,
     }
     with open(os.path.join(out_dir, "run_manifest.json"), "w") as f:
@@ -819,6 +957,17 @@ def main():
             eval_seeds=paired_seeds,
             target_choice_audit_stride=max(
                 0, int(args.target_choice_audit_stride)),
+            sensing_choice_audit_stride=max(
+                0, int(args.sensing_choice_audit_stride)),
+            sensing_residual_blend=float(np.clip(
+                args.sensing_residual_blend, 0.0, 1.0)),
+            sensing_audit_horizon=max(
+                0, int(args.sensing_audit_horizon)),
+            sensing_oracle_control=bool(args.sensing_oracle_control),
+            joint_sensing_pair_audit_stride=max(
+                0, int(args.joint_sensing_pair_audit_stride)),
+            physical_oracle_stride=max(
+                0, int(args.physical_oracle_stride)),
             evidence_trace_output=args.evidence_trace_output,
         )
         eval_keys = sorted(ev.keys())

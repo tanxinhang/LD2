@@ -1,0 +1,8 @@
+# Tail-selective direct-bid distillation. Safe rollout states receive no
+# teacher gradient; only states with an observed target below the deployment
+# floor update the slow intention heads.
+extends: exp_800_q4_architecture_v2_qos_intent_distill3_select10.yaml
+
+marl:
+  target_allocation_teacher_crisis_only_enabled: true
+  target_allocation_teacher_crisis_floor: 0.60

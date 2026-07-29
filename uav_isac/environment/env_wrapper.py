@@ -163,12 +163,19 @@ class UAVISACEnv(gymnasium.Env):
             'n_tx': step_info.n_tx,
             'n_rx': step_info.n_rx,
             'n_selected': step_info.n_selected,
+            'p0_target_coverage': float(
+                len({
+                    int(q) for _, _, q
+                    in step_info.p0_solution.selected_set
+                }) / max(self.Q, 1)),
             'n_duplex': step_info.n_duplex,
             'multistatic_subslot_enabled': bool(
                 self.core._multistatic_subslot_enabled),
             'valid_pair': step_info.valid_pair,
             'no_tx': step_info.no_tx,
             'all_same_role': step_info.all_same_role,
+            'p0_resolved': step_info.p0_resolved,
+            'p0_solve_time_s': step_info.p0_solve_time_s,
         }
         if step_info.learned_comm:
             info.update(step_info.learned_comm)

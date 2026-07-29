@@ -22,7 +22,7 @@ import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, linear_sum_assignment
 from scipy.optimize import linprog, milp
 
-from uav_isac.utils.math_utils import compute_PD
+from uav_isac.utils.math_utils import Q_inverse, compute_PD
 from uav_isac.utils.types import DeflectionEntry
 
 
@@ -182,6 +182,312 @@ def _select_pairs_milp(
     return tuple(sorted(chosen))
 
 
+def _normalize_oracle_fusion_mode(mode: str) -> str:
+    """Map detector labels to the two physical objectives supported here."""
+    normalized = str(mode).strip().lower()
+    if normalized in {"central_oracle", "legacy_global"}:
+        return "central_oracle"
+    if normalized == "local_only":
+        return "local_only"
+    raise ValueError(
+        "physical feasibility oracle supports detection_fusion_mode "
+        "'local_only', 'central_oracle', or 'legacy_global'; "
+        f"received {mode!r}"
+    )
+
+
+def _selected_detection_deflection(
+    coefficient: np.ndarray,
+    power: np.ndarray,
+    selected: Sequence[Tuple[int, int, int]],
+    *,
+    fusion_mode: str,
+) -> np.ndarray:
+    """Evaluate a reporting graph using the same receiver boundary as deployment."""
+    k_count, _, q_count = coefficient.shape
+    receiver_d = np.zeros((k_count, q_count), dtype=np.float64)
+    for i, j, q in selected:
+        receiver_d[int(j), int(q)] += (
+            coefficient[int(i), int(j), int(q)]
+            * power[int(i), int(q)]
+        )
+    if _normalize_oracle_fusion_mode(fusion_mode) == "local_only":
+        return np.max(receiver_d, axis=0)
+    return np.sum(receiver_d, axis=0)
+
+
+def _select_pairs_local_only_milp(
+    coefficient: np.ndarray,
+    power: np.ndarray,
+    edges: Sequence[Tuple[int, int, int]],
+    *,
+    target_pair_limit: int,
+    reports_per_receiver: int,
+) -> Tuple[Tuple[int, int, int], ...]:
+    """Exact fixed-power pair update for receiver-local detection.
+
+    A local detector may accumulate several transmitter echoes at one receiver,
+    but it may not add evidence held by different receivers.  An optimum can
+    therefore nominate one receiver per target without loss: edges at every
+    other receiver can be removed while preserving the target maximum and
+    relaxing all capacity constraints.
+    """
+    q_count = coefficient.shape[2]
+    edge_count = len(edges)
+    if edge_count == 0:
+        return tuple()
+    owner_pairs = sorted({(int(j), int(q)) for _, j, q in edges})
+    owner_index = {
+        pair: edge_count + index for index, pair in enumerate(owner_pairs)
+    }
+    owner_count = len(owner_pairs)
+    min_index = edge_count + owner_count
+    variable_count = min_index + 1
+
+    edge_deflection = np.asarray([
+        coefficient[i, j, q] * power[i, q] for i, j, q in edges
+    ], dtype=np.float64)
+    scale = max(float(np.max(edge_deflection)), 1.0)
+    objective = np.zeros(variable_count, dtype=np.float64)
+    objective[:edge_count] = -1.0e-7 * edge_deflection / scale
+    objective[min_index] = -1.0
+
+    rows = []
+    upper = []
+    # With at most one owner, all selected target evidence is receiver-local.
+    for q in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_idx, edge in enumerate(edges):
+            if edge[2] == q:
+                row[edge_idx] = -edge_deflection[edge_idx]
+        row[min_index] = 1.0
+        rows.append(row)
+        upper.append(0.0)
+    for q in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_idx, edge in enumerate(edges):
+            if edge[2] == q:
+                row[edge_idx] = 1.0
+        rows.append(row)
+        upper.append(float(target_pair_limit))
+    for j in range(coefficient.shape[0]):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_idx, edge in enumerate(edges):
+            if edge[1] == j:
+                row[edge_idx] = 1.0
+        rows.append(row)
+        upper.append(float(reports_per_receiver))
+    # A selected edge activates its receiver as the target owner.
+    for edge_idx, (_, j, q) in enumerate(edges):
+        row = np.zeros(variable_count, dtype=np.float64)
+        row[edge_idx] = 1.0
+        row[owner_index[(int(j), int(q))]] = -1.0
+        rows.append(row)
+        upper.append(0.0)
+    # At most one receiver may contribute to each target's detector statistic.
+    for q in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for pair, index in owner_index.items():
+            if pair[1] == q:
+                row[index] = 1.0
+        rows.append(row)
+        upper.append(1.0)
+
+    result = milp(
+        objective,
+        integrality=np.concatenate([
+            np.ones(edge_count + owner_count, dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+        ]),
+        bounds=Bounds(
+            np.zeros(variable_count, dtype=np.float64),
+            np.concatenate([
+                np.ones(edge_count + owner_count, dtype=np.float64),
+                np.array([np.inf], dtype=np.float64),
+            ]),
+        ),
+        constraints=LinearConstraint(
+            np.stack(rows),
+            lb=np.full(len(rows), -np.inf),
+            ub=np.asarray(upper, dtype=np.float64),
+        ),
+        options={"time_limit": 5.0},
+    )
+    if not result.success or result.x is None:
+        return tuple()
+    return tuple(sorted(
+        edges[index] for index in range(edge_count)
+        if result.x[index] >= 0.5
+    ))
+
+
+def solve_maxmin_single_role_pairs(
+    entries: Iterable[DeflectionEntry],
+    *,
+    num_uavs: int,
+    num_targets: int,
+    target_pair_limit: int,
+    reports_per_receiver: int,
+    p_fa: float,
+    p_d_floor: float,
+    target_priority: np.ndarray | None = None,
+    fusion_mode: str = "central_oracle",
+) -> Tuple[Tuple[Tuple[int, int, int], ...], np.ndarray]:
+    """QoS-capped lexicographic max-min selection with one role per UAV.
+
+    Pure max-min is degenerate when a filtered graph leaves any target without
+    an edge: the strict minimum is identically zero. Capped per-target
+    auxiliaries preserve the primary minimum objective and then maximize how
+    many remaining targets approach the deployment floor.
+    """
+    valid = [
+        entry for entry in entries
+        if entry.i != entry.j and float(entry.d_eff) > 0.0
+    ]
+    k_count = int(num_uavs)
+    q_count = int(num_targets)
+    if not valid:
+        return tuple(), np.zeros(q_count, dtype=np.float64)
+    normalized_fusion = _normalize_oracle_fusion_mode(fusion_mode)
+    if normalized_fusion == "local_only":
+        # Entries already contain realized, power-weighted deflection.  Treat
+        # them as unit-power coefficients so the exact receiver-owner
+        # pair-only solver can optimize roles and edges without changing RF
+        # allocation.  Strict max-min is the correct monotone objective for
+        # worst P_D under a fixed P_FA.
+        coefficient = unit_deflection_tensor(
+            valid,
+            num_uavs=k_count,
+            num_targets=q_count,
+        )
+        fixed_unit_power = np.ones(
+            (k_count, q_count), dtype=np.float64)
+        solution = solve_pair_only_oracle(
+            coefficient,
+            fixed_unit_power,
+            P_FA=float(p_fa),
+            target_pair_limit=int(target_pair_limit),
+            reports_per_receiver=int(reports_per_receiver),
+            fusion_mode="local_only",
+        )
+        return solution.selected_set, solution.D_q.copy()
+
+    edge_count = len(valid)
+    # Binary edges, binary transmitter roles, capped target values, then min D.
+    capped_offset = edge_count + k_count
+    variable_count = edge_count + k_count + q_count + 1
+    min_index = variable_count - 1
+    objective = np.zeros(variable_count, dtype=np.float64)
+    deflection = np.asarray(
+        [float(entry.d_eff) for entry in valid], dtype=np.float64)
+    scale = max(float(np.max(deflection)), 1.0)
+    q_fa = float(Q_inverse(np.asarray(float(p_fa))))
+    q_pd = float(Q_inverse(np.asarray(float(p_d_floor))))
+    deflection_floor = max((q_fa - q_pd) ** 2, 1.0e-9)
+    priority = (
+        np.ones(q_count, dtype=np.float64)
+        if target_priority is None
+        else np.asarray(target_priority, dtype=np.float64).reshape(-1)
+    )
+    if priority.shape != (q_count,):
+        raise ValueError("target_priority must have shape (num_targets,)")
+    priority = np.maximum(priority, 1.0e-9)
+    priority = priority / float(np.sum(priority))
+    # Deterministic tertiary total-gain/index objective. Long-term target
+    # identity is handled by the deficit-weighted capped target variables.
+    for edge_index, entry in enumerate(valid):
+        objective[edge_index] = (
+            -0.002 / edge_count * deflection[edge_index] / scale
+            - 1.0e-6 * (edge_count - edge_index) / edge_count
+        )
+    objective[capped_offset:capped_offset + q_count] = (
+        -0.10 * priority / deflection_floor)
+    objective[min_index] = -1.0 / deflection_floor
+
+    rows = []
+    upper = []
+    # Capped target epigraph z_q <= D_q and strict y <= z_q.
+    for target in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_index, entry in enumerate(valid):
+            if int(entry.q) == target:
+                row[edge_index] = -float(entry.d_eff)
+        row[capped_offset + target] = 1.0
+        rows.append(row)
+        upper.append(0.0)
+        min_row = np.zeros(variable_count, dtype=np.float64)
+        min_row[min_index] = 1.0
+        min_row[capped_offset + target] = -1.0
+        rows.append(min_row)
+        upper.append(0.0)
+    # Per-target reporting cardinality.
+    for target in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_index, entry in enumerate(valid):
+            if int(entry.q) == target:
+                row[edge_index] = 1.0
+        rows.append(row)
+        upper.append(float(target_pair_limit))
+    # Per-receiver report capacity.
+    for receiver in range(k_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for edge_index, entry in enumerate(valid):
+            if int(entry.j) == receiver:
+                row[edge_index] = 1.0
+        rows.append(row)
+        upper.append(float(reports_per_receiver))
+    # x_ijq <= role_i and x_ijq <= 1-role_j.
+    for edge_index, entry in enumerate(valid):
+        tx_role_index = edge_count + int(entry.i)
+        rx_role_index = edge_count + int(entry.j)
+        tx_row = np.zeros(variable_count, dtype=np.float64)
+        tx_row[edge_index] = 1.0
+        tx_row[tx_role_index] = -1.0
+        rows.append(tx_row)
+        upper.append(0.0)
+        rx_row = np.zeros(variable_count, dtype=np.float64)
+        rx_row[edge_index] = 1.0
+        rx_row[rx_role_index] = 1.0
+        rows.append(rx_row)
+        upper.append(1.0)
+
+    result = milp(
+        objective,
+        integrality=np.concatenate([
+            np.ones(edge_count + k_count, dtype=np.int32),
+            np.zeros(q_count + 1, dtype=np.int32),
+        ]),
+        bounds=Bounds(
+            np.zeros(variable_count, dtype=np.float64),
+            np.concatenate([
+                np.ones(edge_count + k_count, dtype=np.float64),
+                np.full(q_count + 1, deflection_floor, dtype=np.float64),
+            ]),
+        ),
+        constraints=LinearConstraint(
+            np.stack(rows),
+            lb=np.full(len(rows), -np.inf),
+            ub=np.asarray(upper, dtype=np.float64),
+        ),
+        options={"time_limit": 5.0},
+    )
+    if not result.success or result.x is None:
+        return tuple(), np.zeros(q_count, dtype=np.float64)
+    selected = tuple(sorted(
+        (int(entry.i), int(entry.j), int(entry.q))
+        for edge_index, entry in enumerate(valid)
+        if result.x[edge_index] >= 0.5
+    ))
+    lookup = {
+        (int(entry.i), int(entry.j), int(entry.q)): float(entry.d_eff)
+        for entry in valid
+    }
+    D_q = np.zeros(q_count, dtype=np.float64)
+    for edge in selected:
+        D_q[edge[2]] += lookup[edge]
+    return selected, D_q
+
+
 def _optimize_power_lp(
     coefficient: np.ndarray,
     selected: Sequence[Tuple[int, int, int]],
@@ -236,6 +542,113 @@ def _optimize_power_lp(
     return power, D_q
 
 
+def _optimize_power_local_only_milp(
+    coefficient: np.ndarray,
+    selected: Sequence[Tuple[int, int, int]],
+    tx_indices: Sequence[int],
+    per_uav_sensing_budget_w: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Exact fixed-graph max-min power update for receiver-local detection."""
+    k_count, _, q_count = coefficient.shape
+    power_count = k_count * q_count
+    owner_pairs = sorted({(int(j), int(q)) for i, j, q in selected})
+    owners_by_target = {
+        q: [pair for pair in owner_pairs if pair[1] == q]
+        for q in range(q_count)
+    }
+    if any(not owners_by_target[q] for q in range(q_count)):
+        zeros = np.zeros((k_count, q_count), dtype=np.float64)
+        return zeros, np.zeros(q_count, dtype=np.float64)
+
+    owner_count = len(owner_pairs)
+    owner_offset = power_count
+    min_index = owner_offset + owner_count
+    variable_count = min_index + 1
+    owner_index = {
+        pair: owner_offset + index for index, pair in enumerate(owner_pairs)
+    }
+    selected_lookup = {
+        (int(i), int(j), int(q)) for i, j, q in selected
+    }
+    maximum_d = 0.0
+    for j, q in owner_pairs:
+        maximum_d = max(maximum_d, float(sum(
+            coefficient[i, j, q] * per_uav_sensing_budget_w[i]
+            for i in range(k_count)
+            if (i, j, q) in selected_lookup
+        )))
+    big_m = max(maximum_d, 1.0)
+
+    objective = np.zeros(variable_count, dtype=np.float64)
+    objective[min_index] = -1.0
+    rows = []
+    upper = []
+    for k in range(k_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        row[k * q_count:(k + 1) * q_count] = 1.0
+        rows.append(row)
+        upper.append(float(per_uav_sensing_budget_w[k]))
+    # If owner w_jq=1, impose y <= D_jq.  Otherwise big-M relaxes it.
+    for j, q in owner_pairs:
+        row = np.zeros(variable_count, dtype=np.float64)
+        for i in range(k_count):
+            if (i, j, q) in selected_lookup:
+                row[i * q_count + q] = -coefficient[i, j, q]
+        row[owner_index[(j, q)]] = big_m
+        row[min_index] = 1.0
+        rows.append(row)
+        upper.append(big_m)
+    for q in range(q_count):
+        row = np.zeros(variable_count, dtype=np.float64)
+        for pair in owners_by_target[q]:
+            row[owner_index[pair]] = 1.0
+        rows.append(row)
+        upper.append(1.0)
+        rows.append(-row)
+        upper.append(-1.0)
+
+    tx = set(int(i) for i in tx_indices)
+    power_upper = np.zeros(power_count, dtype=np.float64)
+    for k in range(k_count):
+        if k in tx:
+            power_upper[
+                k * q_count:(k + 1) * q_count
+            ] = float(per_uav_sensing_budget_w[k])
+    result = milp(
+        objective,
+        integrality=np.concatenate([
+            np.zeros(power_count, dtype=np.int32),
+            np.ones(owner_count, dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+        ]),
+        bounds=Bounds(
+            np.zeros(variable_count, dtype=np.float64),
+            np.concatenate([
+                power_upper,
+                np.ones(owner_count, dtype=np.float64),
+                np.array([big_m], dtype=np.float64),
+            ]),
+        ),
+        constraints=LinearConstraint(
+            np.stack(rows),
+            lb=np.full(len(rows), -np.inf),
+            ub=np.asarray(upper, dtype=np.float64),
+        ),
+        options={"time_limit": 5.0},
+    )
+    if not result.success or result.x is None:
+        zeros = np.zeros((k_count, q_count), dtype=np.float64)
+        return zeros, np.zeros(q_count, dtype=np.float64)
+    power = result.x[:power_count].reshape(k_count, q_count)
+    D_q = _selected_detection_deflection(
+        coefficient,
+        power,
+        selected,
+        fusion_mode="local_only",
+    )
+    return power, D_q
+
+
 def _initial_power_allocations(
     tx_indices: Sequence[int],
     budgets: np.ndarray,
@@ -271,6 +684,7 @@ def _solve_for_roles(
     random_starts: int,
     rng: np.random.Generator,
     mode: str,
+    fusion_mode: str,
 ) -> OracleSolution:
     k_count, _, q_count = coefficient.shape
     edges = _candidate_edges(coefficient, tx_indices, rx_indices)
@@ -281,13 +695,22 @@ def _solve_for_roles(
         power = initial_power
         previous = None
         for _ in range(max(int(alternating_iterations), 1)):
-            selected = _select_pairs_milp(
-                coefficient, power, edges,
-                target_pair_limit=target_pair_limit,
-                reports_per_receiver=reports_per_receiver)
-            power, D_q = _optimize_power_lp(
-                coefficient, selected, tx_indices,
-                per_uav_sensing_budget_w)
+            if fusion_mode == "local_only":
+                selected = _select_pairs_local_only_milp(
+                    coefficient, power, edges,
+                    target_pair_limit=target_pair_limit,
+                    reports_per_receiver=reports_per_receiver)
+                power, D_q = _optimize_power_local_only_milp(
+                    coefficient, selected, tx_indices,
+                    per_uav_sensing_budget_w)
+            else:
+                selected = _select_pairs_milp(
+                    coefficient, power, edges,
+                    target_pair_limit=target_pair_limit,
+                    reports_per_receiver=reports_per_receiver)
+                power, D_q = _optimize_power_lp(
+                    coefficient, selected, tx_indices,
+                    per_uav_sensing_budget_w)
             if selected == previous:
                 break
             previous = selected
@@ -332,6 +755,7 @@ def solve_joint_pair_power_oracle(
     alternating_iterations: int = 6,
     random_starts: int = 2,
     seed: int = 0,
+    fusion_mode: str = "central_oracle",
 ) -> OracleSolution:
     """Solve the best role partition, reporting graph, and sensing split.
 
@@ -348,6 +772,7 @@ def solve_joint_pair_power_oracle(
         raise ValueError('communication reserve must be below total power')
     budgets = np.full(k_count, sensing_budget, dtype=np.float64)
     rng = np.random.default_rng(int(seed))
+    normalized_fusion = _normalize_oracle_fusion_mode(fusion_mode)
 
     partitions: List[Tuple[Tuple[int, ...], Tuple[int, ...], str]] = []
     if full_duplex:
@@ -371,6 +796,7 @@ def solve_joint_pair_power_oracle(
             random_starts=int(random_starts),
             rng=rng,
             mode=mode,
+            fusion_mode=normalized_fusion,
         )
         key = (solution.worst, solution.weak3, solution.steady)
         best_key = ((best.worst, best.weak3, best.steady)
@@ -379,3 +805,112 @@ def solve_joint_pair_power_oracle(
             best = solution
     assert best is not None
     return best
+
+
+def solve_pair_only_oracle(
+    coefficient: np.ndarray,
+    current_power_w: np.ndarray,
+    *,
+    P_FA: float,
+    target_pair_limit: int = 3,
+    reports_per_receiver: int = 4,
+    fusion_mode: str = "central_oracle",
+) -> OracleSolution:
+    """Optimize single-role reporting pairs while holding target power fixed."""
+    coefficient = np.asarray(coefficient, dtype=np.float64)
+    power = np.asarray(current_power_w, dtype=np.float64)
+    if coefficient.ndim != 3 or coefficient.shape[0] != coefficient.shape[1]:
+        raise ValueError("coefficient must have shape (K, K, Q)")
+    k_count, _, q_count = coefficient.shape
+    if power.shape != (k_count, q_count):
+        raise ValueError("current power must have shape (K, Q)")
+    normalized_fusion = _normalize_oracle_fusion_mode(fusion_mode)
+    best: OracleSolution | None = None
+    for mask in range(1, (1 << k_count) - 1):
+        tx = tuple(k for k in range(k_count) if mask & (1 << k))
+        rx = tuple(k for k in range(k_count) if not mask & (1 << k))
+        edges = _candidate_edges(coefficient, tx, rx)
+        selector = (
+            _select_pairs_local_only_milp
+            if normalized_fusion == "local_only"
+            else _select_pairs_milp
+        )
+        selected = selector(
+            coefficient,
+            power,
+            edges,
+            target_pair_limit=int(target_pair_limit),
+            reports_per_receiver=int(reports_per_receiver),
+        )
+        D_q = _selected_detection_deflection(
+            coefficient,
+            power,
+            selected,
+            fusion_mode=normalized_fusion,
+        )
+        solution = OracleSolution(
+            mode="pair_only",
+            tx_indices=tx,
+            rx_indices=rx,
+            selected_set=tuple(selected),
+            sensing_power_w=power.copy(),
+            D_q=D_q,
+            P_D_q=compute_PD(D_q, P_FA),
+        )
+        key = (solution.worst, solution.weak3, solution.steady)
+        best_key = (
+            (best.worst, best.weak3, best.steady)
+            if best is not None else (-np.inf, -np.inf, -np.inf)
+        )
+        if key > best_key:
+            best = solution
+    assert best is not None
+    return best
+
+
+def solve_power_only_oracle(
+    coefficient: np.ndarray,
+    selected_set: Sequence[Tuple[int, int, int]],
+    *,
+    P_FA: float,
+    total_power_w: float = 1.0,
+    communication_reserve_w: float = 0.0,
+    fusion_mode: str = "central_oracle",
+) -> OracleSolution:
+    """Optimize max-min target power while holding reporting pairs fixed."""
+    coefficient = np.asarray(coefficient, dtype=np.float64)
+    if coefficient.ndim != 3 or coefficient.shape[0] != coefficient.shape[1]:
+        raise ValueError("coefficient must have shape (K, K, Q)")
+    k_count, _, q_count = coefficient.shape
+    sensing_budget = float(total_power_w) - float(communication_reserve_w)
+    if sensing_budget <= 0.0:
+        raise ValueError("communication reserve must be below total power")
+    selected = tuple(
+        (int(i), int(j), int(q)) for i, j, q in selected_set)
+    tx_indices = tuple(sorted({i for i, _, _ in selected}))
+    rx_indices = tuple(sorted({j for _, j, _ in selected}))
+    budgets = np.full(k_count, sensing_budget, dtype=np.float64)
+    normalized_fusion = _normalize_oracle_fusion_mode(fusion_mode)
+    if normalized_fusion == "local_only":
+        power, D_q = _optimize_power_local_only_milp(
+            coefficient,
+            selected,
+            tx_indices,
+            budgets,
+        )
+    else:
+        power, D_q = _optimize_power_lp(
+            coefficient,
+            selected,
+            tx_indices,
+            budgets,
+        )
+    return OracleSolution(
+        mode="power_only",
+        tx_indices=tx_indices,
+        rx_indices=rx_indices,
+        selected_set=selected,
+        sensing_power_w=power,
+        D_q=D_q,
+        P_D_q=compute_PD(D_q, P_FA),
+    )

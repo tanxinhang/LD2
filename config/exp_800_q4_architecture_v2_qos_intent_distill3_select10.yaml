@@ -1,0 +1,6 @@
+# Same three direct-bid distillation updates, but checkpoint selection uses a
+# ten-seed stratified bank instead of the two-seed admission screen.
+extends: exp_800_q4_architecture_v2_qos_intent_distill3.yaml
+
+marl:
+  eval_episodes: 10
