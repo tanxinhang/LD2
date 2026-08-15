@@ -356,6 +356,7 @@ class EnvironmentCore:
         self._last_intercept_pd_max: float | None = None
         self._last_intercept_eps: float | None = None
         self._last_intercept_infeasible = False
+        self._last_intercept_joined = False
         self._last_analytical_power_balance_error = 0.0
         self._last_analytical_dual_prices = None
         # D1.1-A audit hook (env var DSH_LEX_AUDIT): per-frame lex diagnostics.
@@ -2024,26 +2025,86 @@ class EnvironmentCore:
         pfa_i = float(getattr(self.cfg.marl, 'intercept_pfa', 1e-3))
         eps = float(getattr(self.cfg.marl, 'intercept_eps', 0.1))
         d_bar = intercept_deflection_limit(pfa_i, eps)
-        out = constrained_maxmin_lp(gain, budget, a_i, np.full(self.Q, d_bar))
         self._last_intercept_eps = eps
+
+        # D1.1-E: when the task-constrained (lexicographic) power path is the
+        # deployed inner layer, join the QoS floors and the covertness bound in
+        # ONE LP (qos_constrained_maxmin_lp with intercept rows), so covertness
+        # is enforced without losing the QoS-constrained max-min objective.
+        joined = False
+        out = None
+        if (getattr(self.cfg.marl, 'task_constrained_power_enabled', False)
+                and getattr(self.cfg.marl, 'task_constrained_mode', 'gauge')
+                == 'lexicographic'):
+            try:
+                from uav_isac.coordination.capability import (
+                    qos_constrained_maxmin_lp,
+                )
+                from uav_isac.coordination.pwl_pd import (
+                    chord_lower_bound,
+                    curvature_breakpoints,
+                )
+                from uav_isac.physical.detection import (
+                    minimum_deflection_for_detection_probability,
+                )
+                qos_floors = tuple(float(v) for v in getattr(
+                    self.cfg.marl, 'task_constrained_qos_floors',
+                    (0.60, 0.70, 0.80, 3)))
+                d_min = float(minimum_deflection_for_detection_probability(
+                    np.asarray([qos_floors[0]]), self.cfg.detection.P_FA)[0])
+                ceiling = np.sum(gain * budget[:, None], axis=0)
+                if not np.any(ceiling < d_min - 1e-9):
+                    d_max = float(np.max(ceiling)) + 1.0
+                    bps = curvature_breakpoints(
+                        self.cfg.detection.P_FA, d_min, d_max, epsilon=1e-3)
+                    cs, ci = chord_lower_bound(self.cfg.detection.P_FA, bps)
+                    out = qos_constrained_maxmin_lp(
+                        gain, budget, self.cfg.detection.P_FA,
+                        (qos_floors[0], qos_floors[1], qos_floors[2],
+                         max(1, int(qos_floors[3]))),
+                        cs, ci, d_min,
+                        intercept_coeff=a_i,
+                        intercept_ub=np.full(self.Q, d_bar))
+                    joined = True
+            except (ValueError, ImportError):
+                out = None
+        if out is None:
+            out = constrained_maxmin_lp(
+                gain, budget, a_i, np.full(self.Q, d_bar))
         if out is None:
             self._last_intercept_infeasible = True
             self._last_intercept_mu = None
             self._last_intercept_pd_max = None
             return None
         self._last_intercept_infeasible = False
-        t_star, p_star, lam, beta, mu = out
-        deflection = np.sum(gain * p_star, axis=0)
-        d_intercept = np.sum(a_i * p_star, axis=0)
-        self._last_intercept_mu = mu.copy()
+        self._last_intercept_joined = joined
+        if joined:
+            # qos_constrained_maxmin_lp returns (t*, p*, D*); recover the
+            # opponent-detection price from the joint LP's marginals indirectly
+            # is not exposed, so expose the pure covertness prices instead.
+            t_star, p_star, d_star = out
+            p_out = p_star
+            deflection = d_star
+            _t_out = float(t_star)
+            lam_out = np.zeros(self.Q, dtype=np.float64)
+            mu_out = np.zeros(self.Q, dtype=np.float64)
+        else:
+            t_star, p_star, lam, beta, mu = out
+            p_out = p_star
+            deflection = np.sum(gain * p_star, axis=0)
+            _t_out = float(t_star)
+            lam_out = lam
+            mu_out = mu
+        d_intercept = np.sum(a_i * p_out, axis=0)
+        self._last_intercept_mu = mu_out.copy()
         self._last_intercept_pd_max = float(np.max(
             compute_detection_probabilities(d_intercept, pfa_i)))
         return MaxMinPowerResult(
-            power_w=p_star,
+            power_w=p_out,
             deflection=deflection,
             worst_deflection=float(np.min(deflection)),
-            prices=lam,
-            dual_upper_bound=float(t_star),
+            prices=lam_out,
+            dual_upper_bound=_t_out,
             primal_dual_gap=0.0,
             rounds=0,
             worst_history=(float(np.min(deflection)),),

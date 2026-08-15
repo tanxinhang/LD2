@@ -110,3 +110,71 @@ def test_intercept_reduces_qos_only_when_bound_binds():
     assert np.mean(worst_on) <= np.mean(worst_off) + 1e-6
     env_on.close()
     env_off.close()
+
+
+def test_joint_lex_intercept_keeps_qos_floors_and_covertness():
+    """D1.1-E: with the lexicographic task-constrained path enabled, the
+    intercept constraint joins the SAME LP, so both the QoS floors and
+    P_D^I <= eps are hard constraints in one convex LP."""
+    from uav_isac.coordination.capability import qos_constrained_maxmin_lp
+    from uav_isac.coordination.intercept_power import (
+        INTERCEPT_CAPABILITIES,
+        intercept_coefficients,
+        intercept_deflection_limit,
+    )
+    from uav_isac.coordination.pwl_pd import (
+        chord_lower_bound,
+        curvature_breakpoints,
+    )
+    from uav_isac.physical.detection import (
+        compute_detection_probabilities,
+        minimum_deflection_for_detection_probability,
+    )
+    cfg = load_config('config/exp_800_q4_u2u_joint_isac.yaml')
+    p_fa = cfg.detection.P_FA
+
+    rng = np.random.default_rng(20260822)
+    # Near-field geometry so the QoS floors are feasible under a weak opponent.
+    uav = np.array([[40.0, 40.0], [60.0, 50.0], [45.0, 70.0], [80.0, 35.0]])
+    tgt = np.array([[100.0, 100.0], [90.0, 120.0], [110.0, 85.0],
+                    [95.0, 140.0]])
+    K, Q = 4, 4
+    gain = np.abs(rng.normal(size=(K, Q))) * 20.0 + 20.0  # high ceiling
+    budget = np.full(K, 0.8)
+
+    a_i = intercept_coefficients(
+        uav, tgt, fc=float(cfg.otfs.fc), g_tx_dBi=float(cfg.otfs.g_tx_dBi),
+        height=float(cfg.scenario.height), kt=float(cfg.channel.kT),
+        theta=INTERCEPT_CAPABILITIES["weak"])
+    eps = 0.1
+    d_bar = intercept_deflection_limit(1e-3, eps)
+
+    qos_floors = (0.60, 0.70, 0.80, 3)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([qos_floors[0]]), p_fa)[0])
+    ceiling = np.sum(gain * budget[:, None], axis=0)
+    assert np.all(ceiling >= d_min - 1e-9)  # QoS floors feasible
+    d_max = float(np.max(ceiling)) + 1.0
+    bps = curvature_breakpoints(p_fa, d_min, d_max, epsilon=1e-3)
+    cs, ci = chord_lower_bound(p_fa, bps)
+
+    # Joint LP: QoS floors AND covertness in one solve.
+    st = qos_constrained_maxmin_lp(
+        gain, budget, p_fa, qos_floors, cs, ci, d_min,
+        intercept_coeff=a_i, intercept_ub=np.full(Q, d_bar))
+    assert st is not None
+    _t, p, d = st
+    # Covertness hard constraint.
+    d_intercept = np.sum(a_i * p, axis=0)
+    pd_intercept = compute_detection_probabilities(d_intercept, 1e-3)
+    assert float(np.max(pd_intercept)) <= eps + 1e-6
+    # QoS floor (worst deflection >= d_min => worst P_D >= 0.60).
+    assert float(np.min(d)) >= d_min - 1e-6
+    # 1 W budget.
+    assert np.all(np.sum(p, axis=1) <= budget + 1e-9)
+
+    # Unconstrained lex (no covertness) can only be no worse on QoS.
+    st2 = qos_constrained_maxmin_lp(
+        gain, budget, p_fa, qos_floors, cs, ci, d_min)
+    assert st2 is not None
+    assert st2[0] >= st[0] - 1e-6

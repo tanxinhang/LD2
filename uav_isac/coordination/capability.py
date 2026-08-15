@@ -301,6 +301,8 @@ def qos_constrained_maxmin_lp(
     slopes: np.ndarray,
     intercepts: np.ndarray,
     d_min: float,
+    intercept_coeff: np.ndarray | None = None,
+    intercept_ub: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray] | None:
     """Stage B of lexicographic QoS-constrained max-min (advice 010).
 
@@ -316,10 +318,15 @@ def qos_constrained_maxmin_lp(
               z_q >= tau - y_q, z_q >= 0        (bottom-k linearisation)
               k*tau - sum_q z_q >= k * weak3_floor
               sum_q p_iq <= b_i, p >= 0
+              [intercept: sum_i aI[i,q] p_iq <= bar D^I_q]   (optional D1.1-E)
 
-    The capability gauge's own allocation is a feasible point of this LP, so
-    the lexicographic optimum is no worse than the gauge on BOTH the floors and
-    the max-min worst.  Returns ``(t*, p*, D*)`` or ``None`` when infeasible.
+    The optional ``intercept_coeff`` (a^I, (K,Q)) and ``intercept_ub`` (bar
+    D^I, (Q,)) add the counter-detection hard constraint P_{D,w}^I <= eps to
+    the SAME LP, so covertness and QoS floors are jointly enforced (one
+    convex LP, one dual).  The capability gauge's own allocation is a feasible
+    point of this LP, so the lexicographic optimum is no worse than the gauge
+    on BOTH the floors and the max-min worst.  Returns ``(t*, p*, D*)`` or
+    ``None`` when infeasible.
     """
     from scipy.optimize import linprog
 
@@ -327,6 +334,13 @@ def qos_constrained_maxmin_lp(
     gain = np.asarray(gain, dtype=np.float64)
     budget = np.asarray(budget, dtype=np.float64).reshape(-1)
     K, Q = gain.shape
+    if intercept_coeff is not None:
+        intercept_coeff = np.asarray(intercept_coeff, dtype=np.float64)
+        intercept_ub = np.asarray(
+            intercept_ub, dtype=np.float64).reshape(-1)
+        if intercept_coeff.shape != (K, Q) or intercept_ub.size != Q:
+            raise ValueError(
+                "intercept_coeff must be (K,Q) and intercept_ub length Q")
     n_p = K * Q
     o_D = n_p
     o_y = o_D + Q
@@ -388,6 +402,14 @@ def qos_constrained_maxmin_lp(
         row[i * Q:(i + 1) * Q] = 1.0
         rows.append(row)
         upper.append(float(budget[i]))
+    if intercept_coeff is not None:  # covertness: sum_i aI[i,q] p_iq <= dbar_q
+        for q in range(Q):
+            row = np.zeros(n_vars)
+            gq = max(float(intercept_ub[q]), 1e-300)
+            for i in range(K):
+                row[i * Q + q] = float(intercept_coeff[i, q]) / gq
+            rows.append(row)
+            upper.append(1.0)
 
     res = linprog(
         c,
@@ -448,6 +470,14 @@ def qos_constrained_maxmin_lp(
         row[i * Q:(i + 1) * Q] = 1.0
         rows2.append(row)
         upper2.append(float(budget[i]))
+    if intercept_coeff is not None:  # covertness must hold at the optimum too
+        for q in range(Q):
+            row = np.zeros(n_vars)
+            gq = max(float(intercept_ub[q]), 1e-300)
+            for i in range(K):
+                row[i * Q + q] = float(intercept_coeff[i, q]) / gq
+            rows2.append(row)
+            upper2.append(1.0)
 
     res2 = linprog(
         c2,
