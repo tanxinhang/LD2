@@ -1,4 +1,4 @@
-"""Deterministic fixed-repetition envelope for bounded U2U erasures.
+﻿"""Deterministic fixed-repetition envelope for bounded U2U erasures.
 
 Every logical protocol packet is transmitted a fixed ``R`` times.  Hence the
 receiver obtains at least one copy whenever at most ``R-1`` copies of each
@@ -9,6 +9,16 @@ The controller may execute parallel compute/transport branches.  Repetition
 therefore multiplies only the communication latency in each branch, not the
 local computation.  Both parallel branches still consume RF bits and energy.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Bounded digest rendezvous for set-valued structure consensus.
+﻿"""Bounded digest rendezvous for set-valued structure consensus.
 
 The digest is only a screening key.  It never authorizes a transition: the
 winning owner sends the bounded atomic proposal descriptor and the coordinator
@@ -6,6 +6,16 @@ must reconstruct and compare the full ``(selected, role, owner)`` state before
 the certificate can be feasible.  Thus a hash collision causes rejection,
 not an unsafe commit.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 

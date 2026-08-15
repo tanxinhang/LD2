@@ -1,4 +1,4 @@
-"""Certified finite-horizon slow-geometry repair for static-target UAV ISAC.
+﻿"""Certified finite-horizon slow-geometry repair for static-target UAV ISAC.
 
 The inverse-range radar law supplies an analytic proposal gradient.  The
 gradient never certifies execution: every finite trust-region candidate is
@@ -7,6 +7,16 @@ the frozen causal coefficient envelope, exact kinematics,
 DD support, flight energy, boundary and pairwise-separation constraints, and
 an explicit six-stage transport/commit certificate.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Causal coefficient envelopes for the certified hierarchical controller.
+﻿"""Causal coefficient envelopes for the certified hierarchical controller.
 
 Only lagged, actually excited sensing edges may refresh the target invariant.
 The invariant is directionally quantized and physically transported before a
@@ -6,6 +6,16 @@ one-step inverse-range/OTFS-DD envelope is constructed.  A frozen episode-level
 split-conformal log margin covers the remaining simultaneous model residual.
 Future coefficients never enter ranking, routing, or commit decisions.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Finite-round learning-free coordination on sparse directed hyperedges.
+﻿"""Finite-round learning-free coordination on sparse directed hyperedges.
 
 The protocol is an unfolded deterministic auction.  Candidate publication is
 external and must already respect the physical Token inbox.  Every update can
@@ -6,6 +6,16 @@ be implemented by receiver-local bid aggregation, target-owner max consensus,
 and node-local role-price updates; the array implementation is only a compact
 simulator of those messages and never calls the centralized MILP.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 

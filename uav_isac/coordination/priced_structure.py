@@ -1,4 +1,4 @@
-"""Price-mediated structure repair: owner + TX reassignment for the L2 layer.
+﻿"""Price-mediated structure repair: owner + TX reassignment for the L2 layer.
 
 Theory (D0.95): the joint structure--geometry problem
 
@@ -38,6 +38,16 @@ keeps the distributed information boundary: each UAV locally computes its own
 marginal  sum_q pi_q a_kjq  and proposes an owner/TX role, so the reporting
 graph and the motion plan are coordinated by the same broadcast price.
 """
+
+# ----------------------------------------------------------------------
+# AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)
+#
+# This module is consumed only by tools/ audit scripts and tests. It is
+# NOT part of the deployment execution path (env_core / trainer) and its
+# results must not be described as deployed behaviour. It exists to keep
+# a specific research question reproducible; see
+# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# ----------------------------------------------------------------------
 
 from __future__ import annotations
 
