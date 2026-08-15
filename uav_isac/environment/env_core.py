@@ -1849,6 +1849,20 @@ class EnvironmentCore:
         the minimum power to meet the SNR/deadline criterion for EVERY receiver
         is max_j (Gamma_req * N0 * B_eff / g_ij).  Transport semantics are
         unchanged; only the link margin is reclaimed into the sensing budget.
+
+        D1.1-C (2026-08-16): the per-sender bandwidth B_i is no longer the
+        equal split B/n_active but the optimal allocation of the convex problem
+            min sum_i f_i(B_i)   s.t.  sum_i B_i = B,  B_i >= 0,
+            f_i(B) = N0 * B * max(gamma_th, 2^(r_i/B) - 1) / g_i,
+        with r_i = payload_i / t_win and g_i = worst-receiver path gain of
+        sender i.  f_i is convex in B (the Shannon power is convex-decreasing
+        in bandwidth and max preserves convexity), so the KKT condition
+        f_i'(B_i) = -lambda with sum_i B_i = B is necessary and sufficient;
+        the outer bisection on lambda and the inner per-sender bisection on
+        B_i solve it exactly.  Every sender still meets its SNR threshold and
+        rate demand (P_i = f_i(B_i) with B_i > 0), so the allocation is
+        feasible under the same orthogonal-communication semantics and the
+        total power is strictly no larger than under the equal split.
         """
         comm = self._inter_uav_comm
         K = self.K
@@ -1871,24 +1885,92 @@ class EnvironmentCore:
                     active[k] = True
                     payload[k] = float(bits + structure_bits)
         n_active = max(1, int(np.sum(active)))
-        b_eff = comm.bandwidth_hz / n_active
+        b_total = comm.bandwidth_hz
         gamma_th = float(10.0 ** (comm.snr_threshold_db / 10.0))
-        n0_b = comm.kT * b_eff * comm.noise_figure_linear
         t_win = max(comm.deadline_s - comm.processing_delay_s, 1e-12)
+
+        # Per-sender rate demand and worst-receiver path gain (g_i = min_j g_ij).
+        rates = np.zeros(K, dtype=np.float64)
+        gains = np.zeros(K, dtype=np.float64)
         for i in range(K):
             if not active[i] or payload[i] <= 0.0:
                 continue
-            r_req = payload[i] / t_win
-            gamma_rate = float(2.0 ** (r_req / b_eff) - 1.0)
-            gamma_req = max(gamma_th, gamma_rate)
+            rates[i] = payload[i] / t_win
+            g_min = np.inf
             for j in range(K):
                 if j == i:
                     continue
                 d = max(float(np.linalg.norm(
                     uav_positions[i] - uav_positions[j])), 1.0)
                 path_gain = (comm.wavelength / (4.0 * np.pi * d)) ** 2
-                g = comm.antenna_gain_linear * path_gain
-                result[i] = max(result[i], gamma_req * n0_b / max(g, 1e-30))
+                g_min = min(g_min, comm.antenna_gain_linear * path_gain)
+            gains[i] = max(g_min, 1e-30)
+
+        if not bool(getattr(self.cfg.marl,
+                            'analytical_comm_optimal_bw', True)):
+            # D0.93 L0 equal split (legacy path, kept for A/B comparison).
+            b_eff = b_total / n_active
+            n0_b = comm.kT * b_eff * comm.noise_figure_linear
+            for i in range(K):
+                if not active[i] or payload[i] <= 0.0:
+                    continue
+                r_req = rates[i]
+                gamma_rate = float(2.0 ** (r_req / b_eff) - 1.0)
+                gamma_req = max(gamma_th, gamma_rate)
+                result[i] = gamma_req * n0_b / gains[i]
+            return result
+
+        # D1.1-C optimal bandwidth allocation via KKT bisection.
+        n0 = comm.kT * comm.noise_figure_linear
+        active_idx = [i for i in range(K) if active[i] and payload[i] > 0.0]
+        if not active_idx:
+            return result
+        m = len(active_idx)
+        r_arr = rates[active_idx]
+        g_arr = gains[active_idx]
+
+        # Marginal f_i'(B) of f_i(B) = n0*B*max(gamma_th, 2^(r/B)-1)/g_i.
+        # The rate term's derivative is 2^(r/B)*(1 - r*ln2/B) - 1; the SNR
+        # term is linear with constant marginal gamma_th.  max preserves
+        # convexity and the marginal is monotone increasing in B, so the KKT
+        # bisection below is exact.
+        def marginal(i: int, b: float) -> float:
+            b = max(b, 1e-12)
+            x = float(2.0 ** min(r_arr[i] / b, 60.0))
+            rate_marg = x * (1.0 - r_arr[i] * np.log(2.0) / b) - 1.0
+            snr_marg = gamma_th
+            return n0 / g_arr[i] * max(rate_marg, snr_marg)
+
+        def b_of_lambda(lam: float) -> np.ndarray:
+            out = np.zeros(m, dtype=np.float64)
+            for i in range(m):
+                lo, hi = 1e-9, b_total
+                for _ in range(60):
+                    mid = 0.5 * (lo + hi)
+                    if marginal(i, mid) > -lam:
+                        hi = mid
+                    else:
+                        lo = mid
+                out[i] = 0.5 * (lo + hi)
+            return out
+
+        lam_lo, lam_hi = 1e-12, 1e6
+        for _ in range(60):
+            mid = 0.5 * (lam_lo + lam_hi)
+            if float(np.sum(b_of_lambda(mid))) > b_total:
+                lam_lo = mid
+            else:
+                lam_hi = mid
+        lam = 0.5 * (lam_lo + lam_hi)
+        b_alloc = b_of_lambda(lam)
+        s = float(np.sum(b_alloc))
+        if s > 0.0 and abs(s - b_total) > 1e-6 * b_total:
+            b_alloc = b_alloc * b_total / s  # exact-sum fallback
+        for idx, i in enumerate(active_idx):
+            b_i = max(float(b_alloc[idx]), 1e-12)
+            gamma_rate = float(2.0 ** min(r_arr[idx] / b_i, 60.0) - 1.0)
+            gamma_req = max(gamma_th, gamma_rate)
+            result[i] = gamma_req * n0 * b_i / g_arr[idx]
         return result
 
     def _process_learned_communications(

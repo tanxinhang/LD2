@@ -172,6 +172,22 @@ class MARLParams:
     # evaluated.  Transport semantics (active set, token bits, receiver set,
     # deadline) are unchanged.
     analytical_comm_power_enabled: bool = False
+    # D1.1-C (2026-08-16): optimal orthogonal-bandwidth allocation for the L0
+    # minimum comm power.  The original L0 splits the U2U bandwidth equally
+    # among active senders (b_eff = B/n_active).  When a sender's rate demand
+    # r_i = payload_i/(deadline - processing) approaches its share of the
+    # bandwidth, the Shannon power N0*B_i*(2^(r_i/B_i)-1)/g_i explodes, so the
+    # equal split over-charges high-load senders and wastes the 1 W budget
+    # (numerically: up to ~90% of P_comm^min in the capacity-limited regime,
+    # 99.8% under a heavy single sender).  The optimal allocation solves
+    #     min sum_i N0*B_i*max(gamma_th, 2^(r_i/B_i)-1)/g_i   s.t. sum B_i = B
+    # which is convex in B_i; the KKT condition f_i'(B_i) = -lambda is solved
+    # by bisection on lambda (outer) and per sender (inner).  The result is a
+    # feasible orthogonal allocation with the SAME SNR/deadline semantics
+    # (each sender still meets its worst-receiver SNR and rate), so the
+    # reclaimed sensing budget b_i = 1 - P_comm^min is never smaller than
+    # under the equal split -- a strict no-waste improvement.  Default on.
+    analytical_comm_optimal_bw: bool = True
     # D0.93-A1: task-constrained power allocation.  When enabled (requires
     # analytical_sensing_power_enabled), the inner solver solves the capability
     # gauge (min gamma s.t. worst+bottom-k+steady floors, budget <= gamma*b) via
