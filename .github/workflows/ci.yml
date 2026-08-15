@@ -1,0 +1,32 @@
+name: CI
+
+# Audit remediation 2026-08-16: the project previously had no CI.  This
+# workflow runs the full pytest suite on Linux (the reference Windows env is
+# affected by a known MKL numpy.linalg.eigvalsh native abort when belief and
+# non-belief suites share one process -- docs/KNOWN_ISSUES.md; Linux runners
+# are not affected).  results/ is git-ignored, so the formal-gate assertion
+# (tools/assert_formal_gates.py) is intentionally NOT run here: it needs the
+# experiment tree present.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
