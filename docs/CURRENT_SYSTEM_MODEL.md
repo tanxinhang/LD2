@@ -1,11 +1,14 @@
 # 当前系统模型（Architecture V2 + 认证化分布式控制）
 
-> 文档日期：2026-08-15（已对照 `uav_isac/`、`config/`、`tools/` 逐项校验）。
+> 文档日期：2026-08-16（审计修正：§10 补 QoS 浮点口径与 lex L1/D1.0-A 新结果、
+> §11 补工程治理状态、§12 新增可复现性治理；已对照 `uav_isac/`、`config/`、
+> `tools/` 逐项校验）。
 > 本文是**当前部署架构**的数学模型与代码映射总纲，覆盖 Architecture V2 与
 > D0.x 认证化控制主线的完整系统模型。基础环境与历史 P0 数学模型见
 > [`SYSTEM_MODEL.md`](SYSTEM_MODEL.md)；正式结果与版本判定以
 > [`CURRENT_SYSTEM_STATUS.md`](CURRENT_SYSTEM_STATUS.md) 为准；演进与失败实验见
-> [`ARCHITECTURE_V2_RESULTS.md`](ARCHITECTURE_V2_RESULTS.md)。若历史章节与本文
+> [`ARCHITECTURE_V2_RESULTS.md`](ARCHITECTURE_V2_RESULTS.md)；性能缺口与路线见
+> [`SYSTEM_OVERVIEW_AND_ROADMAP.md`](SYSTEM_OVERVIEW_AND_ROADMAP.md)。若历史章节与本文
 > 冲突，以本文为准。
 
 ---
@@ -478,7 +481,20 @@ r_team = Σ_q λ_q · U_κ(D_q) − λ_report·bits − 通信成本 − 约束�
 | 4/4 冻结部署版 | 100 | 0.739 | 0.72 | 正式版本 |
 | 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.7303 | 严格 no-harm 证书成立 |
 | 8/8 原子控制 D0.86 | 20 | 0.4372 | 0.50 | 严格 no-harm 证书成立 |
-| **8/8 解析栈 L0+L1+L3（D0.95）** | 20 | **0.662** | **0.65** | worst/weak3/steady 三地板达标 |
+| **8/8 解析栈 L0+L1+L3（D0.95）** | 20 | **0.662** | **1.0\*** | worst/weak3/steady 三地板达标 |
+| 8/8 lexicographic L1 oracle（D1.1-A） | 20 | **0.844** | **1.0**（LCB 0.881） | oracle 级（教师几何起点） |
+
+`*` D0.95 端到端严格比较（tol=0）报 QoS 0.65（13/20），其中 7 个 seed 的 worst
+恰好钉在 0.60 地板（`0.60 − 1.11e-16`，浮点伪影，非真实性能差距）；按
+`marl.qos_eval_tol=1e-6` 口径为 **QoS 1.0（20/20，Wilson LCB 0.839）**。口径修正
+见 [`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2。
+
+> **6/6 决策数据污染提示**：`CURRENT_SYSTEM_STATUS.md` §4.1 中 6/6 三行（原跨尺度
+> Student 0.543 / 基数残差 0.645 / 集中式参考 0.635）来自 `980_k6q6` test split
+> 前 10 个种子，**含全部 5 个被隔离种子**（795/747/105/860/2）；该数据不可作为
+> 正式证据，bank 回填前不得引用（见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。本表
+> 6/6 原子控制 D0.85（20 seed）为另一机制（严格 no-harm 证书），种子状态待回填
+> 后复核。
 
 **8/8 解析栈端到端**（`analytical_*_enabled`，D0.87–D0.95，20 seed）：
 
@@ -486,11 +502,29 @@ r_team = Σ_q λ_q · U_κ(D_q) − λ_report·bits − 通信成本 − 约束�
 |---|---:|---:|---:|---:|
 | C0 deployed | 0.355 | 0.508 | 0.773 | 0.40 |
 | L0+L1（task-constrained） | 0.609 | — | 0.736 | 0.50 |
-| **L0+L1+L3 几何** | **0.662** | **0.724** | **0.808** | **0.65** |
+| **L0+L1+L3 几何** | **0.662** | **0.724** | **0.808** | **1.0**（tol=1e-6；严格比较 0.65 为浮点伪影） |
 
 L3 几何把 steady 从 0.736 拉到 0.808（0/20 seed 低于 0.80），三地板首次端到端全达标；
 剩余 7/20 seed 早期帧 worst<0.60 是滚动时域收敛瞬态。详见
 [`D095_JOINT_L2_L3_ALTERNATING.md`](D095_JOINT_L2_L3_ALTERNATING.md)。
+
+**8/8 可达性上界**（D1.0-A horizon joint / D1.1-A lex L1，`tools/audit_horizon_joint_oracle.py`，
+从教师最终几何起点，**oracle 诊断**而非部署执行）：
+
+| oracle | worst | weak3 | steady | QoS 可行率 |
+|---|---:|---:|---:|---:|
+| horizon_joint（H=20，maxmin 内层） | 0.852 | — | — | 0.75 |
+| horizon_joint（gauge 内层） | 0.60（satisficing） | — | — | 0.90\* |
+| **lexicographic L1（QoS 优先 ≻ worst 最大化）** | **0.844** | 0.844 | 0.857 | **1.0**（20/20，LCB 0.881） |
+
+`\*` gauge 行早期 QoS 0.90 含 γ 缩放功率 bug（γ*>1 时 Σp≤γ·b>1 W），已修正（见
+[`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2）。
+
+**结论（2026-08-16 修正）**：8/8 缺口性质从"不可达"修正为"**有限视野一阶控制器
+（D0.95 解析栈）→ 多步联合优化器（lex L1 / horizon joint oracle）的算法差距 +
+端点部署执行差距**"——同几何可达 worst 0.844 / QoS 1.0，而部署栈为 0.662 / 1.0
+(tol)；两端差距在结构层（§6.2 的 price-driven 贪心 25.7% vs oracle ~40%）与
+几何层优化视野（单步梯度 vs 多步 trust-region）。
 
 **8/8 天花板分解**（`tools/audit_scale_ceiling.py`，同几何瀑布）：
 
@@ -511,14 +545,21 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
 - 双集合表示提供目标置换不变 / UAV 置换等变 / 均匀尺度协变 / 速度圆盘保证；
 - 8/8 静态目标域内，解析执行栈（L0 通信余量 + L1 功率 LP/capability gauge + L3
   价格驱动几何下降）在 20 seed 上把 worst/weak3/steady 拉到 0.662/0.724/0.808，
-  三地板全达标（D0.95）。
+  三地板全达标（D0.95；QoS 在 tol=1e-6 口径下 1.0）；
+- 8/8 同几何可达性：lexicographic L1 / horizon joint oracle 显示 worst 0.844、
+  QoS 1.0（20/20）可达——**性能缺口是协调/部署执行，不是物理**（oracle 诊断，
+  非部署方法）。
 
 **不可宣称：**
 
 - 完全分布式端到端物理检测（最终融合仍是环境级集中式）；
 - 任意 `K/Q` 的检测/QoS 通解，或 8/8 已达与 6/6 相同绝对 QoS；
 - 学习候选优于解析物理候选（当前接受动作均来自解析梯度池）；
-- 波形级或真实硬件 ISAC 性能。
+- lexicographic L1 / horizon joint oracle 为可部署执行路径（目前是离线诊断，
+  需完成端点部署执行接线）；
+- 波形级或真实硬件 ISAC 性能；
+- 6/6 决策行数据（CURRENT_SYSTEM_STATUS §4.1 三行）为干净证据（含被隔离种子，
+  待 bank 回填重跑）。
 
 ---
 
@@ -540,9 +581,12 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
    域、协议缩放。
 5. **随机物理残差校准**：随机 RCS/Swerling、随机 CSI、丢包与模型漂移尚未进入
    独立事件校准；此前 `3 dB / 0.5 ms` 只是工程裕量。
-6. **统计功效**：mean-worst 是重尾统计量，30 种子不足以分辨 0.6 门槛；主指标应
-   改用 `QoS feasible rate`（带 Wilson LCB）并扩到 ≥100 种子或加方差缩减。
-7. **对抗检测约束（advice 012，审计级已落地）**：T2 的 exposure 代理量
+6. **统计功效（部分落地）**：mean-worst 是重尾统计量，30 种子不足以分辨 0.6 门槛；
+   主指标应改用 `QoS feasible rate`（带 Wilson LCB）并扩到 ≥100 种子或加方差缩减。
+   已新增 `tools/assert_gate_thresholds.py` / `tools/assert_formal_gates.py` 把
+   Medium 门槛（含可选 Wilson LCB 强制）脚本化——论文正式声明时应启用
+   `--require-lcb`，并注意当前 4/4 的 LCB 0.63 不达 0.70（须在方法学中显式说明）。
+7. **对抗检测约束（advice 012，oracle 级已落地）**：T2 的 exposure 代理量
    （`E_w ≤ Γ_w`）已在 oracle 侧升级为**对方探测能力约束**（`D_w^I ≤ D̄_w^I`，
    三个对方能力等级 weak/medium/strong，`--inner intercept`），三向对比证明
    power-only 与 exposure 在 medium/strong 对手下 75%/100% 被裸发现，而
@@ -550,3 +594,36 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
    [`T3_DETECTION_CAPABILITY.md`](T3_DETECTION_CAPABILITY.md)。下一步是把新的
    攻防对偶价格 `s_iq = λ_q a_iq − μ_w a^I[i,q]` 接入分布式协调（列生成），
    exposure 正式降级为 baseline。
+8. **lexicographic L1 部署化（D1.1-A 后）**：D1.1-A 已证明 lex L1（QoS 优先 ≻
+   worst 最大化）在 oracle 级把 20-seed mean worst 从 0.671 推到 0.844、QoS
+   1.0（20/20，LCB 0.881）——但它是**教师几何起点的离线诊断**。下一步把
+   Stage-B QoS-constrained max-min 做成逐帧可部署求解器并接入
+   `task_constrained_mode` 的 live 路径。
+
+---
+
+## 12. 工程治理与可复现性（2026-08-16 审计修正）
+
+研究内容之外，本目录还记录了保证结果可信的工程治理机制（本次深度审计的修正成果，
+详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）：
+
+- **测试集污染种子隔离（代码强制）**：seed `795/747/105/860/2` 因 2026-07-29
+  split 漏写被误用，文档此前只有声明、代码零拦截。现注册表
+  `config/quarantined_seeds.json` + `load_stratified_seed_split(strict=True)`
+  fail-closed 拦截（含隔离种子即抛错），bank 生成自动排除并记录
+  `quarantined_excluded`。**三个 legacy bank 未回填前，相关 split 的 strict
+  加载会抛错（预期行为）**；回填后需重跑 6/6 决策行。
+- **Gate 门槛脚本化**：`tools/assert_gate_thresholds.py`（单结果断言，从
+  paired_eval.csv 重算聚合）与 `tools/assert_formal_gates.py`（批量断言正式结果，
+  受污染项标 QUARANTINED 不参与判定）。4/4 正式结果经脚本复核 PASS
+  （0.9132/0.8848/0.7393/0.72）。
+- **协调层主/支路径立界**：`uav_isac/coordination/__init__.py` 导出主路径 API；
+  14 个仅审计/研究用模块（priced_structure、certified_geometry_repair、
+  owner_local_physics 等）带 `AUDIT/RESEARCH-ONLY` 标注，不代表部署行为。
+- **结果治理**：`tools/audit_results_tree.py` 只读扫描 results/（767 目录）——
+  36 个目录无任何 manifest、20 个 `_` 前缀临时目录与正式混存、summary.json 有
+  87 种 schema 变体；物理归档（移动/删除）需用户确认后执行。
+- **工程基线**：`requirements.txt`（此前缺失，导致 sklearn 缺失测试失败）、
+  `.github/workflows/ci.yml`（Linux 全量 pytest）、`pytest.ini` 排除 scripts/
+  （`test_ppo_ratio_fix.py` 曾模块级执行训练被 pytest 误收集）。全量测试基线
+  **865 passed / 1 env failure**（sklearn，安装 requirements 后通过）。
