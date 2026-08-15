@@ -345,6 +345,17 @@ class EnvironmentCore:
                 'analytical_structure_ranking_enabled')
         self._analytical_movement_candidates_enabled = bool(getattr(
             ma, 'analytical_movement_candidates_enabled', False))
+        self._intercept_constrained_power_enabled = bool(getattr(
+            ma, 'intercept_constrained_power_enabled', False))
+        if (self._intercept_constrained_power_enabled
+                and not self._analytical_sensing_power_enabled):
+            raise ValueError(
+                'intercept_constrained_power_enabled requires '
+                'analytical_sensing_power_enabled')
+        self._last_intercept_mu: np.ndarray | None = None
+        self._last_intercept_pd_max: float | None = None
+        self._last_intercept_eps: float | None = None
+        self._last_intercept_infeasible = False
         self._last_analytical_power_balance_error = 0.0
         self._last_analytical_dual_prices = None
         # D1.1-A audit hook (env var DSH_LEX_AUDIT): per-frame lex diagnostics.
@@ -1972,6 +1983,71 @@ class EnvironmentCore:
             gamma_req = max(gamma_th, gamma_rate)
             result[i] = gamma_req * n0 * b_i / g_arr[idx]
         return result
+
+    def _solve_intercept_power(
+        self, gain: np.ndarray, budget: np.ndarray,
+    ) -> object | None:
+        """D1.1-D live covertness-constrained L1 power (T3 / advice 012).
+
+        Solves the max-min power LP subject to the per-target counter-
+        detection hard bound
+
+            D_q^I = sum_i a^I[i,q] p_iq <= bar D^I,
+            bar D^I = [Q^{-1}(P_FA^I) - Q^{-1}(eps)]^2,
+
+        so the opponent's detection probability P_{D,w}^I <= eps is a HARD
+        executed constraint (not a reward term).  Returns a MaxMinPowerResult
+        (with the opponent-detection price mu attached to prices) or None when
+        infeasible; the caller then falls back to the normal power path and
+        the violation is recorded in ``_last_intercept_pd_max``.
+        """
+        from uav_isac.coordination.intercept_power import (
+            INTERCEPT_CAPABILITIES,
+            constrained_maxmin_lp,
+            intercept_coefficients,
+            intercept_deflection_limit,
+        )
+        from uav_isac.coordination.maxmin_power import MaxMinPowerResult
+        from uav_isac.physical.detection import compute_detection_probabilities
+
+        uav_p = np.array([u.pos[:2].copy() for u in self.uavs])
+        tgt_p = np.array([t.get_position_3d()[:2] for t in self.targets])
+        tier = str(getattr(self.cfg.marl, 'intercept_capability',
+                           'medium')).strip().lower()
+        theta = INTERCEPT_CAPABILITIES.get(
+            tier, INTERCEPT_CAPABILITIES['medium'])
+        a_i = intercept_coefficients(
+            uav_p, tgt_p, fc=float(self.cfg.otfs.fc),
+            g_tx_dBi=float(self.cfg.otfs.g_tx_dBi),
+            height=float(self.cfg.scenario.height),
+            kt=float(self.cfg.channel.kT), theta=theta)
+        pfa_i = float(getattr(self.cfg.marl, 'intercept_pfa', 1e-3))
+        eps = float(getattr(self.cfg.marl, 'intercept_eps', 0.1))
+        d_bar = intercept_deflection_limit(pfa_i, eps)
+        out = constrained_maxmin_lp(gain, budget, a_i, np.full(self.Q, d_bar))
+        self._last_intercept_eps = eps
+        if out is None:
+            self._last_intercept_infeasible = True
+            self._last_intercept_mu = None
+            self._last_intercept_pd_max = None
+            return None
+        self._last_intercept_infeasible = False
+        t_star, p_star, lam, beta, mu = out
+        deflection = np.sum(gain * p_star, axis=0)
+        d_intercept = np.sum(a_i * p_star, axis=0)
+        self._last_intercept_mu = mu.copy()
+        self._last_intercept_pd_max = float(np.max(
+            compute_detection_probabilities(d_intercept, pfa_i)))
+        return MaxMinPowerResult(
+            power_w=p_star,
+            deflection=deflection,
+            worst_deflection=float(np.min(deflection)),
+            prices=lam,
+            dual_upper_bound=float(t_star),
+            primal_dual_gap=0.0,
+            rounds=0,
+            worst_history=(float(np.min(deflection)),),
+        )
 
     def _process_learned_communications(
         self, uav_positions: np.ndarray,
@@ -3755,7 +3831,19 @@ class EnvironmentCore:
             if gain is not None:
                 self._last_analytical_gain = gain.copy()
                 self._last_analytical_budget = budget.copy()
-                if self._task_constrained_power_enabled:
+                # D1.1-D live covertness (T3): max-min subject to the
+                # counter-detection hard bound P_{D,w}^I <= eps.  When the
+                # constrained LP is feasible it REPLACES the power path; the
+                # dual price mu is the opponent-detection cost per watt.
+                intercept_lp = None
+                if self._intercept_constrained_power_enabled:
+                    intercept_lp = self._solve_intercept_power(gain, budget)
+                if intercept_lp is not None:
+                    lp = intercept_lp
+                    self._current_sensing_power_w = lp.power_w.copy()
+                    self._last_analytical_power_balance_error = float(np.max(
+                        np.abs(np.sum(lp.power_w, axis=1) - budget)))
+                elif self._task_constrained_power_enabled:
                     # D0.93-A1: task-constrained power (QoS floors as hard
                     # constraints via the PWL LP).  If gamma* <= 1 the returned
                     # power satisfies worst+bottom-k+steady; else fall back to

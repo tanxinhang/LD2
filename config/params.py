@@ -188,6 +188,20 @@ class MARLParams:
     # reclaimed sensing budget b_i = 1 - P_comm^min is never smaller than
     # under the equal split -- a strict no-waste improvement.  Default on.
     analytical_comm_optimal_bw: bool = True
+    # D1.1-D (2026-08-16): live covertness-constrained power (T3 / advice 012
+    # first step from oracle to deployment).  When enabled (requires
+    # analytical_sensing_power_enabled), the L1 power allocation is the
+    # max-min LP subject to the per-target counter-detection hard bound
+    #   D_q^I = sum_i a^I[i,q] p_iq <= bar D^I,  bar D^I = [Q^-1(P_FA^I)-Q^-1(eps)]^2,
+    # i.e. the opponent's detection probability P_{D,w}^I <= eps becomes a
+    # HARD executed constraint (not a reward term), and the dual price mu_w
+    # is the opponent-detection cost of each watt.  If the constraint makes
+    # the LP infeasible the power falls back to the normal (unconstrained)
+    # path and the violation is recorded in _last_intercept_pd_max.
+    intercept_constrained_power_enabled: bool = False
+    intercept_capability: str = "medium"   # weak | medium | strong
+    intercept_eps: float = 0.1             # opponent detection prob. bound
+    intercept_pfa: float = 1e-3            # opponent false-alarm prob.
     # D0.93-A1: task-constrained power allocation.  When enabled (requires
     # analytical_sensing_power_enabled), the inner solver solves the capability
     # gauge (min gamma s.t. worst+bottom-k+steady floors, budget <= gamma*b) via
