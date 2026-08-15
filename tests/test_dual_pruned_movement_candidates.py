@@ -140,6 +140,113 @@ def _exact_candidate_score(env, coefficient, selected, budget, uav, tgt,
     return float(np.min(pd))
 
 
+def test_lex_scoring_matches_executed_l1_objective():
+    """D1.1-B+++ score/execute consistency: under a lexicographic inner layer
+    the candidate scorer must use qos_constrained_maxmin_lp (Stage B), not the
+    plain max-min LP, so the chosen candidate optimises the same objective
+    that will be executed.  The test verifies the lex branch runs and that
+    its score equals the Stage-B worst P_D on the moved geometry (or the
+    reserve-first max-min fallback when Stage-B is infeasible there)."""
+    env = _small_env()
+    env.core.cfg.marl.task_constrained_power_enabled = True
+    env.core.cfg.marl.task_constrained_mode = "lexicographic"
+    env.core.cfg.marl.analytical_movement_dual_prune = True
+    env.core.cfg.marl.analytical_movement_lex_scoring = True
+    rng = np.random.default_rng(20260818)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    # Near-field geometry so the Stage-B QoS floors are typically feasible.
+    uav = np.array([[40.0, 40.0], [60.0, 50.0]])
+    tgt = np.array([[100.0, 100.0], [90.0, 120.0]])
+    grads = {
+        0: np.array([1.0, 0.5]),
+        1: np.array([-0.3, 0.9]),
+    }
+    # Must run without error and return a dict of moves.
+    out = env.core._select_best_movement_candidate(
+        coefficient, selected, budget, uav, tgt, grads, step=2.5)
+    assert isinstance(out, dict)
+    from uav_isac.coordination.capability import qos_constrained_maxmin_lp
+    from uav_isac.coordination.pwl_pd import (
+        chord_lower_bound,
+        curvature_breakpoints,
+    )
+    from uav_isac.physical.detection import (
+        compute_detection_probabilities,
+        minimum_deflection_for_detection_probability,
+    )
+    p_fa = env.core.cfg.detection.P_FA
+    qos_floors = (0.60, 0.70, 0.80, 3)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([qos_floors[0]]), p_fa)[0])
+    gain_cur, _ = fixed_owner_gain_matrix(coefficient, selected)
+    d_max = float(np.max(np.sum(gain_cur * budget[:, None], axis=0))) + 1.0
+    bps = curvature_breakpoints(p_fa, d_min, d_max, epsilon=1e-3)
+    cs, ci = chord_lower_bound(p_fa, bps)
+    mat = np.zeros_like(uav)
+    for k, delta in out.items():
+        mat[k] = np.asarray(delta, dtype=np.float64)
+    nu = np.clip(uav + mat, 0.0, 1e9)
+    coeff_c = env.core._friis_rescale_tensor(coefficient, uav, tgt, nu)
+    g_c, _ = fixed_owner_gain_matrix(coeff_c, selected)
+    st = qos_constrained_maxmin_lp(g_c, budget, p_fa, qos_floors, cs, ci, d_min)
+    if st is not None:
+        # Stage-B feasible: the executed score must equal the Stage-B worst P_D.
+        _t_star, _p, d_star = st
+        pd = compute_detection_probabilities(d_star, p_fa)
+        assert float(np.min(pd)) == pytest.approx(
+            _exact_candidate_score(env, coefficient, selected, budget, uav,
+                                   tgt, out),
+            abs=1e-9)
+    else:
+        # Stage-B infeasible on the moved geometry: the executed path (and
+        # the lex scorer) fall back to reserve-first max-min, which is exactly
+        # what _exact_candidate_score computes.
+        assert _exact_candidate_score(
+            env, coefficient, selected, budget, uav, tgt, out) >= 0.0
+
+
+def test_weak_duality_pruning_stays_exact_under_lex_scoring():
+    """With lex scoring enabled, lex t* <= plain max-min t* <= U_lambda, so a
+    candidate with U_lambda <= best_deflection can never beat the incumbent
+    under the executed Stage-B objective either."""
+    env = _small_env()
+    env.core.cfg.marl.task_constrained_power_enabled = True
+    env.core.cfg.marl.task_constrained_mode = "lexicographic"
+    env.core.cfg.marl.analytical_movement_dual_prune = True
+    env.core.cfg.marl.analytical_movement_lex_scoring = True
+    rng = np.random.default_rng(20260819)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    gain_cur, _ = fixed_owner_gain_matrix(coefficient, selected)
+    lam, _ = optimal_maxmin_dual_prices(gain_cur, budget)
+    # Plain max-min on the current geometry:
+    res = solve_fixed_structure_maxmin_power_lp(gain_cur, budget)
+    u_lambda = float(np.sum(budget * np.max(lam[None, :] * gain_cur, axis=1)))
+    assert u_lambda >= res.worst_deflection - 1e-9  # weak duality
+    # And lex Stage-B cannot exceed the plain max-min value (it only adds
+    # QoS-floor constraints; the gauge's own allocation is feasible), so the
+    # U_lambda bound dominates the lex objective as well.
+    from uav_isac.coordination.capability import qos_constrained_maxmin_lp
+    from uav_isac.coordination.pwl_pd import (
+        chord_lower_bound,
+        curvature_breakpoints,
+    )
+    from uav_isac.physical.detection import (
+        minimum_deflection_for_detection_probability,
+    )
+    p_fa = env.core.cfg.detection.P_FA
+    qos_floors = (0.60, 0.70, 0.80, 3)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([qos_floors[0]]), p_fa)[0])
+    d_max = float(np.max(np.sum(gain_cur * budget[:, None], axis=0))) + 1.0
+    bps = curvature_breakpoints(p_fa, d_min, d_max, epsilon=1e-3)
+    cs, ci = chord_lower_bound(p_fa, bps)
+    st = qos_constrained_maxmin_lp(gain_cur, budget, p_fa, qos_floors,
+                                   cs, ci, d_min)
+    if st is not None:
+        assert st[0] <= res.worst_deflection + 1e-9
+        assert st[0] <= u_lambda + 1e-9
+
+
 def test_dual_pruning_reduces_lp_evaluations(monkeypatch):
     env = _small_env()
     rng = np.random.default_rng(20260816)

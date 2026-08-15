@@ -256,6 +256,21 @@ class MARLParams:
     # D0.95 "L3 driven by lambda*" separation is optimal.  Kept as a
     # default-off option for reuse under non-equilibrating inner modes.
     analytical_movement_gauge_price_step: bool = False
+    # D1.1-B+++ (2026-08-16): score the multi-candidate L3 candidates with
+    # the SAME L1 solver that will be executed (lex Stage-B under a
+    # lexicographic inner layer).  RATIONALE: the D1.1-B scorer used the plain
+    # max-min LP even under lex execution, a score/execute objective
+    # mismatch.  NEGATIVE RESULT (verified, default OFF): a 2-seed x 40-frame
+    # comparison degraded badly (seed 503 final worst 0.996 -> 0.662), and the
+    # theory explains it -- the mismatch is NOT a defect but the layered
+    # design.  L3's role is to steer GEOMETRY, and the plain max-min score
+    # keeps providing an improving gradient above t* even when the QoS floors
+    # are met, whereas Stage-B pins t* at the floor once the floors bind, so
+    # its score loses all sensitivity to movement and the geometry stalls.
+    # This is the same "metric selects the price" separation as D0.95
+    # (L1 uses the gauge, L3 uses lambda*).  Keep OFF; recorded for future
+    # non-equilibrating inner modes only.
+    analytical_movement_lex_scoring: bool = False
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.

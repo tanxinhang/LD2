@@ -3076,6 +3076,47 @@ class EnvironmentCore:
         best = np.zeros((K, 2), dtype=np.float64)
         best_s = float('-inf')
         best_deflection: float | None = None
+        # D1.1-B+++ score/execute consistency: use the SAME L1 solver that
+        # will be executed to score each candidate.  The D1.1-B scorer used
+        # the plain max-min LP even under a lexicographic inner layer, so a
+        # candidate could win the pure max-min score yet degrade under the
+        # QoS floors actually executed.  When lexicographic mode is active we
+        # score with qos_constrained_maxmin_lp (Stage B) and fall back to
+        # reserve-first max-min on infeasible geometries, mirroring the
+        # executed power path.  Weak-duality pruning stays exact: lex t* is
+        # at most the plain max-min t*, which is at most U_lambda.
+        use_lex_scoring = bool(
+            getattr(self.cfg.marl, 'analytical_movement_lex_scoring', True)
+            and getattr(self.cfg.marl, 'task_constrained_power_enabled', False)
+            and getattr(self.cfg.marl, 'task_constrained_mode', 'gauge')
+            == 'lexicographic')
+        lex_l1 = None
+        if use_lex_scoring:
+            try:
+                from uav_isac.coordination.capability import (
+                    qos_constrained_maxmin_lp,
+                )
+                from uav_isac.coordination.pwl_pd import (
+                    chord_lower_bound,
+                    curvature_breakpoints,
+                )
+                from uav_isac.physical.detection import (
+                    minimum_deflection_for_detection_probability,
+                )
+                qos_floors = tuple(float(v) for v in getattr(
+                    self.cfg.marl, 'task_constrained_qos_floors',
+                    (0.60, 0.70, 0.80, 3)))
+                d_min = float(minimum_deflection_for_detection_probability(
+                    np.asarray([qos_floors[0]]), p_fa)[0])
+                d_max = float(np.max(ceiling)) + 1.0
+                bps = curvature_breakpoints(p_fa, d_min, d_max, epsilon=1e-3)
+                cs, ci = chord_lower_bound(p_fa, bps)
+                lex_l1 = (qos_constrained_maxmin_lp,
+                          (qos_floors[0], qos_floors[1], qos_floors[2],
+                           max(1, int(qos_floors[3]))), cs, ci, d_min)
+            except (ValueError, ImportError):
+                lex_l1 = None
+
         for cand in candidates:
             nu = np.clip(uav + cand, 0.0, area)
             # Collision / proximity guard: no UAV may come closer than d_safe
@@ -3098,14 +3139,33 @@ class EnvironmentCore:
                     budget * np.max(lam[None, :] * g_c, axis=1)))
                 if u_lambda <= best_deflection + 1e-9:
                     continue
-            res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
-            # Score in P_D space (saturates at 1), so once a target is already
-            # saturated, ramming UAVs closer yields no further score gain.
-            pd = compute_detection_probabilities(res.deflection, p_fa)
-            s = float(np.min(pd))
+            if lex_l1 is not None:
+                solver, xi, cs, ci, d_min = lex_l1
+                out = solver(g_c, budget, p_fa, xi, cs, ci, d_min)
+                if out is None:
+                    # Stage-B infeasible: the executed path falls back to
+                    # reserve-first max-min, so score that fallback too.
+                    res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
+                    pd = compute_detection_probabilities(
+                        res.deflection, p_fa)
+                    s = float(np.min(pd))
+                    cand_def = res.worst_deflection
+                else:
+                    t_star, _p_star, d_star = out
+                    pd = compute_detection_probabilities(d_star, p_fa)
+                    s = float(np.min(pd))
+                    cand_def = float(np.min(d_star))
+            else:
+                res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
+                # Score in P_D space (saturates at 1), so once a target is
+                # already saturated, ramming UAVs closer yields no further
+                # score gain.
+                pd = compute_detection_probabilities(res.deflection, p_fa)
+                s = float(np.min(pd))
+                cand_def = res.worst_deflection
             if s > best_s + 1e-9:
                 best_s, best = s, cand
-                best_deflection = res.worst_deflection
+                best_deflection = cand_def
         out: dict = {}
         for k in range(K):
             if np.any(best[k] != 0.0):

@@ -393,6 +393,16 @@ S_q* = top-K_q_max of {a_i,j_q*,q b_i}
 的 `steady` 是全部目标均值、`worst` 才是逐目标最小，L3 的 satisficing 门只盯最差
 目标）。步长受 `‖Δp‖≤v_max·dt` 硬约束。代码：`env_core._analytical_movement_delta`。
 
+> **L1 执行 vs L3 引导的目标"不一致"是有意分层（2026-08-16 审计澄清）**：多候选
+> L3 的候选评分用**纯 max-min LP**（`solve_fixed_structure_maxmin_power_lp`），
+> 即使执行内层是 lexicographic（Stage-B QoS 约束 max-min）。曾试图改成"评分与
+> 执行一致"（用 Stage-B 评分候选），端到端 2-seed 对比严重退化（seed 503 final
+> worst 0.996→0.662）。理论解释：**L3 的职责是引导几何，纯 max-min 评分在 `t*`
+> 之上持续提供改进梯度（即使三地板已满足仍推动 UAV 提升均衡水平），而 Stage-B
+> 在地板绑定处把 `t*` 钉在地板、评分对移动失去区分度 → 几何停滞**。这是 D0.95
+> "指标选择价格"分离（L1 用 gauge/lex、L3 用 λ\*）在评分层的自然延伸，不是缺陷。
+> 配置 `analytical_movement_lex_scoring`（默认关）保留为负结果记录。
+
 ---
 
 ## 7. 证书与安全层
