@@ -481,8 +481,18 @@ r_team = Σ_q λ_q · U_κ(D_q) − λ_report·bits − 通信成本 − 约束�
 | 4/4 冻结部署版 | 100 | 0.739 | 0.72 | 正式版本 |
 | 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.7303 | 严格 no-harm 证书成立 |
 | 8/8 原子控制 D0.86 | 20 | 0.4372 | 0.50 | 严格 no-harm 证书成立 |
-| **8/8 解析栈 L0+L1+L3（D0.95）** | 20 | **0.662** | **1.0\*** | worst/weak3/steady 三地板达标 |
-| 8/8 lexicographic L1 oracle（D1.1-A） | 20 | **0.844** | **1.0**（LCB 0.881） | oracle 级（教师几何起点） |
+| **8/8 解析栈 L0+L1+L3（D0.95，gauge）** | 20 | **0.662** | **1.0\*** | 当前部署配置（satisficing L1） |
+| 8/8 lexicographic L1（D1.1-A，live） | 20 | **0.844** | **1.0**（LCB 0.881） | 与部署同种子同 warm-start，仅 L1 目标切换 |
+| 8/8 lex + 多候选 L3（D1.1-B，live） | 20 | **0.975** | **1.0**（LCB 0.881） | 同种子，L3 视野增强 |
+
+> **差距分解（同 20 seed、同 warm-start、同 selection split，实测配对）**：
+> `0.662 → 0.844`（**+0.18，仅切换 `task_constrained_mode: gauge→lexicographic`**，
+> 不动运动/结构）→ `0.975`（**+0.13，再加多候选 trust-region L3**，
+> `analytical_movement_candidates_enabled`）。三行都是 **live eval-only 运行**
+> （`run_mappo.py`，`_d095_lex20` / `_d095_lexcand20`），不是 oracle——**差距不是
+> "部署层做不到"，而是部署基线还停留在 D0.95 的 gauge 配置，D1.1-A/B 已验证的
+> 更强配置尚未切换为部署基线**。注意：这组 seed 已多轮复用（D1_1A §5），论文
+> 最终认证需 ≥100 全新 blind seed（D1.5）。
 
 `*` D0.95 端到端严格比较（tol=0）报 QoS 0.65（13/20），其中 7 个 seed 的 worst
 恰好钉在 0.60 地板（`0.60 − 1.11e-16`，浮点伪影，非真实性能差距）；按
@@ -508,23 +518,25 @@ L3 几何把 steady 从 0.736 拉到 0.808（0/20 seed 低于 0.80），三地�
 剩余 7/20 seed 早期帧 worst<0.60 是滚动时域收敛瞬态。详见
 [`D095_JOINT_L2_L3_ALTERNATING.md`](D095_JOINT_L2_L3_ALTERNATING.md)。
 
-**8/8 可达性上界**（D1.0-A horizon joint / D1.1-A lex L1，`tools/audit_horizon_joint_oracle.py`，
-从教师最终几何起点，**oracle 诊断**而非部署执行）：
+**8/8 可达性上界（oracle 诊断）**（D1.0-A horizon joint，
+`tools/audit_horizon_joint_oracle.py`，从教师最终几何起点、全局信息、多步规划；
+**不是部署执行**）：
 
 | oracle | worst | weak3 | steady | QoS 可行率 |
 |---|---:|---:|---:|---:|
 | horizon_joint（H=20，maxmin 内层） | 0.852 | — | — | 0.75 |
 | horizon_joint（gauge 内层） | 0.60（satisficing） | — | — | 0.90\* |
-| **lexicographic L1（QoS 优先 ≻ worst 最大化）** | **0.844** | 0.844 | 0.857 | **1.0**（20/20，LCB 0.881） |
 
 `\*` gauge 行早期 QoS 0.90 含 γ 缩放功率 bug（γ*>1 时 Σp≤γ·b>1 W），已修正（见
 [`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2）。
 
-**结论（2026-08-16 修正）**：8/8 缺口性质从"不可达"修正为"**有限视野一阶控制器
-（D0.95 解析栈）→ 多步联合优化器（lex L1 / horizon joint oracle）的算法差距 +
-端点部署执行差距**"——同几何可达 worst 0.844 / QoS 1.0，而部署栈为 0.662 / 1.0
-(tol)；两端差距在结构层（§6.2 的 price-driven 贪心 25.7% vs oracle ~40%）与
-几何层优化视野（单步梯度 vs 多步 trust-region）。
+**结论（2026-08-16 修正）**：8/8 差距的主要来源**不是几何/物理**，而是两个执行层
+选择：① **L1 目标 satisficing**——gauge 在 γ*≤1 后把 worst 钉在 0.60 地板，浪费
+满足门限后的剩余资源；lexicographic（QoS 约束 max-min）在同一几何回收该资源
+（+0.18，live 已验证）；② **L3 视野**——单步一阶梯度 vs 每帧多候选 trust-region
+打分（+0.13，live 已验证）。horizon joint oracle（0.852）与部署（0.662）的差距
+包含**同类的 L1/L3 增强 + 多步联合规划 + 全局信息**，作为可达性上界参考，不是
+部署方法。
 
 **8/8 天花板分解**（`tools/audit_scale_ceiling.py`，同几何瀑布）：
 

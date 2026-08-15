@@ -49,12 +49,22 @@
 |---|---:|---:|---:|---:|
 | 4/4 冻结部署版 | 100 | **0.739** | 0.913 | 0.72 |
 | 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.871 | 0.7303 |
-| 8/8 解析栈端到端 D0.95 | 20 | 0.662 | 0.808 | 0.65* |
-| 8/8 lexicographic L1 oracle（D1.1-A，教师几何起点） | 20 | **0.844** | 0.8569 | **1.0**（LCB 0.881） |
+| 8/8 解析栈端到端 D0.95（gauge） | 20 | 0.662 | 0.808 | 0.65* |
+| 8/8 lexicographic L1（D1.1-A，live） | 20 | **0.844** | 0.845 | **1.0**（LCB 0.881） |
+| 8/8 lex + 多候选 L3（D1.1-B，live） | 20 | **0.975** | 0.982 | **1.0**（LCB 0.881） |
 
 `*` D0.95 的 0.65 是严格比较的浮点伪影：7 个 seed 的 worst 恰好钉在 0.60 地板
 （`0.60 − 1.11e-16`）；容差 ≥1e-12 时 QoS=1.0。口径修正见
 [`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2。
+
+**8/8 差距性质（2026-08-16 修正，关键）**：lex L1 与 lex+多候选 L3 两行是
+**live eval-only 运行**（`_d095_lex20` / `_d095_lexcand20`，与 D0.95 部署
+**同 20 seed、同 warm-start、同 selection split**，仅配置不同）——不是 oracle。
+实测配对差距：`0.662 → 0.844`（**+0.18，仅切换 L1 目标 gauge→lexicographic**）→
+`0.975`（**+0.13，加多候选 trust-region L3**）。**"部署层做不到 0.844"的准确表述
+是"部署基线还停留在 D0.95 的 gauge 配置，D1.1-A/B 已验证的更强配置尚未切换为
+部署基线"**；horizon joint oracle（0.852）才是教师几何起点的可达性上界。
+注意：该 20 seed 已多轮复用，最终认证需 ≥100 全新 blind seed（D1.5）。
 
 **8/8 缺口状态（2026-08-16 修正）**：旧表述"8/8 worst 0.437 是主要缺口"对应
 D0.86 原子控制（20 seed）。D0.95 解析栈端到端已将 8/8 均值 worst 提到 **0.662**、
@@ -264,7 +274,8 @@ reserve/steady、容量、角色影子价，会系统性偏向最差目标（D0.
 | D0.94 | L3 分布式价格几何（T0/T2/T4 单测）+ 长时域 48% 硬帧修复 |
 | D0.95 | 联合 L2(结构)+L3(几何) 交替下降 67.5% 硬帧修复；端到端 worst 0.662 / steady 0.808 |
 | D1.0-A/B/C | Horizon joint oracle（H=20）：worst 0.852 / QoS 0.75；内层求解器消融；责任分配联合移动为负结果 |
-| D1.1-A | **Lexicographic L1（QoS 优先 ≻ worst 最大化）：oracle 级 mean worst 0.844、严格 QoS 1.0（20/20，LCB 0.881），Gate 大幅通过**；浮点 QoS 口径修正（0.65→1.0） |
+| D1.1-A | **Lexicographic L1（QoS 优先 ≻ worst 最大化）：live 20-seed mean worst 0.844、严格 QoS 1.0（20/20，LCB 0.881），Gate 大幅通过**（与 D0.95 部署同种子同 warm-start，仅 L1 目标切换 +0.18）；浮点 QoS 口径修正（0.65→1.0） |
+| D1.1-B | 多候选 trust-region L3（`analytical_movement_candidates_enabled`）：lex 基础上 worst 0.844→**0.975**、steady 0.982，worst≥0.95 率 17/20 |
 | T2 | 安全/低暴露统一母问题（standoff + Γ）：oracle worst 保持 0.79–0.81；**standoff 是主要限制**（需从满足约束的初始几何重规划） |
 | T3 | **Detection-Capability-Constrained（advice 012）**：三档对方能力三向对比——power-only 在 medium/strong 下被 75%/100% 发现，exposure 在 strong 下同样失效，只有 detection 约束恒成立（strong 下必须近乎静默） |
 
