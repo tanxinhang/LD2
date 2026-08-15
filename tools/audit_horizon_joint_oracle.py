@@ -56,6 +56,11 @@ from uav_isac.coordination.capability import (  # noqa: E402
     capability_geometry_gradient,
     capability_gauge_pwl_lp_full,
 )
+from uav_isac.coordination.intercept_power import (  # noqa: E402
+    constrained_maxmin_lp,
+    intercept_coefficients,
+    intercept_deflection_limit,
+)
 from uav_isac.coordination.maxmin_power import (  # noqa: E402
     fixed_owner_gain_matrix,
     relaxed_same_geometry_target_ceiling,
@@ -240,7 +245,7 @@ def greedy_target_assignment(
     gain: np.ndarray, budget: np.ndarray, uav: np.ndarray, tgt: np.ndarray,
     prices: np.ndarray | None, d_min: float,
 ) -> np.ndarray:
-    """D1.0-C: target responsibility auction (advice 009 §5).
+    """D1.0-C: target responsibility auction (advice 009 搂5).
 
     Each UAV is assigned the target where its *predicted marginal geometry
     value* is highest:
@@ -444,7 +449,7 @@ def _gauge_score(
 def _min_comm_power_budget(
     uav: np.ndarray, cfg, packet_bits: float = 600.0,
 ) -> np.ndarray:
-    """b_i = 1 - P_comm^min(X) (advice 011 §2): analytic minimum broadcast power.
+    """b_i = 1 - P_comm^min(X) (advice 011 搂2): analytic minimum broadcast power.
 
     Mirrors env_core._compute_analytical_min_comm_power: for sender i, the
     power meeting SNR threshold AND Shannon serialization + processing within
@@ -487,7 +492,7 @@ def _exposure_coefficients(
 ) -> np.ndarray:
     """c[i,q] = G_tx_lin * (lambda/(4 pi d_3d))^2: per-watt leakage at target q.
 
-    Simplest observer model (advice 011 §4): each target is its own potential
+    Simplest observer model (advice 011 搂4): each target is its own potential
     observer; c is the free-space path gain from UAV i to target q (with the
     UAV height in the 3D distance).  Exposure E_q = sum_i c[i,q] p_iq.
     """
@@ -509,11 +514,11 @@ def _exposure_coefficients(
 # listen bandwidth (matched filter on a known subcarrier) makes the opponent
 # MORE sensitive, not less.  The tiers below are therefore ordered by physical
 # sensitivity:
-#   * weak    — wideband search over ~100 MHz (no waveform knowledge), short
+#   * weak    鈥?wideband search over ~100 MHz (no waveform knowledge), short
 #               dwell, high NF, no array: sees almost nothing at these ranges.
-#   * medium  — knows the band (~10 MHz), moderate dwell/array, partial
+#   * medium  鈥?knows the band (~10 MHz), moderate dwell/array, partial
 #               waveform structure: selectively binding at close range.
-#   * strong  — matched filter on the exact pilot/subcarrier (1 kHz), long
+#   * strong  鈥?matched filter on the exact pilot/subcarrier (1 kHz), long
 #               coherent integration, large array, full waveform prior:
 #               binding everywhere at 1 W / 28 GHz.
 OPPONENT_CAPABILITIES = {
@@ -523,134 +528,11 @@ OPPONENT_CAPABILITIES = {
 }
 
 
-def _intercept_coefficients(
-    uav: np.ndarray, tgt: np.ndarray, cfg, theta: dict,
-) -> np.ndarray:
-    """a^I[i,q]: per-watt counter-detection Deflection gain at observer q.
-
-    Mirror of the legitimate sensing abstraction (advice 012 §2/§4): the
-    observer's detection statistic is assumed Gaussian-shift, so its Deflection
-    from UAV i's power p_iq at observer q is
-
-        D_q^I = sum_i a^I[i,q] p_iq,
-        a^I[i,q] = K_w G_tx G_w (lambda/(4 pi d_3d))^2 T_int,w / (kT B_w NF_w).
-
-    K_w encodes how much the opponent knows of the waveform/frame structure
-    (energy detection -> matched-filter).  d_3d includes the UAV height.
-    """
-    fc = float(cfg.otfs.fc)
-    lam = 299_792_458.0 / max(fc, 1.0)
-    g_tx_lin = 10.0 ** (float(cfg.otfs.g_tx_dBi) / 10.0)
-    h = float(cfg.scenario.height)
-    d2 = np.linalg.norm(uav[:, None, :] - tgt[None, :, :], axis=2) ** 2
-    d3 = np.sqrt(d2 + h * h)
-    path = (lam / (4.0 * np.pi * np.maximum(d3, 1e-6))) ** 2
-    g_w = float(theta["G_w"])
-    b_w = float(theta["B_w"])
-    nf_lin = 10.0 ** (float(theta["NF_w"]) / 10.0)
-    t_int = float(theta["T_int_w"])
-    k_w = float(theta["K_w"])
-    noise = max(float(cfg.channel.kT) * b_w * nf_lin, 1e-30)
-    return k_w * g_tx_lin * g_w * path * t_int / noise
-
-
-def _intercept_deflection_limit(p_fa_i: float, eps: float) -> float:
-    """bar D^I = [Q^-1(P_FA^I) - Q^-1(eps)]^2 (advice 012 §3)."""
-    from uav_isac.utils.math_utils import Q_inverse
-    root = float(Q_inverse(np.asarray(float(p_fa_i)))) - float(
-        Q_inverse(np.asarray(float(eps))))
-    return root * root
-
-
-def _exposure_maxmin_lp(
-    gain: np.ndarray, budget: np.ndarray, exposure_c: np.ndarray,
-    gamma_exp: np.ndarray,
-) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Inner (I) of advice 011 §5: max-min with low-exposure hard constraints.
-
-        max_{p,t}  t
-        s.t.  sum_i a_iq p_iq >= t,  for all q
-              sum_q p_iq <= b_i,     for all i
-              sum_i c[i,q] p_iq <= Gamma_q,  for all q   (target-side exposure)
-              p >= 0
-
-    Returns (t*, p*, lambda*, beta*, mu*) — the unified dual prices: lambda =
-    sensing bottleneck price, beta = local UAV RF price, mu = exposure price.
-    The LP is exact; the local net value of UAV i on target q becomes
-    s_iq = lambda_q a_iq - mu_q c[i,q]  (bottleneck gain minus exposure cost).
-    """
-    from scipy.optimize import linprog
-
-    K, Q = gain.shape
-    n = K * Q
-    c_obj = np.zeros(n + 1)
-    c_obj[-1] = -1.0  # maximize t
-    rows = []
-    ub = []
-    for q in range(Q):  # sum_i a_iq p_iq >= t  ->  -sum_i a_iq p_iq + t <= 0
-        row = np.zeros(n + 1)
-        row[-1] = 1.0
-        for i in range(K):
-            row[i * Q + q] = -gain[i, q]
-        rows.append(row)
-        ub.append(0.0)
-    for i in range(K):  # sum_q p_iq <= b_i
-        row = np.zeros(n + 1)
-        row[i * Q:(i + 1) * Q] = 1.0
-        rows.append(row)
-        ub.append(float(budget[i]))
-    for q in range(Q):  # exposure: sum_i c[i,q] p_iq <= Gamma_q (normalised to
-        # unit scale so HiGHS' relative feasibility tolerance is not blown up by
-        # the tiny absolute Gamma ~1e-9).
-        row = np.zeros(n + 1)
-        gq = max(float(gamma_exp[q]), 1e-300)
-        for i in range(K):
-            row[i * Q + q] = float(exposure_c[i, q]) / gq
-        rows.append(row)
-        ub.append(1.0)
-
-    res = linprog(
-        c_obj,
-        A_ub=np.stack(rows),
-        b_ub=np.asarray(ub, dtype=np.float64),
-        bounds=[(0.0, None)] * (n + 1),
-        method="highs",
-    )
-    if not res.success or res.x is None:
-        return None
-    p = res.x[:n].reshape(K, Q)
-    t_star = float(res.x[-1])
-    # Dual prices from marginals (min-LP with <= rows: price = -marginal >= 0).
-    marg = np.asarray(res.ineqlin.marginals, dtype=np.float64)
-    lam = np.maximum(-marg[:Q], 0.0)
-    beta = np.maximum(-marg[Q:Q + K], 0.0)
-    mu = np.maximum(-marg[Q + K:], 0.0)
-    # Turn budget inequalities into the exact per-UAV RF equality.  Slack is
-    # added to the target with the LARGEST exposure headroom (never the raw
-    # best-gain target), so the exposure constraints stay respected after fill.
-    p = np.maximum(p, 0.0).copy()
-    c_norm = exposure_c / np.maximum(gamma_exp[None, :], 1e-300)  # (K,Q)
-    for i in range(K):
-        slack = float(budget[i] - np.sum(p[i]))
-        while slack > 1e-10:
-            e_q = np.sum(c_norm * p, axis=0)  # normalised exposure per target
-            room = (1.0 - e_q) / np.maximum(c_norm[i, :], 1e-30)
-            q_fill = int(np.argmax(room))
-            if room[q_fill] <= 1e-12:
-                break  # no exposure headroom left on any target for UAV i
-            add = min(slack, max(float(room[q_fill]), 0.0))
-            if add <= 1e-12:
-                break
-            p[i, q_fill] += add
-            slack -= add
-    return t_star, p, lam, beta, mu
-
-
 def _safety_violated(
     uav: np.ndarray, tgt: np.ndarray,
     d_sep: float, d_standoff: float,
 ) -> bool:
-    """Advice 011 §3 hard safety: |x_i-x_j|>=d_sep and |x_i-y_q|>=d_standoff."""
+    """Advice 011 搂3 hard safety: |x_i-x_j|>=d_sep and |x_i-y_q|>=d_standoff."""
     K = int(uav.shape[0])
     for i in range(K):
         for j in range(i + 1, K):
@@ -707,14 +589,14 @@ def plan_seed(
     if all_sensing:
         budget = np.ones(K, dtype=np.float64)
     elif comm_coupling:
-        # advice 011 §2: b_i = 1 - P_comm^min(X) — recomputed as UAVs move.
+        # advice 011 搂2: b_i = 1 - P_comm^min(X) 鈥?recomputed as UAVs move.
         budget = _min_comm_power_budget(uav, cfg, packet_bits)
     else:
         budget = _budget(data, row0)
     gamma_exp_vec = (
         np.full(Q, float(gamma_exp)) if gamma_exp is not None else None)
     d_bar_intercept = (
-        np.full(Q, _intercept_deflection_limit(intercept_pfa, intercept_eps))
+        np.full(Q, intercept_deflection_limit(intercept_pfa, intercept_eps))
         if theta_w is not None else None)
     coeff = coeff_orig.copy()
 
@@ -742,7 +624,7 @@ def plan_seed(
     trajectory: list[dict] = []
     total_move_m = 0.0
     for step in range(max(1, int(horizon))):
-        # advice 011 §2: with comm coupling, the sensing budget follows the
+        # advice 011 搂2: with comm coupling, the sensing budget follows the
         # U2U geometry (P_comm^min rises as the fleet scatters).
         if comm_coupling and not all_sensing:
             budget = _min_comm_power_budget(uav, cfg, packet_bits)
@@ -818,7 +700,7 @@ def plan_seed(
                 gf = capability_geometry_gradient(g, o, uav, tgt, power, prices)
                 return gf[k]
         elif inner == "exposure":
-            # advice 011 §5: unified inner (I) — max-min with low-exposure
+            # advice 011 搂5: unified inner (I) 鈥?max-min with low-exposure
             # constraints.  Score = max-min worst; the exposure LP enforces
             # E_q = sum_i c[i,q] p_iq <= Gamma_q at the current geometry and
             # returns the unified dual prices (lambda, beta, mu).  Geometry is
@@ -830,7 +712,7 @@ def plan_seed(
                     return (float(np.min(res.deflection)), res.deflection,
                             res.power_w, res.prices)
                 c = _exposure_coefficients(uav, tgt, cfg)
-                out = _exposure_maxmin_lp(g, budget, c, gamma_exp_vec)
+                out = constrained_maxmin_lp(g, budget, c, gamma_exp_vec)
                 if out is None:
                     ceiling = np.sum(g * budget[:, None], axis=0)
                     return (-1e6 - float(np.max(np.maximum(
@@ -857,8 +739,11 @@ def plan_seed(
             # evaluation (same first-order convention as exposure c), so the
             # "standoff" knob couples naturally through the constraint.
             def _eval(g):
-                aI = _intercept_coefficients(uav, tgt, cfg, theta_w)
-                out = _exposure_maxmin_lp(g, budget, aI, d_bar_intercept)
+                aI = intercept_coefficients(
+                    uav, tgt, fc=cfg.otfs.fc, g_tx_dBi=cfg.otfs.g_tx_dBi,
+                    height=cfg.scenario.height, kt=cfg.channel.kT,
+                    theta=theta_w)
+                out = constrained_maxmin_lp(g, budget, aI, d_bar_intercept)
                 if out is None:
                     ceiling = np.sum(g * budget[:, None], axis=0)
                     return (-1e6 - float(np.max(np.maximum(
@@ -981,7 +866,7 @@ def plan_seed(
                         delta = delta * (step_budget[k] / nrm)
                     nu = uav.copy()
                     nu[k] = np.clip(uav[k] + delta, 0.0, area)
-                    # Hard safety constraints (advice 011 §3): reject candidates
+                    # Hard safety constraints (advice 011 搂3): reject candidates
                     # that violate UAV separation or target standoff.
                     if (d_sep > 0.0 or d_standoff > 0.0) and _safety_violated(
                             nu, tgt, d_sep, d_standoff):
@@ -1045,7 +930,7 @@ def plan_seed(
     steady_per_target = np.mean(
         np.asarray([entry["pd"] for entry in window], dtype=np.float64), axis=0)
     sorted_q = np.sort(steady_per_target)
-    # advice 012 §11: realized opponent detection audit.  With the FINAL power
+    # advice 012 搂11: realized opponent detection audit.  With the FINAL power
     # allocation p* actually used by the planner at the end of the horizon and
     # the FINAL geometry, compute the realized intercept Deflection
     # D^I_q = sum_i a^I[i,q] p*_iq and the opponent's detection probability
@@ -1055,7 +940,9 @@ def plan_seed(
     # while detection-constrained always does.
     if theta_w is not None and ev is not None and ev[2] is not None:
         p_final = np.maximum(ev[2], 0.0)
-        aI_final = _intercept_coefficients(uav, tgt, cfg, theta_w)
+        aI_final = intercept_coefficients(
+            uav, tgt, fc=cfg.otfs.fc, g_tx_dBi=cfg.otfs.g_tx_dBi,
+            height=cfg.scenario.height, kt=cfg.channel.kT, theta=theta_w)
         d_intercept = np.sum(aI_final * p_final, axis=0)  # (Q,)
         pd_intercept = compute_detection_probabilities(d_intercept, intercept_pfa)
         intercept_pd_max = float(np.max(pd_intercept))
