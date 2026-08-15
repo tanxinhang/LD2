@@ -2983,9 +2983,10 @@ class EnvironmentCore:
                 base[k] = -step * gk / n
 
         try:
-            gain_cur, _ = fixed_owner_gain_matrix(coefficient, selected)
+            gain_cur, owner = fixed_owner_gain_matrix(coefficient, selected)
         except ValueError:
             gain_cur = np.zeros((K, Q))
+            owner = np.zeros(Q, dtype=np.int64)
         ceiling = np.sum(gain_cur * budget[:, None], axis=0)
         weak_order = np.argsort(ceiling)
 
@@ -3018,6 +3019,59 @@ class EnvironmentCore:
         ]
         if Q >= 2:
             candidates.append(radial(int(weak_order[1])))
+
+        # D1.1-B++ gauge-price step: the capability-gauge dual pi* is the
+        # shadow price of the full task set (worst+bottom-k+steady), while
+        # lambda* concentrates on the worst target.  Both price-driven
+        # directions (plus a convex dual x radial combination) join the
+        # candidate set and compete under the exact max-min LP; the D0.95
+        # "L1 uses pi / L3 uses lambda*" split is replaced by candidate
+        # competition so the better direction wins on the actual physics.
+        gauge_step = bool(getattr(
+            self.cfg.marl, 'analytical_movement_gauge_price_step', False))
+        if gauge_step:
+            try:
+                from uav_isac.coordination.capability import (
+                    capability_gauge_pwl_lp_full,
+                    capability_geometry_gradient,
+                )
+                from uav_isac.coordination.pwl_pd import (
+                    chord_lower_bound,
+                    curvature_breakpoints,
+                )
+                from uav_isac.physical.detection import (
+                    minimum_deflection_for_detection_probability,
+                )
+                qos_floors = tuple(float(v) for v in getattr(
+                    self.cfg.marl, 'task_constrained_qos_floors',
+                    (0.60, 0.70, 0.80, 3)))
+                d_min = float(minimum_deflection_for_detection_probability(
+                    np.asarray([qos_floors[0]]), p_fa)[0])
+                if not np.any(ceiling < d_min - 1e-9):
+                    d_max = float(np.max(ceiling)) + 1.0
+                    bps = curvature_breakpoints(
+                        p_fa, d_min, d_max, epsilon=1e-3)
+                    cs, ci = chord_lower_bound(p_fa, bps)
+                    out = capability_gauge_pwl_lp_full(
+                        gain_cur, budget, p_fa,
+                        (qos_floors[0], qos_floors[1], qos_floors[2],
+                         max(1, int(qos_floors[3]))),
+                        cs, ci, d_min)
+                    if out is not None and out[0] <= 1.0 + 1e-6:
+                        _, p_star, pi_star = out
+                        grad_pi = capability_geometry_gradient(
+                            gain_cur, owner, uav, tgt, p_star, pi_star)
+                        pi_step = np.zeros((K, 2), dtype=np.float64)
+                        for k in range(K):
+                            gk = grad_pi[k]
+                            n = float(np.linalg.norm(gk))
+                            if n > 1e-12:
+                                pi_step[k] = -step * gk / n
+                        candidates.append(pi_step)
+                        candidates.append(
+                            0.5 * pi_step + 0.5 * radial(int(weak_order[0])))
+            except (ValueError, ImportError):
+                pass
 
         best = np.zeros((K, 2), dtype=np.float64)
         best_s = float('-inf')

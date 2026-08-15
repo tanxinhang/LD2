@@ -90,6 +90,56 @@ def test_dual_pruning_never_changes_selected_candidate():
             err_msg=f"pruned selection differs at UAV {k}")
 
 
+def test_gauge_price_step_enlarges_candidate_set_and_never_degrades():
+    """D1.1-B++ monotonicity: adding the gauge-price step (and the dual x
+    radial combination) is a candidate-set superset with stay retained, so the
+    exact-LP best score can never be lower than without it."""
+    env = _small_env()
+    rng = np.random.default_rng(20260817)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    gain_cur, owner = fixed_owner_gain_matrix(coefficient, selected)
+    lam, _ = optimal_maxmin_dual_prices(gain_cur, budget)
+    grads = {
+        0: np.array([1.0, 0.5]),
+        1: np.array([-0.3, 0.9]),
+    }
+
+    best_scores = {}
+    for gauge in (True, False):
+        env.core.cfg.marl.analytical_movement_dual_prune = True
+        env.core.cfg.marl.analytical_movement_gauge_price_step = bool(gauge)
+        out = env.core._select_best_movement_candidate(
+            coefficient, selected, budget, uav, tgt, grads, step=2.5)
+        # Re-score the chosen candidate with the same exact-LP scoring the
+        # selector uses (min P_D over targets at the moved geometry).
+        score = _exact_candidate_score(env, coefficient, selected, budget,
+                                       uav, tgt, out)
+        best_scores[gauge] = score
+
+    # The gauge-price candidate set is a superset with stay retained, so the
+    # chosen candidate's exact score must not be lower with it enabled.
+    assert best_scores[True] >= best_scores[False] - 1e-12
+    assert lam is not None
+
+
+def _exact_candidate_score(env, coefficient, selected, budget, uav, tgt,
+                           movement):
+    from uav_isac.coordination.maxmin_power import (
+        fixed_owner_gain_matrix,
+        solve_fixed_structure_maxmin_power_lp,
+    )
+    from uav_isac.physical.detection import compute_detection_probabilities
+    mat = np.zeros_like(uav)
+    for k, delta in movement.items():
+        mat[k] = np.asarray(delta, dtype=np.float64)
+    nu = np.clip(uav + mat, 0.0, 1e9)
+    coeff_c = env.core._friis_rescale_tensor(coefficient, uav, tgt, nu)
+    g_c, _ = fixed_owner_gain_matrix(coeff_c, selected)
+    res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
+    pd = compute_detection_probabilities(res.deflection, env.core.cfg.detection.P_FA)
+    return float(np.min(pd))
+
+
 def test_dual_pruning_reduces_lp_evaluations(monkeypatch):
     env = _small_env()
     rng = np.random.default_rng(20260816)

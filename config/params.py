@@ -235,6 +235,27 @@ class MARLParams:
     # changes the chosen candidate), it only removes provably-dominated LP
     # evaluations.  Default on; set False to reproduce the unpruned path.
     analytical_movement_dual_prune: bool = True
+    # D1.1-B++ (2026-08-16): enrich the multi-candidate L3 candidate set with
+    # a capability-gauge-price step and a dual x radial combination step.
+    # Theory: by the envelope theorem d gamma*/d a_iq = -pi_q* p_iq*, the
+    # gauge dual pi* is the shadow price of the FULL task (worst+bottom-k+
+    # steady), whereas lambda* concentrates on the worst target only.  The
+    # D0.95 design decision "L1 uses pi, L3 uses lambda*" is generalised here
+    # to candidate competition: both price-driven directions (plus a convex
+    # combination with the geometric radial step) are scored by the exact
+    # max-min LP, so the better direction wins on the actual physics instead
+    # of being pre-selected.  The candidate set is a superset of the D1.1-B
+    # set and stay remains a candidate, so the chosen proxy score is monotone
+    # (never degrades); dual pruning (above) bounds the LP budget.
+    #
+    # NEGATIVE RESULT (2026-08-16, recorded honestly): a 2-seed x 40-frame
+    # end-to-end comparison showed mean worst gain ~0 (no measurable benefit).
+    # Theory explains it: in lexicographic mode max-min equilibrates so
+    # weak3 == steady == worst = t* and lambda* is supported on ALL targets
+    # (D1_1A SS6.2), so pi carries no information lambda* lacks and the
+    # D0.95 "L3 driven by lambda*" separation is optimal.  Kept as a
+    # default-off option for reuse under non-equilibrating inner modes.
+    analytical_movement_gauge_price_step: bool = False
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.
