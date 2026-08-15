@@ -33,6 +33,7 @@ class FormalResult:
     csv: str
     qos_tol: float = 0.0
     quarantined: bool = False
+    require_lcb: bool = False
     note: str = ""
 
 
@@ -53,6 +54,19 @@ FORMAL_RESULTS: List[FormalResult] = [
              "paired_eval.csv"),
         qos_tol=1e-6,
         note="0.60-floor float artifact (QoS 0.65 at tol=0), see D1_1A"),
+    FormalResult(
+        name="8/8 lexicographic L1 live (D1.1-A, 20 seeds)",
+        csv="_d095_lex20/paired_eval.csv",
+        note="live eval, same seeds/warm-start as D0.95 baseline"),
+    FormalResult(
+        name="8/8 lex + multi-candidate L3 live (D1.1-B, 20 seeds)",
+        csv="_d095_lexcand20/paired_eval.csv",
+        note="deployment candidate baseline (D1.1-B, 0.975)"),
+    FormalResult(
+        name="8/8 lex + multi-candidate L3 (D1.1-B, 20 seeds) -- LCB enforced",
+        csv="_d095_lexcand20/paired_eval.csv",
+        require_lcb=True,
+        note="audit-recommended Wilson LCB standard"),
     FormalResult(
         name="6/6 cardinality residual (10 seeds) -- QUARANTINED",
         csv=("architecture_v2_scale_k6q6_structure_student_cardinality_"
@@ -88,7 +102,8 @@ def assert_formal_gates(
         path = entry.csv if os.path.isabs(entry.csv) else RESULTS_ROOT + entry.csv
         try:
             aggregates = assert_gate_from_csv(
-                path, qos_tol=entry.qos_tol, require_wilson_lcb=require_lcb)
+                path, qos_tol=entry.qos_tol,
+                require_wilson_lcb=require_lcb or entry.require_lcb)
             item["status"] = "PASS"
             item.update(aggregates)
         except (AssertionError, ValueError, OSError) as exc:
