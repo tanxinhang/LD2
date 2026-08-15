@@ -608,14 +608,20 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
    已新增 `tools/assert_gate_thresholds.py` / `tools/assert_formal_gates.py` 把
    Medium 门槛（含可选 Wilson LCB 强制）脚本化——论文正式声明时应启用
    `--require-lcb`，并注意当前 4/4 的 LCB 0.63 不达 0.70（须在方法学中显式说明）。
-7. **对抗检测约束（advice 012，oracle 级已落地）**：T2 的 exposure 代理量
+7. **对抗检测约束（advice 012，oracle 级已落地 + live 功率层已接入）**：T2 的 exposure 代理量
    （`E_w ≤ Γ_w`）已在 oracle 侧升级为**对方探测能力约束**（`D_w^I ≤ D̄_w^I`，
    三个对方能力等级 weak/medium/strong，`--inner intercept`），三向对比证明
    power-only 与 exposure 在 medium/strong 对手下 75%/100% 被裸发现，而
    detection-constrained 恒成立（P_D^I ≤ ε）。见
-   [`T3_DETECTION_CAPABILITY.md`](T3_DETECTION_CAPABILITY.md)。下一步是把新的
-   攻防对偶价格 `s_iq = λ_q a_iq − μ_w a^I[i,q]` 接入分布式协调（列生成），
-   exposure 正式降级为 baseline。
+   [`T3_DETECTION_CAPABILITY.md`](T3_DETECTION_CAPABILITY.md)。
+   **D1.1-D/E（2026-08-16）已把隐蔽性接入 live 功率路径**：`intercept_constrained_power_enabled`
+   使执行功率满足 `P_D^I ≤ ε` 硬约束（`constrained_maxmin_lp`），lex 模式下与 QoS 地板
+   联合进同一 LP（`qos_constrained_maxmin_lp` 加 intercept 行，三族价格 λ/π/μ）。
+   端到端 4 UAV × 2 seed × 30 帧实测：所有档位 0 违反（约束跨帧保持），QoS 代价随
+   对手强度单调（off/weak 0.703 → medium 0.663 → strong 0.001）——**"strong 对手
+   必须静默"的 oracle 结论在 live 路径复现**。下一步是把新的攻防对偶价格
+   `s_iq = λ_q a_iq − μ_w a^I[i,q]` 接入分布式协调（列生成），exposure 正式降级
+   为 baseline。
 8. **lexicographic L1 部署化（D1.1-A 后）**：D1.1-A 已证明 lex L1（QoS 优先 ≻
    worst 最大化）在 oracle 级把 20-seed mean worst 从 0.671 推到 0.844、QoS
    1.0（20/20，LCB 0.881）——但它是**教师几何起点的离线诊断**。下一步把

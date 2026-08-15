@@ -2065,9 +2065,10 @@ class EnvironmentCore:
                         cs, ci, d_min,
                         intercept_coeff=a_i,
                         intercept_ub=np.full(self.Q, d_bar))
-                    joined = True
+                    joined = out is not None  # feasible joint LP only
             except (ValueError, ImportError):
                 out = None
+                joined = False
         if out is None:
             out = constrained_maxmin_lp(
                 gain, budget, a_i, np.full(self.Q, d_bar))
