@@ -1,0 +1,11 @@
+# D1.1-B (advice 010): bounded multi-candidate trust-region L3 on top of the
+# D1.1-A lexicographic L1 + margin floors.  Each frame the L3 geometry layer
+# evaluates ~5 whole-fleet movement candidates (stay / dual-price step / half
+# step / radial toward the two weakest targets) with the exact max-min LP and
+# executes the best, instead of one normalized gradient step.  Goal: raise the
+# geometry ceiling so BOTH worst and steady (currently pinned ~0.844 by the
+# max-min equalisation) move up together.
+extends: exp_800_k8q8_analytical_l0l1_movement_lex.yaml
+
+marl:
+  analytical_movement_candidates_enabled: true

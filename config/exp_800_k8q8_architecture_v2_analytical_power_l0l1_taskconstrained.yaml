@@ -1,0 +1,5 @@
+# D0.93-A1: task-constrained power (QoS floors as hard constraints).
+extends: exp_800_k8q8_architecture_v2_analytical_power_l0l1.yaml
+
+marl:
+  task_constrained_power_enabled: true

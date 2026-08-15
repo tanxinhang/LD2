@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Sequence
 
 import numpy as np
 
+from uav_isac.physical.channel import compute_noise_power
 from uav_isac.physical.feasibility_oracle import (
     solve_pair_only_oracle,
     solve_power_only_oracle,
@@ -39,6 +40,62 @@ def per_watt_deflection_tensor(
     return coefficient
 
 
+def per_watt_deflection_tensor_from_observables(
+    alpha: np.ndarray,
+    g_dd: np.ndarray,
+    chi_rep: np.ndarray,
+    *,
+    T_sym: float,
+    M: int,
+    N: int,
+    kT: float,
+    bandwidth_hz: float,
+    noise_figure_db: float,
+    g_tx_dbi: float,
+    g_rx_dbi: float,
+    n_cpi: int,
+    g_min: float,
+    use_swerling: bool = False,
+) -> np.ndarray:
+    """Reconstruct power-independent Deflection gain from observables.
+
+    Dividing realized Deflection by power cannot identify an edge when its
+    current target allocation is zero.  In the deterministic non-Swerling
+    model, stored path magnitude, DD gate and report reliability determine the
+    counterfactual coefficient analytically for every supported edge.
+    """
+    path = np.asarray(alpha, dtype=np.float64)
+    dd = np.asarray(g_dd, dtype=np.float64)
+    report = np.asarray(chi_rep, dtype=np.float64)
+    if path.shape != dd.shape or path.shape != report.shape or path.ndim != 3:
+        raise ValueError("alpha/g_dd/chi_rep must share shape (K,K,Q)")
+    if (
+        np.any(~np.isfinite(path)) or np.any(path < 0.0)
+        or np.any(~np.isfinite(dd)) or np.any(dd < 0.0)
+        or np.any(~np.isfinite(report)) or np.any(report < 0.0)
+    ):
+        raise ValueError("physical observables must be finite and non-negative")
+    if bool(use_swerling):
+        raise ValueError(
+            "Swerling realization is not identifiable from alpha/g_dd/chi_rep")
+    noise = compute_noise_power(
+        float(kT), float(bandwidth_hz), float(noise_figure_db))
+    antenna_gain = float(10.0 ** (
+        (float(g_tx_dbi) + float(g_rx_dbi)) / 10.0))
+    scale = float(
+        float(T_sym) * int(M) * int(N) * antenna_gain * int(n_cpi)
+        / max(noise, 1.0e-15)
+    )
+    K = path.shape[0]
+    if path.shape[1] != K:
+        raise ValueError("physical observable tensor must be square in K")
+    active = (
+        (dd >= float(g_min))
+        & (~np.eye(K, dtype=bool)[:, :, None])
+    )
+    return np.where(active, report * path ** 2 * scale, 0.0)
+
+
 def evaluate_physical_feasibility_oracles(
     entries: Iterable,
     sensing_power_w: np.ndarray,
@@ -54,14 +111,25 @@ def evaluate_physical_feasibility_oracles(
     reports_per_receiver: int,
     seed: int,
     detection_fusion_mode: str = "central_oracle",
+    coefficient_override: np.ndarray | None = None,
 ) -> Dict[str, float]:
     """Compare deployed detection to optimized single-role and duplex bounds."""
-    coefficient = per_watt_deflection_tensor(
-        entries,
-        sensing_power_w,
-        num_uavs,
-        num_targets,
-    )
+    if coefficient_override is None:
+        coefficient = per_watt_deflection_tensor(
+            entries,
+            sensing_power_w,
+            num_uavs,
+            num_targets,
+        )
+    else:
+        coefficient = np.asarray(coefficient_override, dtype=np.float64)
+        expected = (int(num_uavs), int(num_uavs), int(num_targets))
+        if coefficient.shape != expected:
+            raise ValueError(
+                "coefficient_override must have shape (K,K,Q)")
+        if np.any(~np.isfinite(coefficient)) or np.any(coefficient < 0.0):
+            raise ValueError(
+                "coefficient_override must be finite and non-negative")
     kwargs = {
         "P_FA": float(p_fa),
         "total_power_w": float(total_power_w),

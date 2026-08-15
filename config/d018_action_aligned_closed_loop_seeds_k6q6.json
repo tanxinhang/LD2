@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "source_bank": "config/stratified_seeds_980_k6q6.json",
+  "selection_rule": "60 evenly spaced ranks from the 368 remaining eligible non-reserved K6Q6 training seeds sorted by difficulty_score_m after excluding every D0.12-D0.17 episode; adjacent selected ranks alternate into 30 calibration and 30 validation episodes",
+  "protected_splits_excluded": ["selection", "stress", "test", "confirmation"],
+  "splits": {
+    "d018_action_aligned_calibration": [
+      361, 163, 232, 548, 839, 56, 761, 565, 816, 628,
+      947, 444, 385, 596, 408, 906, 212, 673, 303, 157,
+      60, 909, 721, 791, 267, 608, 676, 173, 276, 221
+    ],
+    "d018_action_aligned_validation": [
+      592, 611, 300, 308, 473, 314, 716, 337, 326, 44,
+      836, 343, 383, 694, 301, 272, 43, 120, 438, 514,
+      799, 324, 576, 496, 895, 9, 353, 554, 28, 127
+    ]
+  }
+}

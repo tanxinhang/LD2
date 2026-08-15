@@ -25,6 +25,32 @@ from config.params import load_config
 from uav_isac.environment.env_wrapper import UAVISACEnv
 
 
+# Seeds permanently isolated after the 2026-07-29 test-set contamination
+# event.  Keep in sync with uav_isac/agents/trainer.py
+# (QUARANTINED_SEEDS_FALLBACK); tests/test_quarantined_seeds.py locks the set.
+_QUARANTINED_SEEDS_FALLBACK: frozenset[int] = frozenset({795, 747, 105, 860, 2})
+
+
+def load_quarantined_seeds() -> frozenset[int]:
+    """Read the quarantined-seed registry (config/quarantined_seeds.json).
+
+    Falls back to the built-in documented set when the file is missing or
+    malformed, so regenerated banks always exclude the isolated seeds.
+    """
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config", "quarantined_seeds.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        seeds = {int(seed) for seed in payload.get("seeds", [])}
+        if not seeds:
+            return _QUARANTINED_SEEDS_FALLBACK
+        return frozenset(seeds)
+    except (OSError, ValueError, TypeError):
+        return _QUARANTINED_SEEDS_FALLBACK
+
+
 def geometry_difficulty(uav_xy: np.ndarray, target_xy: np.ndarray) -> Dict[str, float]:
     """Return nearest, second-endpoint, and bottleneck-matching distances."""
     uav_xy = np.asarray(uav_xy, dtype=np.float64)
@@ -105,6 +131,12 @@ def generate_seed_bank(
     cfg = load_config(config_path)
     env = UAVISACEnv(config=cfg, seed=0)
     metadata: Dict[int, Dict[str, float]] = {}
+    quarantined = load_quarantined_seeds()
+    candidate_seeds = [
+        int(seed) for seed in candidate_seeds if int(seed) not in quarantined
+    ]
+    if not candidate_seeds:
+        raise ValueError("every candidate seed is quarantined")
     try:
         for seed in candidate_seeds:
             _, info = env.reset(seed=int(seed))
@@ -145,6 +177,7 @@ def generate_seed_bank(
         "source_config": os.path.normpath(config_path),
         "candidate_count": len(metadata),
         "sampling_seed": int(sampling_seed),
+        "quarantined_excluded": sorted(int(seed) for seed in quarantined),
         "nominal_filter": {
             "metric": "worst_nearest_m",
             "max_m": float(nominal_d1_max_m),

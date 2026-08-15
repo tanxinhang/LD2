@@ -10,7 +10,11 @@ where:
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from uav_isac.utils.types import P0Solution, DeflectionEntry
-from uav_isac.physical.detection import compute_weighted_utility
+from uav_isac.physical.detection import utility_from_D
+from uav_isac.environment.maxmin_reward import (
+    concave_saturating_deflection_utility,
+    maxmin_dual_reward,
+)
 
 
 def _qos_summary(P_D_q: np.ndarray) -> Tuple[float, float, float]:
@@ -155,6 +159,8 @@ class RewardComputer:
         alpha_pd: float = 0.0,        # direct P_D weight
         lambda_tail: float = 0.0,     # bottom-3 bonus weight
         lambda_tail_warmup: int = 30, # episodes before tail bonus activates
+        utility_mode: str = "log",    # "log" | "concave" | "maxmin_dual"
+        concave_kappa: float = 1.0,   # saturation scale for the concave utility
     ):
         """
         Args:
@@ -163,6 +169,14 @@ class RewardComputer:
             lambda_report: Weight for communication cost in reward
             eta_mc: Marginal contribution shaping coefficient
             alpha_pd: Weight for direct P_D reward term (0=off)
+            utility_mode: Detection-utility curvature.
+                - "log": ``-log(1-P_D)`` (historical; convex in D).
+                - "concave": ``1-exp(-kappa*D)`` (concave/submodular).
+                - "maxmin_dual": LP-dual-price weighted reward; requires
+                  ``gain_per_watt``/``sensing_budget_w`` in
+                  :meth:`compute_team_reward`.
+            concave_kappa: Saturation scale used by "concave" and, per target,
+                by "maxmin_dual".
         """
         self.omega_q = np.asarray(omega_q, dtype=np.float64)
         self.P_FA = P_FA
@@ -171,6 +185,29 @@ class RewardComputer:
         self.alpha_pd = alpha_pd
         self.lambda_tail = lambda_tail
         self.lambda_tail_warmup = lambda_tail_warmup
+        mode = str(utility_mode)
+        if mode not in ("log", "concave", "maxmin_dual", "tstar", "bargaining"):
+            raise ValueError(
+                "utility_mode must be one of 'log', 'concave', "
+                "'maxmin_dual', 'tstar', 'bargaining'")
+        self.utility_mode = mode
+        self.concave_kappa = float(concave_kappa)
+
+    def _per_target_utility(self, D_q: np.ndarray) -> np.ndarray:
+        """Per-target utility under the configured curvature.
+
+        The ``maxmin_dual`` mode falls back to the concave utility on paths
+        that lack the fixed-owner gain matrix (difference reward / marginal
+        shaping); the team reward itself uses the exact dual price.
+        """
+        values = np.asarray(D_q, dtype=np.float64).reshape(-1)
+        if self.utility_mode == "log":
+            return utility_from_D(values, self.P_FA)
+        return concave_saturating_deflection_utility(
+            values, self.concave_kappa)
+
+    def _weighted_utility(self, D_q: np.ndarray) -> float:
+        return float(np.dot(self.omega_q, self._per_target_utility(D_q)))
 
     def compute_team_utility_from_deflection(
         self, D_q: np.ndarray, total_bits: float = 0.0
@@ -178,8 +215,7 @@ class RewardComputer:
         """Task utility from per-target deflection (no P0 involved). Used for
         fixed-assignment difference reward: same deflection→utility mapping as
         team reward, minus the bits/penalty terms that don't change per frame."""
-        utility = compute_weighted_utility(D_q, self.P_FA, self.omega_q)
-        return float(utility)
+        return self._weighted_utility(D_q)
 
     def compute_team_reward(
         self,
@@ -187,21 +223,69 @@ class RewardComputer:
         total_bits: float,          # total soft info bits reported
         constraint_penalty: float,  # total constraint violation penalty
         P_D_q: np.ndarray = None,   # (Q,) direct detection probs (optional, for alpha_pd>0)
+        gain_per_watt: np.ndarray = None,   # (K,Q) fixed-owner per-watt gains
+        sensing_budget_w: np.ndarray = None,  # (K,) per-UAV sensing budget
     ) -> float:
         """Compute team-level reward.
 
-        r_team = (1-α_pd) * weighted_utility + α_pd * mean_P_D - lambda * bits - penalty
+        r_team = (1-α_pd) * utility + α_pd * mean_P_D - lambda * bits - penalty
+
+        ``utility`` follows ``self.utility_mode``:
+        - "log" / "concave": ``sum_q omega_q * U(D_q)``;
+        - "maxmin_dual": ``sum_q lambda*_q * U(D_q)`` with ``lambda*`` the
+          fixed-owner max-min LP dual price (requires ``gain_per_watt`` and
+          ``sensing_budget_w``).  If those are missing the mode degrades to the
+          concave utility.
 
         Args:
             D_q_star: Per-target cumulative Deflection
             total_bits: Total bits reported this frame
             constraint_penalty: Total constraint violation penalty
             P_D_q: Per-target detection probabilities (for direct P_D term)
+            gain_per_watt: Fixed-owner per-watt gain matrix (maxmin_dual only)
+            sensing_budget_w: Per-UAV sensing budget (maxmin_dual only)
 
         Returns:
             Team reward (scalar)
         """
-        utility = compute_weighted_utility(D_q_star, self.P_FA, self.omega_q)
+        if (
+            self.utility_mode == "maxmin_dual"
+            and gain_per_watt is not None
+            and sensing_budget_w is not None
+        ):
+            utility, _ = maxmin_dual_reward(
+                D_q_star,
+                gain_per_watt,
+                sensing_budget_w,
+                kappa=self.concave_kappa,
+            )
+        elif (
+            self.utility_mode == "bargaining"
+            and gain_per_watt is not None
+            and sensing_budget_w is not None
+        ):
+            # D0.92: the reward is the bargaining value eta = min_q r_q, the
+            # common fraction of each target's own achievable headroom.
+            from uav_isac.coordination.bargaining_power import (
+                solve_fixed_structure_bargaining_lp,
+            )
+            result = solve_fixed_structure_bargaining_lp(
+                gain_per_watt, sensing_budget_w)
+            utility = float(result.bargaining_value)
+        elif self.utility_mode == "tstar":
+            # Reserve-first max-min LP value mapped to detection probability.
+            # When the analytical power hook runs, D_q_star is already the
+            # LP-optimal deflection, so min_q P_D(D_q) equals the LP value t*.
+            from uav_isac.physical.detection import (
+                compute_detection_probabilities,
+            )
+            pd = compute_detection_probabilities(
+                np.asarray(D_q_star, dtype=np.float64).reshape(-1),
+                self.P_FA,
+            )
+            utility = float(np.min(pd))
+        else:
+            utility = self._weighted_utility(D_q_star)
         if self.alpha_pd > 0 and P_D_q is not None:
             pd_reward = float(np.dot(self.omega_q, P_D_q))
             # Bottom-3 bonus: gentle tail protection
@@ -265,7 +349,7 @@ class RewardComputer:
         # Compute full utility
         D_full = aggregate(selected_set)
 
-        U_full = compute_weighted_utility(D_full, self.P_FA, self.omega_q)
+        U_full = self._weighted_utility(D_full)
 
         # Compute utility without each UAV's contributions
         marginal_contribs = {}
@@ -277,7 +361,7 @@ class RewardComputer:
             ]
             D_without_k = aggregate(edges_without_k)
 
-            U_without_k = compute_weighted_utility(D_without_k, self.P_FA, self.omega_q)
+            U_without_k = self._weighted_utility(D_without_k)
             marginal_contribs[k] = U_full - U_without_k
 
         return marginal_contribs

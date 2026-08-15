@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "source_bank": "config/stratified_seeds_980_k6q6.json",
+  "selection_rule": "20 midpoint ranks between the D0.12 calibration ranks among the same 468 eligible non-reserved training seeds sorted by difficulty_score_m; rank 245 was already used and was replaced by adjacent rank 246",
+  "protected_splits_excluded": ["selection", "stress", "test", "confirmation"],
+  "splits": {
+    "d016_supplemental_calibration": [
+      113, 95, 627, 355, 618, 189, 402, 152, 625, 973,
+      136, 368, 389, 560, 632, 655, 192, 171, 573, 563
+    ]
+  }
+}

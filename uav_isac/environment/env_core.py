@@ -15,6 +15,8 @@ Step pipeline:
 
 import copy
 import time
+import os
+import json
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -56,6 +58,10 @@ from uav_isac.environment.communication import (
 from uav_isac.coordination.qpd import (
     local_primal_dual_update,
     update_virtual_queue,
+)
+from uav_isac.coordination.maxmin_power import (
+    MaxMinPowerResult,
+    fixed_owner_gain_matrix,
 )
 from uav_isac.coordination.hyperedge import (
     decode_offer_stream,
@@ -295,6 +301,59 @@ class EnvironmentCore:
         if self._joint_isac_power_enabled and self._comm_mode != 'cost_aware':
             raise ValueError(
                 'joint_isac_power_enabled requires learned_comm_mode=cost_aware')
+        self._analytical_sensing_power_enabled = bool(getattr(
+            ma, 'analytical_sensing_power_enabled', False))
+        if self._analytical_sensing_power_enabled and not self._joint_isac_power_enabled:
+            raise ValueError(
+                'analytical_sensing_power_enabled requires joint_isac_power_enabled')
+        self._analytical_sensing_power_reserve_pd = float(getattr(
+            ma, 'analytical_sensing_power_reserve_pd', 0.0))
+        self._analytical_structure_ranking_enabled = bool(getattr(
+            ma, 'analytical_structure_ranking_enabled', False))
+        if (self._analytical_structure_ranking_enabled
+                and not self._analytical_sensing_power_enabled):
+            raise ValueError(
+                'analytical_structure_ranking_enabled requires '
+                'analytical_sensing_power_enabled')
+        self._bargaining_objective_enabled = bool(getattr(
+            ma, 'bargaining_objective_enabled', False))
+        if (self._bargaining_objective_enabled
+                and not self._analytical_sensing_power_enabled):
+            raise ValueError(
+                'bargaining_objective_enabled requires '
+                'analytical_sensing_power_enabled')
+        self._analytical_comm_power_enabled = bool(getattr(
+            ma, 'analytical_comm_power_enabled', False))
+        if (self._analytical_comm_power_enabled
+                and not self._joint_isac_power_enabled):
+            raise ValueError(
+                'analytical_comm_power_enabled requires '
+                'joint_isac_power_enabled')
+        self._task_constrained_power_enabled = bool(getattr(
+            ma, 'task_constrained_power_enabled', False))
+        if (self._task_constrained_power_enabled
+                and not self._analytical_sensing_power_enabled):
+            raise ValueError(
+                'task_constrained_power_enabled requires '
+                'analytical_sensing_power_enabled')
+        self._analytical_movement_enabled = bool(getattr(
+            ma, 'analytical_movement_enabled', False))
+        if (self._analytical_movement_enabled
+                and not self._analytical_structure_ranking_enabled):
+            raise ValueError(
+                'analytical_movement_enabled requires '
+                'analytical_structure_ranking_enabled')
+        self._analytical_movement_candidates_enabled = bool(getattr(
+            ma, 'analytical_movement_candidates_enabled', False))
+        self._last_analytical_power_balance_error = 0.0
+        self._last_analytical_dual_prices = None
+        # D1.1-A audit hook (env var DSH_LEX_AUDIT): per-frame lex diagnostics.
+        self._lex_audit_path = (os.environ.get('DSH_LEX_AUDIT', '') or '').strip()
+        self._lex_mode = 'none'
+        self._lex_t_star = None
+        self._last_analytical_gain = None
+        self._last_analytical_budget = None
+        self._last_bargaining_value = None
         self._isac_total_power_w = max(
             0.0, float(getattr(ua, 'P_isac_total',
                                ua.P_sense + getattr(ma, 'comm_tx_power_w', 0.25))))
@@ -393,6 +452,8 @@ class EnvironmentCore:
             eta_mc=ma.eta_mc,
             alpha_pd=getattr(ma, 'alpha_pd', 0.0),
             lambda_tail=getattr(ma, 'lambda_tail', 0.0),
+            utility_mode=getattr(ma, 'reward_utility_mode', 'log'),
+            concave_kappa=getattr(ma, 'reward_concave_kappa', 1.0),
         )
 
         # Auditable coordination shaping. Stage zero computes diagnostics but
@@ -742,6 +803,33 @@ class EnvironmentCore:
         self._current_sensing_power_w = np.full(
             (self.K, self.Q), float(ua.P_sense), dtype=np.float64)
         self._last_isac_metrics: Dict[str, object] = {}
+        # Optional information-equivalent distributed structure surrogate.
+        # The trainer assembles this graph only from per-UAV local features;
+        # realized detection below continues to use the true physical echo.
+        self._external_structure_edge_values: Optional[np.ndarray] = None
+        self._external_structure_candidate_mask: Optional[np.ndarray] = None
+        self._dynamic_local_search_coordinator = None
+        # Optional physical transport for the same frozen surrogate.  Each UAV
+        # broadcasts its per-target Tx/Rx endpoint embeddings through the
+        # existing cost-aware U2U channel.  A sender's public cache entry is
+        # advanced atomically only after every peer receives the broadcast,
+        # so all decentralized nodes reconstruct one consistent graph.
+        self._structure_student_channel_enabled = False
+        self._structure_student_decoder = None
+        self._structure_student_endpoint_width = 0
+        self._structure_student_bits_per_dim = 8
+        self._structure_student_adaptive_min_bits_per_dim = 0
+        self._structure_student_min_comm_fraction = 0.01
+        self._pending_structure_student_protocol: Dict[int, np.ndarray] = {}
+        self._structure_student_public_protocol = np.zeros(
+            (self.K, self.Q, 0), dtype=np.float64)
+        self._structure_student_public_valid = np.zeros(
+            self.K, dtype=bool)
+        self._structure_student_public_last_seen = np.full(
+            self.K, -10**9, dtype=np.int64)
+        # (due_frame, sender, protocol, sent_frame)
+        self._structure_student_mailbox: list = []
+        self._structure_student_metrics: Dict[str, object] = {}
         self._received_comm_msgs: Dict[int, Dict[int, np.ndarray]] = {}
         self._received_comm_meta: Dict[int, Dict[int, dict]] = {}
         self._comm_message_ttl_frames = max(
@@ -861,7 +949,13 @@ class EnvironmentCore:
         """
         self.t = 0
         self.prev_P_D = None
+        self.prev_P_D_local = {}
         self._coord_pd_ema = None
+        # D1.1-A audit state (DSH_LEX_AUDIT diagnostic) — fresh per episode.
+        self._lex_mode = 'none'
+        self._lex_t_star = None
+        self._last_analytical_gain = None
+        self._last_analytical_budget = None
         self._prev_obs = {}  # clear history on reset
         self._gru_hidden = {}  # clear GRU state on reset
         self._comm_msgs = {}
@@ -933,6 +1027,21 @@ class EnvironmentCore:
         self._current_sensing_power_w = np.full(
             (self.K, self.Q), float(self.cfg.uav.P_sense), dtype=np.float64)
         self._last_isac_metrics = {}
+        self._external_structure_edge_values = None
+        self._external_structure_candidate_mask = None
+        if self._dynamic_local_search_coordinator is not None:
+            self._dynamic_local_search_coordinator.reset()
+        self._pending_structure_student_protocol = {}
+        self._structure_student_public_protocol = np.zeros(
+            (self.K, self.Q, self._structure_student_endpoint_width),
+            dtype=np.float64,
+        )
+        self._structure_student_public_valid = np.zeros(
+            self.K, dtype=bool)
+        self._structure_student_public_last_seen = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._structure_student_mailbox = []
+        self._structure_student_metrics = {}
         self._received_comm_msgs = {}
         self._received_comm_meta = {}
         self._comm_mailbox = []
@@ -1167,6 +1276,277 @@ class EnvironmentCore:
                     else np.full(self.Q, 1.0 / max(self.Q, 1)))
         if self._hyperedge_enabled:
             self._prepare_hyperedge_submission()
+
+    def submit_structure_student_edge_values(
+        self,
+        edge_values: np.ndarray,
+    ) -> None:
+        """Submit a frozen student's directed K-by-K-by-Q ranking graph."""
+        values = np.asarray(edge_values, dtype=np.float64)
+        expected = (self.K, self.K, self.Q)
+        if values.shape != expected:
+            raise ValueError(
+                f"structure student edge graph must have shape {expected}")
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                "structure student edge graph contains non-finite values")
+        values = np.maximum(values, 0.0)
+        for k in range(self.K):
+            values[k, k, :] = 0.0
+        self._external_structure_edge_values = values.copy()
+
+    def submit_structure_student_candidate_mask(
+        self,
+        candidate_mask: np.ndarray,
+    ) -> None:
+        """Submit the public, locally generated sparse candidate graph."""
+        mask = np.asarray(candidate_mask, dtype=bool)
+        expected = (self.K, self.K, self.Q)
+        if mask.shape != expected:
+            raise ValueError(
+                f"structure candidate mask must have shape {expected}")
+        mask = mask.copy()
+        mask[np.arange(self.K), np.arange(self.K), :] = False
+        self._external_structure_candidate_mask = mask
+
+    def configure_dynamic_local_search(self, coordinator) -> None:
+        """Install a stateful C1.7 structure controller for evaluation."""
+        if not self._p0_maxmin_pairing_enabled:
+            raise ValueError(
+                "dynamic local search requires max-min pairing mode")
+        self._dynamic_local_search_coordinator = coordinator
+        self._dynamic_local_search_coordinator.reset()
+
+    def configure_structure_student_channel(
+        self,
+        decoder,
+        *,
+        bits_per_dim: int = 8,
+        adaptive_min_bits_per_dim: int = 0,
+        min_comm_fraction: float = 0.01,
+        allow_cardinality_mismatch: bool = False,
+    ) -> None:
+        """Enable physical U2U transport of frozen-student endpoint Tokens."""
+        if self._comm_mode != 'cost_aware' or self._inter_uav_comm is None:
+            raise ValueError(
+                "structure-student transport requires cost-aware U2U "
+                "communication")
+        cardinality_mismatch = (
+            decoder.num_uavs != self.K or decoder.num_targets != self.Q)
+        if cardinality_mismatch and not allow_cardinality_mismatch:
+            raise ValueError(
+                "structure-student decoder K/Q does not match environment")
+        if cardinality_mismatch and not bool(getattr(
+                decoder, 'cardinality_equivariant', False)):
+            raise ValueError(
+                "structure-student decoder does not declare cardinality "
+                "equivariance")
+        width = 2 * int(decoder.model.endpoint_dim)
+        if width <= 0:
+            raise ValueError("structure-student endpoint width must be positive")
+        self._structure_student_channel_enabled = True
+        self._structure_student_decoder = decoder
+        self._structure_student_endpoint_width = width
+        self._structure_student_bits_per_dim = max(
+            1, int(bits_per_dim))
+        adaptive_min = int(adaptive_min_bits_per_dim)
+        self._structure_student_adaptive_min_bits_per_dim = (
+            int(np.clip(
+                adaptive_min,
+                1,
+                self._structure_student_bits_per_dim,
+            ))
+            if adaptive_min > 0 else 0
+        )
+        self._structure_student_min_comm_fraction = float(np.clip(
+            min_comm_fraction,
+            0.0,
+            self._comm_power_fraction_max,
+        ))
+        self._pending_structure_student_protocol = {}
+        self._structure_student_public_protocol = np.zeros(
+            (self.K, self.Q, width), dtype=np.float64)
+        self._structure_student_public_valid = np.zeros(
+            self.K, dtype=bool)
+        self._structure_student_public_last_seen = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._structure_student_mailbox = []
+        self._structure_student_metrics = {}
+        self._external_structure_edge_values = None
+
+    def _select_structure_student_bits_per_dim(
+        self,
+        sender: int,
+        uav_positions: np.ndarray,
+        tx_powers_w: Optional[Dict[int, float]],
+        extra_dimensions: Dict[int, int],
+        active_sender_count: int,
+        structure_endpoint_dimensions: int,
+    ) -> tuple[int, int]:
+        """Choose the highest structural precision feasible for one broadcast.
+
+        The projection uses only quantities available to a broadcasting UAV's
+        link layer: its selected RF power, packet size, deadline, bandwidth and
+        peer CSI/range.  It therefore adapts representation precision without
+        changing the frozen Actor or consuming privileged sensing evidence.
+        The returned header width signals the selected structural code rate.
+        """
+        maximum = int(self._structure_student_bits_per_dim)
+        minimum = int(self._structure_student_adaptive_min_bits_per_dim)
+        if minimum <= 0 or minimum >= maximum:
+            return maximum, 0
+
+        num_levels = maximum - minimum + 1
+        rate_header_bits = int(np.ceil(np.log2(num_levels)))
+        rate_index = int(self._pending_comm_rates.get(sender, 0))
+        rate_index = int(np.clip(
+            rate_index,
+            0,
+            len(self._inter_uav_comm.rate_bits_per_dim) - 1,
+        ))
+        actor_bits_per_dim = int(
+            self._inter_uav_comm.rate_bits_per_dim[rate_index])
+        actor_dimensions = (
+            self._inter_uav_comm._active_dimensions(
+                self._pending_comm_token_masks.get(sender))
+            + max(0, int(extra_dimensions.get(sender, 0)))
+        )
+        effective_bandwidth_hz = (
+            self._inter_uav_comm.bandwidth_hz
+            / max(1, int(active_sender_count))
+        )
+        sender_power_w = (
+            self._inter_uav_comm.tx_power_w
+            if tx_powers_w is None
+            else max(float(tx_powers_w.get(
+                sender, self._inter_uav_comm.tx_power_w)), 0.0)
+        )
+
+        for bits in range(maximum, minimum - 1, -1):
+            payload_bits = (
+                actor_dimensions * actor_bits_per_dim
+                + structure_endpoint_dimensions * bits
+                + rate_header_bits
+            )
+            packet_bits = self._inter_uav_comm.header_bits + payload_bits
+            feasible = True
+            for receiver in range(self.K):
+                if receiver == sender:
+                    continue
+                snr_db, _, _, latency_s = self._inter_uav_comm._link(
+                    uav_positions[sender],
+                    uav_positions[receiver],
+                    packet_bits,
+                    effective_bandwidth_hz,
+                    sender_power_w,
+                )
+                if (
+                    snr_db < self._inter_uav_comm.snr_threshold_db
+                    or latency_s > self._inter_uav_comm.deadline_s
+                ):
+                    feasible = False
+                    break
+            if feasible:
+                return bits, rate_header_bits
+        return minimum, rate_header_bits
+
+    def submit_structure_student_endpoint_protocol(
+        self,
+        protocol: np.ndarray,
+    ) -> None:
+        """Queue every UAV's bounded per-target Tx/Rx endpoint stream."""
+        if not self._structure_student_channel_enabled:
+            raise RuntimeError(
+                "structure-student channel has not been configured")
+        values = np.asarray(protocol, dtype=np.float64)
+        expected = (
+            self.K, self.Q, self._structure_student_endpoint_width)
+        if values.shape != expected:
+            raise ValueError(
+                f"structure-student endpoint protocol must have shape "
+                f"{expected}")
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                "structure-student endpoint protocol contains non-finite "
+                "values")
+        values = np.clip(values, -1.0, 1.0)
+        self._pending_structure_student_protocol = {
+            sender: values[sender].copy()
+            for sender in range(self.K)
+        }
+        # Structural endpoints use a separate codebook from the actor's latent
+        # Token.  Preserve the actor's learned 4-bit/silence distribution while
+        # reserving only the explicit pilot power needed by a mandatory
+        # structural packet.
+        if self._joint_isac_power_enabled:
+            for sender in range(self.K):
+                self._pending_comm_power_fractions[sender] = max(
+                    float(self._pending_comm_power_fractions.get(
+                        sender, 0.0)),
+                    self._structure_student_min_comm_fraction,
+                )
+
+    def structure_student_protocol_due_next_step(self) -> bool:
+        """Whether the next frame can consume a newly encoded structure graph.
+
+        Fixed Hold-N projection only reads ranking edges on its scheduled solve
+        frames.  Event-triggered projection remains conservative and requests
+        a packet every frame because its crisis condition is evaluated after
+        the physical graph has been formed.
+        """
+        if not self._structure_student_channel_enabled:
+            return False
+        if self._p0_maxmin_event_triggered_enabled:
+            return True
+        if not self._p0_maxmin_pairing_enabled:
+            return True
+        next_frame = int(self.t) + 1
+        hold_frames = max(
+            1, int(self._p0_maxmin_pairing_hold_frames))
+        return bool(
+            self._cached_p0_solution is None
+            or next_frame == 1
+            or next_frame % hold_frames == 0
+        )
+
+    def _merge_structure_student_public_protocol(
+        self,
+        sender: int,
+        protocol: np.ndarray,
+        sent_frame: int,
+    ) -> None:
+        """Atomically publish one sender version after successful multicast."""
+        sender = int(sender)
+        values = np.asarray(protocol, dtype=np.float64)
+        expected = (self.Q, self._structure_student_endpoint_width)
+        if not (0 <= sender < self.K) or values.shape != expected:
+            raise ValueError("invalid structure-student public endpoint packet")
+        self._structure_student_public_protocol[sender] = values
+        self._structure_student_public_valid[sender] = True
+        self._structure_student_public_last_seen[sender] = int(sent_frame)
+
+    def _refresh_structure_student_edges(self) -> None:
+        """Decode the common cached endpoint table into the ranking graph."""
+        if (
+            not self._structure_student_channel_enabled
+            or self._structure_student_decoder is None
+        ):
+            return
+        valid = self._structure_student_public_valid.copy()
+        if np.sum(valid) < 2:
+            # Never fall through to the environment's native physical ranking
+            # when the distributed structural channel is unavailable.  That
+            # would turn packet loss into access to a privileged centralized
+            # graph.  An explicit zero graph is the auditable fail-closed
+            # behavior until at least one directed peer pair is reconstructable.
+            self.submit_structure_student_edge_values(np.zeros(
+                (self.K, self.K, self.Q), dtype=np.float64))
+            return
+        values = self._structure_student_decoder.predict_from_endpoint_protocol(
+            self._structure_student_public_protocol,
+            valid_senders=valid,
+        )[0]
+        self.submit_structure_student_edge_values(values)
 
     def _prepare_hyperedge_submission(self) -> None:
         """Append a physically charged local Tx/Rx/deficit offer stream."""
@@ -1460,6 +1840,57 @@ class EnvironmentCore:
             decoded['queue'][active])
         self._qpd_received_last_seen[receiver, sender, active] = self.t
 
+    def _compute_analytical_min_comm_power(
+        self, uav_positions: np.ndarray,
+    ) -> np.ndarray:
+        """Analytic minimum broadcast power per sender (L0 comm-slack recovery).
+
+        Direct inversion of the orthogonal-U2U Shannon link model: for sender i,
+        the minimum power to meet the SNR/deadline criterion for EVERY receiver
+        is max_j (Gamma_req * N0 * B_eff / g_ij).  Transport semantics are
+        unchanged; only the link margin is reclaimed into the sensing budget.
+        """
+        comm = self._inter_uav_comm
+        K = self.K
+        result = np.zeros(K, dtype=np.float64)
+        active = np.zeros(K, dtype=bool)
+        payload = np.zeros(K, dtype=np.float64)
+        for k in range(K):
+            active_dimensions = comm._active_dimensions(
+                self._pending_comm_token_masks.get(k))
+            structure_bits = (
+                self.Q * self._structure_student_endpoint_width
+                * self._structure_student_bits_per_dim
+                if k in self._pending_structure_student_protocol else 0
+            )
+            if k in self._pending_comm_messages:
+                bits = comm.payload_bits(
+                    self._pending_comm_rates.get(k, 0),
+                    active_dimensions=active_dimensions)
+                if bits > 0 or structure_bits > 0:
+                    active[k] = True
+                    payload[k] = float(bits + structure_bits)
+        n_active = max(1, int(np.sum(active)))
+        b_eff = comm.bandwidth_hz / n_active
+        gamma_th = float(10.0 ** (comm.snr_threshold_db / 10.0))
+        n0_b = comm.kT * b_eff * comm.noise_figure_linear
+        t_win = max(comm.deadline_s - comm.processing_delay_s, 1e-12)
+        for i in range(K):
+            if not active[i] or payload[i] <= 0.0:
+                continue
+            r_req = payload[i] / t_win
+            gamma_rate = float(2.0 ** (r_req / b_eff) - 1.0)
+            gamma_req = max(gamma_th, gamma_rate)
+            for j in range(K):
+                if j == i:
+                    continue
+                d = max(float(np.linalg.norm(
+                    uav_positions[i] - uav_positions[j])), 1.0)
+                path_gain = (comm.wavelength / (4.0 * np.pi * d)) ** 2
+                g = comm.antenna_gain_linear * path_gain
+                result[i] = max(result[i], gamma_req * n0_b / max(g, 1e-30))
+        return result
+
     def _process_learned_communications(
         self, uav_positions: np.ndarray,
     ) -> CommunicationStepStats:
@@ -1474,18 +1905,39 @@ class EnvironmentCore:
             self._current_comm_power_w = np.zeros(self.K, dtype=np.float64)
             self._current_sensing_power_w = np.zeros(
                 (self.K, self.Q), dtype=np.float64)
+            analytical_power = (
+                self._compute_analytical_min_comm_power(uav_positions)
+                if self._analytical_comm_power_enabled else None
+            )
             for k in range(self.K):
                 active_dimensions = self._inter_uav_comm._active_dimensions(
                     self._pending_comm_token_masks.get(k))
+                structure_bits = (
+                    self.Q
+                    * self._structure_student_endpoint_width
+                    * self._structure_student_bits_per_dim
+                    if k in self._pending_structure_student_protocol
+                    else 0
+                )
                 active = (
                     k in self._pending_comm_messages
-                    and self._inter_uav_comm.payload_bits(
-                        self._pending_comm_rates.get(k, 0),
-                        active_dimensions=active_dimensions) > 0
+                    and (
+                        self._inter_uav_comm.payload_bits(
+                            self._pending_comm_rates.get(k, 0),
+                            active_dimensions=active_dimensions) > 0
+                        or structure_bits > 0
+                    )
                 )
                 fraction = (self._pending_comm_power_fractions.get(k, 0.0)
                             if active else 0.0)
-                p_comm = self._isac_total_power_w * fraction
+                if analytical_power is not None and active:
+                    # L0: use the analytic minimum (<= learned fraction).
+                    p_comm = min(
+                        self._isac_total_power_w * fraction,
+                        analytical_power[k],
+                    )
+                else:
+                    p_comm = self._isac_total_power_w * fraction
                 p_sense = self._isac_total_power_w - p_comm
                 weights = self._pending_sensing_weights.get(
                     k, np.full(self.Q, 1.0 / max(self.Q, 1)))
@@ -1513,6 +1965,27 @@ class EnvironmentCore:
             self._hyperedge_received_offer[expired_hyperedge] = 0.0
             self._hyperedge_received_last_seen[
                 expired_hyperedge] = -10**9
+        if self._structure_student_channel_enabled:
+            future_structure_mail = []
+            for (due_frame, sender, protocol,
+                 sent_frame) in self._structure_student_mailbox:
+                if int(due_frame) <= self.t:
+                    self._merge_structure_student_public_protocol(
+                        int(sender), protocol, int(sent_frame))
+                else:
+                    future_structure_mail.append((
+                        due_frame, sender, protocol, sent_frame))
+            self._structure_student_mailbox = future_structure_mail
+            expired_structure = (
+                self.t - self._structure_student_public_last_seen
+                > self._comm_message_ttl_frames
+            )
+            self._structure_student_public_protocol[
+                expired_structure] = 0.0
+            self._structure_student_public_valid[
+                expired_structure] = False
+            self._structure_student_public_last_seen[
+                expired_structure] = -10**9
         for receiver in range(self.K):
             old_msgs = self._received_comm_msgs.get(receiver, {})
             old_meta = self._received_comm_meta.get(receiver, {})
@@ -1594,6 +2067,59 @@ class EnvironmentCore:
                     quantized, mask)
                 self._hyperedge_local_offer[
                     int(sender), active] = decoded[active]
+        quantized_structure_protocol: Dict[int, np.ndarray] = {}
+        selected_structure_bits: Dict[int, int] = {}
+        structure_endpoint_dimensions = (
+            self.Q * self._structure_student_endpoint_width)
+        exact_extra_payload_bits: Dict[int, int] = {}
+        if self._structure_student_channel_enabled:
+            active_sender_count = 0
+            for candidate_sender in range(self.K):
+                if candidate_sender not in self._pending_comm_messages:
+                    continue
+                active_dimensions = (
+                    self._inter_uav_comm._active_dimensions(
+                        self._pending_comm_token_masks.get(candidate_sender))
+                    + max(0, int(extra_dimensions.get(
+                        candidate_sender, 0)))
+                )
+                learned_payload = self._inter_uav_comm.payload_bits(
+                    self._pending_comm_rates.get(candidate_sender, 0),
+                    active_dimensions=active_dimensions,
+                )
+                if (
+                    learned_payload > 0
+                    or candidate_sender
+                    in self._pending_structure_student_protocol
+                ):
+                    active_sender_count += 1
+            for sender, protocol in (
+                    self._pending_structure_student_protocol.items()):
+                selected_bits, rate_header_bits = (
+                    self._select_structure_student_bits_per_dim(
+                        int(sender),
+                        uav_positions,
+                        tx_powers_w,
+                        extra_dimensions,
+                        active_sender_count,
+                        structure_endpoint_dimensions,
+                    )
+                )
+                selected_structure_bits[int(sender)] = int(selected_bits)
+                exact_extra_payload_bits[sender] = (
+                    structure_endpoint_dimensions
+                    * selected_bits
+                    + rate_header_bits
+                )
+                quantized_structure_protocol[sender] = (
+                    self._inter_uav_comm.quantize_values_at_bits(
+                        np.asarray(protocol).reshape(-1),
+                        selected_bits,
+                    ).reshape(
+                        self.Q,
+                        self._structure_student_endpoint_width,
+                    )
+                )
 
         deliveries, stats = self._inter_uav_comm.transmit(
             self._pending_comm_messages,
@@ -1602,6 +2128,7 @@ class EnvironmentCore:
             tx_powers_w=tx_powers_w,
             token_masks=self._pending_comm_token_masks,
             extra_payload_dimensions=extra_dimensions,
+            extra_payload_bits=exact_extra_payload_bits,
         )
         # A sender always knows the sparse claim mask it just put on air. Keep
         # this local state through observation construction; peer copies still
@@ -1613,6 +2140,7 @@ class EnvironmentCore:
             has_payload = sender in self._pending_comm_messages
             active_dims = self._inter_uav_comm._active_dimensions(
                 self._pending_comm_token_masks.get(sender))
+            active_dims += int(extra_dimensions.get(sender, 0))
             active = (
                 has_payload
                 and self._inter_uav_comm.payload_bits(
@@ -1681,6 +2209,85 @@ class EnvironmentCore:
                     due_frame, item.receiver, item.sender, item.message.copy(),
                     metadata))
 
+        structure_attempted = 0
+        structure_delivered = 0
+        structure_payload_bits = 0.0
+        if self._structure_student_channel_enabled:
+            deliveries_by_sender: Dict[int, list] = {}
+            for item in deliveries:
+                deliveries_by_sender.setdefault(
+                    int(item.sender), []).append(item)
+            for sender, protocol in quantized_structure_protocol.items():
+                structure_attempted += 1
+                structure_payload_bits += float(
+                    exact_extra_payload_bits[int(sender)])
+                sender_deliveries = deliveries_by_sender.get(
+                    int(sender), [])
+                receivers = {
+                    int(item.receiver) for item in sender_deliveries
+                }
+                if len(receivers) != max(self.K - 1, 0):
+                    continue
+                structure_delivered += 1
+                due_frame = self.t + max(
+                    0,
+                    max(
+                        (int(item.delay_frames)
+                         for item in sender_deliveries),
+                        default=1,
+                    ) - 1,
+                )
+                if due_frame <= self.t:
+                    self._merge_structure_student_public_protocol(
+                        int(sender), protocol, int(self.t))
+                else:
+                    self._structure_student_mailbox.append((
+                        due_frame,
+                        int(sender),
+                        protocol.copy(),
+                        int(self.t),
+                    ))
+
+            self._refresh_structure_student_edges()
+            valid = self._structure_student_public_valid
+            ages = (
+                self.t
+                - self._structure_student_public_last_seen[valid]
+            )
+            self._structure_student_metrics = {
+                'structure_student_channel_enabled': 1.0,
+                'structure_student_endpoint_width': float(
+                    self._structure_student_endpoint_width),
+                'structure_student_bits_per_dim': float(
+                    self._structure_student_bits_per_dim),
+                'structure_student_adaptive_min_bits_per_dim': float(
+                    self._structure_student_adaptive_min_bits_per_dim),
+                'structure_student_selected_bits_per_dim': float(np.mean(
+                    list(selected_structure_bits.values()) or [
+                        self._structure_student_bits_per_dim])),
+                'structure_student_min_comm_fraction': float(
+                    self._structure_student_min_comm_fraction),
+                'structure_student_payload_bits': float(
+                    structure_payload_bits),
+                'structure_student_atomic_attempted_senders': float(
+                    structure_attempted),
+                'structure_student_atomic_delivered_senders': float(
+                    structure_delivered),
+                'structure_student_atomic_delivery_rate': float(
+                    structure_delivered / structure_attempted)
+                if structure_attempted > 0 else 1.0,
+                'structure_student_public_valid_fraction': float(
+                    np.mean(valid)),
+                'structure_student_insufficient_cache': float(
+                    np.sum(valid) < 2),
+                'structure_student_public_mean_age_frames': float(
+                    np.mean(ages)) if ages.size else 0.0,
+                'structure_student_public_max_age_frames': float(
+                    np.max(ages)) if ages.size else 0.0,
+            }
+        else:
+            self._structure_student_metrics = {}
+
         for sender, energy_j in stats.per_sender_energy_j.items():
             if 0 <= sender < len(self.uavs):
                 self.uavs[sender].battery = max(
@@ -1713,12 +2320,15 @@ class EnvironmentCore:
             }
         else:
             self._last_isac_metrics = {}
+        self._last_isac_metrics.update(
+            self._structure_student_metrics)
 
         self._pending_comm_messages = {}
         self._pending_comm_rates = {}
         self._pending_comm_token_masks = {}
         self._pending_qpd_protocol = {}
         self._pending_hyperedge_protocol = {}
+        self._pending_structure_student_protocol = {}
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
         self._received_comm_msgs = inbox
@@ -2139,6 +2749,280 @@ class EnvironmentCore:
             total += float(np.min(d))
         return -total
 
+    def _per_watt_coefficient_from_entries(
+        self, entries: list,
+    ) -> np.ndarray:
+        """Power-independent per-watt gain tensor reconstructed from entries.
+
+        ``a_ijq = 1[g_dd >= g_min] * chi_rep * alpha^2 * C`` with
+        ``C = T_sym*M*N*G_tx*G_rx*n_CPI/sigma_z^2``.  This is read directly
+        from the entry observables (not from ``d_eff / P_sense``), so it stays
+        identified even for edges the learned sensing head left unexcited.
+        """
+        dc = self.deflection_computer
+        scale = float(
+            dc.T_sym * dc.M * dc.N * dc.antenna_gain * dc.n_cpi
+            / max(dc.noise_power, 1.0e-15)
+        )
+        coefficient = np.zeros((self.K, self.K, self.Q), dtype=np.float64)
+        for entry in entries:
+            i, j, q = int(entry.i), int(entry.j), int(entry.q)
+            if not (0 <= i < self.K and 0 <= j < self.K and 0 <= q < self.Q):
+                continue
+            if float(entry.g_dd) >= float(dc.g_min):
+                coefficient[i, j, q] = (
+                    float(entry.chi_rep) * float(entry.alpha) ** 2 * scale
+                )
+        return coefficient
+
+    def _maxmin_dual_reward_gain(
+        self,
+        deflection_entries: list,
+        selected_set: list,
+    ) -> tuple[np.ndarray | None, np.ndarray]:
+        """Fixed-owner per-watt gain matrix and sensing budget for the reward.
+
+        Reconstructs the realized per-watt gain ``d_eff / P_sense`` for every
+        excited edge and collapses it to the fixed-owner transmitter--target
+        gain used by the max-min power LP.  Unexcited edges (zero sensing
+        power) contribute zero current marginal value, which is the correct
+        shadow-price convention for a same-frame reward (not a counterfactual
+        claim).  Returns ``(None, budget)`` when the current selection leaves a
+        target without an owner so the reward degrades to the concave utility.
+        """
+        K, Q = self.K, self.Q
+        power = np.asarray(self._current_sensing_power_w, dtype=np.float64)
+        if power.shape != (K, Q):
+            power = np.zeros((K, Q), dtype=np.float64)
+        coefficient = np.zeros((K, K, Q), dtype=np.float64)
+        for entry in deflection_entries:
+            i, j, q = int(entry.i), int(entry.j), int(entry.q)
+            if (
+                i == j or not (0 <= i < K and 0 <= j < K and 0 <= q < Q)
+                or float(entry.d_eff) <= 0.0
+                or power[i, q] <= 1.0e-12
+            ):
+                continue
+            coefficient[i, j, q] = float(entry.d_eff) / power[i, q]
+        budget = np.sum(power, axis=1)
+        try:
+            gain, _ = fixed_owner_gain_matrix(
+                coefficient, [tuple(edge) for edge in selected_set])
+        except ValueError:
+            return None, budget
+        return gain, budget
+
+    def _analytical_movement_delta(self) -> dict:
+        """Receding-horizon capability-guided movement (L3 geometry hook).
+
+        Uses the previous frame's per-watt coefficient, owner map and sensing
+        budget to take ONE step of the deficit->capability descent (D0.95): if
+        the fixed-owner ceiling is below the worst floor, move along the
+        steepest descent of the feasibility violation; otherwise solve the
+        capability gauge and move along its price-weighted gradient.  Returns
+        ``{uav_id: delta_p(2,)}``; empty on the first frame or when the
+        previous structure is unavailable.
+        """
+        entries = getattr(self, '_last_deflection_entries', None)
+        selected = tuple(
+            tuple(int(v) for v in e)
+            for e in getattr(self, '_last_selected_set', ())
+        )
+        if entries is None or not selected:
+            return {}
+        coefficient = self._per_watt_coefficient_from_entries(entries)
+        try:
+            gain, owner = fixed_owner_gain_matrix(coefficient, selected)
+        except ValueError:
+            return {}
+        budget = np.clip(
+            self._isac_total_power_w - self._current_comm_power_w, 0.0, None)
+        step = float(self.uavs[0].v_max * self.uavs[0].dt)
+        uav = np.array([u.pos[:2].copy() for u in self.uavs])
+        tgt = np.array([t.get_position_3d()[:2] for t in self.targets])
+        p_fa = float(self.cfg.detection.P_FA)
+
+        from uav_isac.coordination.capability import local_capability_gradient_k
+        from uav_isac.physical.detection import (
+            minimum_deflection_for_detection_probability)
+        from uav_isac.coordination.maxmin_power import (
+            solve_fixed_structure_maxmin_power_lp, optimal_maxmin_dual_prices)
+
+        d_min = float(minimum_deflection_for_detection_probability(
+            np.asarray([0.60]), p_fa)[0])
+        d_steady = float(minimum_deflection_for_detection_probability(
+            np.asarray([0.80]), p_fa)[0])
+        ceiling = np.sum(gain * budget[:, None], axis=0)
+
+        grads: dict = {}
+        if np.any(ceiling < d_min - 1e-9):
+            # Phase 1: deficit gradient (steepest descent of the violation).
+            deficit = np.maximum(0.0, d_min - ceiling)
+            for k in range(self.K):
+                gk = np.zeros(2, dtype=np.float64)
+                for q in range(self.Q):
+                    w = deficit[q] * budget[k]
+                    if abs(w) < 1e-15:
+                        continue
+                    a = gain[k, q]
+                    r = float(np.linalg.norm(uav[k] - tgt[q]))
+                    gk += w * (2.0 * a) * (uav[k] - tgt[q]) / max(r ** 2, 1e-9)
+                for q in range(self.Q):
+                    if owner[q] != k:
+                        continue
+                    r = float(np.linalg.norm(uav[k] - tgt[q]))
+                    for i in range(self.K):
+                        w = deficit[q] * budget[i]
+                        if abs(w) < 1e-15:
+                            continue
+                        a = gain[i, q]
+                        gk += w * (2.0 * a) * (uav[k] - tgt[q]) / max(r ** 2, 1e-9)
+                grads[k] = gk
+        else:
+            # Phase 2: max-min dual price gradient (cheap LP, no PWL).  The
+            # max-min dual lambda* concentrates on the bottleneck target, which
+            # is exactly the price that drags the steady (temporal-mean worst).
+            res = solve_fixed_structure_maxmin_power_lp(gain, budget)
+            if (not self._analytical_movement_candidates_enabled
+                    and res.worst_deflection >= d_steady - 1e-9):
+                # Already at/above the steady floor: hover (preserve the good
+                # geometry) instead of falling back to the actor's motion,
+                # which would oscillate and re-degrade a hard seed.
+                return {k: np.zeros(2, dtype=np.float64) for k in range(self.K)}
+            lam, _ = optimal_maxmin_dual_prices(gain, budget)
+            prices = -lam  # gauge sign convention (negative marginals)
+            support = {q: {i: (res.power_w[i, q], gain[i, q])
+                           for i in range(self.K)} for q in range(self.Q)}
+            for k in range(self.K):
+                grads[k] = local_capability_gradient_k(
+                    k, owner, prices, res.power_w[k], gain[k], uav[k], tgt,
+                    support)
+
+        # D1.1-B (advice 010): bounded multi-candidate trust-region.  Build a
+        # few whole-fleet movement candidates, evaluate each at the moved
+        # geometry with the exact max-min LP, and execute the best.  ``stay`` is
+        # always a candidate, so the proxy score is monotone (never degrades).
+        if self._analytical_movement_candidates_enabled:
+            return self._select_best_movement_candidate(
+                coefficient, selected, budget, uav, tgt, grads, step)
+
+        delta: dict = {}
+        for k in range(self.K):
+            gk = grads.get(k)
+            if gk is None:
+                continue
+            n = float(np.linalg.norm(gk))
+            if n > 1e-12:
+                delta[k] = -step * gk / n
+        return delta
+
+    @staticmethod
+    def _friis_rescale_tensor(
+        coeff: np.ndarray, uav: np.ndarray, tgt: np.ndarray,
+        new_uav: np.ndarray,
+    ) -> np.ndarray:
+        """Rescale the (K,K,Q) per-watt tensor under 1/(R_tx^2 R_rx^2)."""
+        r = np.linalg.norm(uav[:, None, :] - tgt[None, :, :], axis=2)      # (K,Q)
+        rn = np.linalg.norm(new_uav[:, None, :] - tgt[None, :, :], axis=2)
+        c = coeff * (r[:, None, :] ** 2) * (r[None, :, :] ** 2)
+        return c / (rn[:, None, :] ** 2 * rn[None, :, :] ** 2)
+
+    def _select_best_movement_candidate(
+        self,
+        coefficient: np.ndarray,
+        selected: tuple,
+        budget: np.ndarray,
+        uav: np.ndarray,
+        tgt: np.ndarray,
+        grads: dict,
+        step: float,
+    ) -> dict:
+        """D1.1-B: bounded whole-fleet trust-region candidate selection.
+
+        Candidates: stay, the single-step gradient (D0.95), half of it, and
+        radial steps toward the two weakest targets (by max-min ceiling).  Each
+        candidate is scored at the moved geometry with the exact max-min power
+        LP (structure fixed at the current P0 selection); the best is executed.
+        ``stay`` is always included, so the proxy score is monotone.
+        """
+        K, Q = self.K, self.Q
+        area = tuple(float(v) for v in self.cfg.scenario.region_size)
+        d_safe = float(getattr(self.cfg.uav, 'd_safe', 20.0))
+        p_fa = float(self.cfg.detection.P_FA)
+        from uav_isac.coordination.maxmin_power import (
+            fixed_owner_gain_matrix,
+            solve_fixed_structure_maxmin_power_lp,
+        )
+        from uav_isac.physical.detection import (
+            compute_detection_probabilities,
+        )
+
+        base = np.zeros((K, 2), dtype=np.float64)
+        for k in range(K):
+            gk = grads.get(k)
+            if gk is None:
+                continue
+            n = float(np.linalg.norm(gk))
+            if n > 1e-12:
+                base[k] = -step * gk / n
+
+        try:
+            gain_cur, _ = fixed_owner_gain_matrix(coefficient, selected)
+        except ValueError:
+            gain_cur = np.zeros((K, Q))
+        ceiling = np.sum(gain_cur * budget[:, None], axis=0)
+        weak_order = np.argsort(ceiling)
+
+        def radial(weak_q: int) -> np.ndarray:
+            d = np.zeros((K, 2), dtype=np.float64)
+            for k in range(K):
+                v = tgt[weak_q] - uav[k]
+                n = float(np.linalg.norm(v))
+                if n > 1e-9:
+                    d[k] = step * v / n
+            return d
+
+        candidates = [
+            np.zeros((K, 2), dtype=np.float64),
+            base,
+            0.5 * base,
+            radial(int(weak_order[0])),
+        ]
+        if Q >= 2:
+            candidates.append(radial(int(weak_order[1])))
+
+        def score(nu: np.ndarray) -> float:
+            # Collision / proximity guard: no UAV may come closer than d_safe
+            # to any target (the 1/R^4 gain would otherwise explode and the
+            # greedy candidate search would keep ramming UAVs into targets).
+            dist = np.linalg.norm(
+                nu[:, None, :] - tgt[None, :, :], axis=2)  # (K,Q)
+            if float(np.min(dist)) < d_safe - 1e-9:
+                return float('-inf')
+            coeff_c = self._friis_rescale_tensor(coefficient, uav, tgt, nu)
+            try:
+                g_c, _ = fixed_owner_gain_matrix(coeff_c, selected)
+            except ValueError:
+                return float('-inf')
+            res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
+            # Score in P_D space (saturates at 1), so once a target is already
+            # saturated, ramming UAVs closer yields no further score gain.
+            pd = compute_detection_probabilities(res.deflection, p_fa)
+            return float(np.min(pd))
+
+        best = np.zeros((K, 2), dtype=np.float64)
+        best_s = float('-inf')
+        for cand in candidates:
+            nu = np.clip(uav + cand, 0.0, area)
+            s = score(nu)
+            if s > best_s + 1e-9:
+                best_s, best = s, cand
+        out: dict = {}
+        for k in range(K):
+            if np.any(best[k] != 0.0):
+                out[k] = best[k]
+        return out
+
     def step(self, actions: Dict[int, Action]) -> Tuple[Dict, Dict, Dict, StepInfo]:
         """Execute one simulation frame.
 
@@ -2157,6 +3041,13 @@ class EnvironmentCore:
         # Capture pre-move UAV positions (for potential-based shaping)
         prev_uav_positions = np.array([u.pos.copy() for u in self.uavs])
 
+        # D0.95 L3: override the learned trajectory with the capability-guided
+        # movement (receding horizon).  Structure (L2) is re-optimised by P0 at
+        # the moved geometry later in this frame.
+        analytical_delta: dict = {}
+        if self._analytical_movement_enabled:
+            analytical_delta = self._analytical_movement_delta()
+
         # 1. Apply UAV actions
         uav_positions = np.zeros((self.K, 3), dtype=np.float64)
         uav_velocities = np.zeros((self.K, 3), dtype=np.float64)
@@ -2164,8 +3055,10 @@ class EnvironmentCore:
 
         for k in range(self.K):
             if k in actions:
+                delta_p = analytical_delta[k] if k in analytical_delta \
+                    else actions[k].delta_p
                 self.uavs[k].apply_action(
-                    actions[k].delta_p, actions[k].role,
+                    delta_p, actions[k].role,
                     account_radio_energy=not self._joint_isac_power_enabled)
             uav_positions[k] = self.uavs[k].pos
             uav_velocities[k] = self.uavs[k].vel
@@ -2191,12 +3084,19 @@ class EnvironmentCore:
         role_agnostic = not self.learn_roles
 
         # TRUE-geometry deflection = the physical echo; always the realized signal.
+        # D0.89-B: when the structure ranking is analytical, P0 ranks on the
+        # per-watt gain a_ijq, so the deflection used for ranking is computed at
+        # unit sensing power (the realized powered deflection is recomputed after
+        # the LP in the analytical power hook below).
+        ranking_power_w = self._current_sensing_power_w
+        if self._analytical_structure_ranking_enabled:
+            ranking_power_w = np.ones((self.K, self.Q), dtype=np.float64)
         deflection_entries = self.deflection_computer.compute(
             uav_positions, uav_velocities,
             target_positions, target_velocities,
             roles, self.fc_position,
             role_agnostic=role_agnostic,
-            sensing_power_w=(self._current_sensing_power_w
+            sensing_power_w=(ranking_power_w
                              if self._joint_isac_power_enabled else None),
         )
         self._last_deflection_entries = deflection_entries  # for obs coordination features
@@ -2246,6 +3146,21 @@ class EnvironmentCore:
             )
         else:
             ranking_entries = deflection_entries
+
+        if self._external_structure_edge_values is not None:
+            student_values = self._external_structure_edge_values
+            ranking_entries = [
+                entry._replace(
+                    d_eff=float(student_values[
+                        int(entry.i), int(entry.j), int(entry.q)]))
+                for entry in ranking_entries
+            ]
+            self._last_isac_metrics.update({
+                "structure_student_edge_control": 1.0,
+                "structure_student_edge_mean": float(np.mean(
+                    student_values[
+                        ~np.eye(self.K, dtype=bool), :])),
+            })
         unfiltered_ranking_entries = ranking_entries
 
         # The policy's per-target sensing split is its local commitment. P0 may
@@ -2419,42 +3334,121 @@ class EnvironmentCore:
                     if self.ground_communication_enabled
                     else self.Q * self.cfg.detection.K_q_max
                 )
-                selected, maxmin_D_q = solve_maxmin_single_role_pairs(
-                    ranking_entries,
-                    num_uavs=self.K,
-                    num_targets=self.Q,
-                    target_pair_limit=self.cfg.detection.K_q_max,
-                    reports_per_receiver=reports_per_receiver,
-                    p_fa=self.cfg.detection.P_FA,
-                    p_d_floor=float(getattr(
-                        self.cfg.marl, "comm_qos_worst_min", 0.60)),
-                    target_priority=(
-                        np.exp(np.clip(
-                            float(getattr(
+                if self._dynamic_local_search_coordinator is not None:
+                    if self._external_structure_edge_values is None:
+                        raise RuntimeError(
+                            "dynamic local search requires Student edge values")
+                    if self._external_structure_candidate_mask is None:
+                        raise RuntimeError(
+                            "dynamic local search requires a local candidate mask")
+                    edge_value = np.zeros(
+                        (self.K, self.K, self.Q), dtype=np.float64)
+                    physically_ranked = np.zeros_like(
+                        edge_value, dtype=bool)
+                    for entry in ranking_entries:
+                        edge = (int(entry.i), int(entry.j), int(entry.q))
+                        edge_value[edge] = max(float(entry.d_eff), 0.0)
+                        physically_ranked[edge] = True
+                    local_result = (
+                        self._dynamic_local_search_coordinator.resolve(
+                            edge_value,
+                            self._external_structure_candidate_mask
+                            & physically_ranked,
+                            target_pair_limit=(
+                                self.cfg.detection.K_q_max),
+                            reports_per_receiver=reports_per_receiver,
+                            p_fa=self.cfg.detection.P_FA,
+                            p_d_floor=float(getattr(
                                 self.cfg.marl,
-                                "p0_maxmin_deficit_priority_gain",
-                                3.0,
-                            ))
-                            * (
+                                "comm_qos_worst_min",
+                                0.60)),
+                            target_priority=(
+                                np.exp(np.clip(
+                                    float(getattr(
+                                        self.cfg.marl,
+                                        "p0_maxmin_deficit_priority_gain",
+                                        3.0))
+                                    * (float(getattr(
+                                        self.cfg.marl,
+                                        "comm_qos_worst_min",
+                                        0.60)) - self._coord_pd_ema),
+                                    -6.0,
+                                    6.0))
+                                if self._coord_pd_ema is not None
+                                else np.ones(
+                                    self.Q, dtype=np.float64)),
+                            target_deficit=(
                                 float(getattr(
                                     self.cfg.marl,
                                     "comm_qos_worst_min",
-                                    0.60,
+                                    0.60)) - self._coord_pd_ema
+                                if self._coord_pd_ema is not None
+                                else None),
+                            frame_index=int(self.t),
+                        )
+                    )
+                    selected_array = local_result.selected
+                    selected = [
+                        tuple(int(value) for value in edge)
+                        for edge in np.argwhere(selected_array)
+                    ]
+                    maxmin_D_q = np.sum(
+                        np.where(selected_array, edge_value, 0.0),
+                        axis=(0, 1),
+                    )
+                    self._last_isac_metrics.update(
+                        local_result.diagnostics)
+                    self._last_isac_metrics.update({
+                        "local_search_enabled": 1.0,
+                        "local_search_resolved": 1.0,
+                        "local_search_candidate_edges": int(np.sum(
+                            self._external_structure_candidate_mask
+                            & physically_ranked)),
+                    })
+                else:
+                    selected, maxmin_D_q = solve_maxmin_single_role_pairs(
+                        ranking_entries,
+                        num_uavs=self.K,
+                        num_targets=self.Q,
+                        target_pair_limit=self.cfg.detection.K_q_max,
+                        reports_per_receiver=reports_per_receiver,
+                        p_fa=self.cfg.detection.P_FA,
+                        p_d_floor=float(getattr(
+                            self.cfg.marl, "comm_qos_worst_min", 0.60)),
+                        target_priority=(
+                            self._last_analytical_dual_prices
+                            if (
+                                self._analytical_structure_ranking_enabled
+                                and self._last_analytical_dual_prices is not None
+                            )
+                            else (
+                                np.exp(np.clip(
+                                    float(getattr(
+                                        self.cfg.marl,
+                                        "p0_maxmin_deficit_priority_gain",
+                                        3.0,
+                                    ))
+                                    * (
+                                        float(getattr(
+                                            self.cfg.marl,
+                                            "comm_qos_worst_min",
+                                            0.60,
+                                        ))
+                                        - self._coord_pd_ema
+                                    ),
+                                    -6.0,
+                                    6.0,
                                 ))
-                                - self._coord_pd_ema
-                            ),
-                            -6.0,
-                            6.0,
-                        ))
-                        if self._coord_pd_ema is not None
-                        else np.ones(self.Q, dtype=np.float64)
-                    ),
-                    fusion_mode=(
-                        "local_only"
-                        if self._p0_maxmin_local_fusion_enabled
-                        else "central_oracle"
-                    ),
-                )
+                                if self._coord_pd_ema is not None
+                                else np.ones(self.Q, dtype=np.float64)
+                            )
+                        ),
+                        fusion_mode=(
+                            "local_only"
+                            if self._p0_maxmin_local_fusion_enabled
+                            else "central_oracle"
+                        ),
+                    )
                 z_selected = np.zeros(
                     (self.K, self.K, self.Q), dtype=np.int32)
                 for i, j, q in selected:
@@ -2498,6 +3492,203 @@ class EnvironmentCore:
             self._assignment_switched = False
             self._last_p0_solve_time_s = 0.0
         self._last_selected_set = p0_solution.selected_set  # for next obs
+
+        # ── D0.89: analytical inner sensing power ──
+        # The learned per-target sensing head is ignored for execution; after
+        # P0 fixes role/owner/edge, the fixed-owner max-min power LP allocates
+        # sensing power.  The actor still controls the sensing *budget* through
+        # P_comm (b_i = 1 - P_comm).  Only the sensing power changes; motion,
+        # structure and Token decisions are untouched.
+        if self._analytical_sensing_power_enabled:
+            coefficient = self._per_watt_coefficient_from_entries(
+                deflection_entries)
+            selected = tuple(
+                tuple(int(v) for v in edge)
+                for edge in p0_solution.selected_set
+            )
+            budget = np.sum(self._current_sensing_power_w, axis=1)
+            reserve = None
+            if self._analytical_sensing_power_reserve_pd > 0.0:
+                from uav_isac.physical.detection import (
+                    minimum_deflection_for_detection_probability,
+                )
+                reserve = minimum_deflection_for_detection_probability(
+                    np.full(self.Q, float(
+                        self._analytical_sensing_power_reserve_pd)),
+                    self.cfg.detection.P_FA,
+                )
+            try:
+                gain, _owners = fixed_owner_gain_matrix(coefficient, selected)
+            except ValueError:
+                gain = None
+            if gain is not None:
+                self._last_analytical_gain = gain.copy()
+                self._last_analytical_budget = budget.copy()
+                if self._task_constrained_power_enabled:
+                    # D0.93-A1: task-constrained power (QoS floors as hard
+                    # constraints via the PWL LP).  If gamma* <= 1 the returned
+                    # power satisfies worst+bottom-k+steady; else fall back to
+                    # reserve-first max-min (best effort).
+                    from uav_isac.coordination.capability import (
+                        capability_gauge_pwl_lp_full,
+                    )
+                    from uav_isac.coordination.pwl_pd import (
+                        chord_lower_bound,
+                        curvature_breakpoints,
+                    )
+                    from uav_isac.physical.detection import (
+                        minimum_deflection_for_detection_probability,
+                    )
+                    qos_floors = tuple(float(v) for v in getattr(
+                        self.cfg.marl, 'task_constrained_qos_floors',
+                        (0.60, 0.70, 0.80, 3)))
+                    worst_floor = qos_floors[0]
+                    weak3_floor = qos_floors[1]
+                    steady_floor = qos_floors[2]
+                    k_tail = max(1, int(qos_floors[3]))
+                    d_min = float(minimum_deflection_for_detection_probability(
+                        np.asarray([worst_floor]),
+                        self.cfg.detection.P_FA)[0])
+                    ceiling = np.sum(gain * budget[:, None], axis=0)
+                    if np.any(ceiling < d_min - 1e-9):
+                        lp = None
+                    else:
+                        d_max = float(np.max(ceiling)) + 1.0
+                        bps = curvature_breakpoints(
+                            self.cfg.detection.P_FA, d_min, d_max, epsilon=1e-3)
+                        cs, ci = chord_lower_bound(
+                            self.cfg.detection.P_FA, bps)
+                        out = capability_gauge_pwl_lp_full(
+                            gain, budget, self.cfg.detection.P_FA,
+                            (worst_floor, weak3_floor, steady_floor, k_tail),
+                            cs, ci, d_min)
+                        lp = None
+                        if out is not None and out[0] <= 1.0 + 1e-6:
+                            gamma_val, p_star, pi_star = out
+                            from uav_isac.coordination.maxmin_power import (
+                                MaxMinPowerResult,
+                            )
+                            # D1.1-A (advice 010): lexicographic mode maximises
+                            # the worst within the feasible region instead of
+                            # executing the gauge's satisficing allocation.
+                            if (getattr(self.cfg.marl,
+                                        'task_constrained_mode', 'gauge')
+                                    == 'lexicographic'):
+                                from uav_isac.coordination.capability import (
+                                    qos_constrained_maxmin_lp,
+                                )
+                                st = qos_constrained_maxmin_lp(
+                                    gain, budget, self.cfg.detection.P_FA,
+                                    (worst_floor, weak3_floor, steady_floor,
+                                     k_tail),
+                                    cs, ci, d_min)
+                                if st is not None:
+                                    _t_star, p_star, _d_star = st
+                                    gamma_val = float(_t_star)
+                                    self._lex_mode = 'stage_b'
+                                    self._lex_t_star = float(_t_star)
+                                    # Stage B returns no dual; expose the
+                                    # true max-min shadow prices instead of
+                                    # mislabelling the deflection vector.
+                                    from uav_isac.coordination.maxmin_power import (
+                                        optimal_maxmin_dual_prices,
+                                    )
+                                    pi_star, _ = optimal_maxmin_dual_prices(
+                                        gain, budget)
+                                else:
+                                    self._lex_mode = 'stage_b_infeasible'
+                                    self._lex_t_star = None
+                            else:
+                                self._lex_mode = 'gauge'
+                                self._lex_t_star = None
+                            deflection = np.sum(gain * p_star, axis=0)
+                            lp = MaxMinPowerResult(
+                                power_w=p_star,
+                                deflection=deflection,
+                                worst_deflection=float(np.min(deflection)),
+                                prices=pi_star,
+                                dual_upper_bound=gamma_val,
+                                primal_dual_gap=0.0,
+                                rounds=0,
+                                worst_history=(float(np.min(deflection)),),
+                            )
+                    if lp is None:
+                        from uav_isac.coordination.maxmin_power import (
+                            solve_fixed_structure_maxmin_power_lp,
+                        )
+                        lp = solve_fixed_structure_maxmin_power_lp(
+                            gain, budget, minimum_deflection=reserve)
+                        self._lex_mode = 'reserve_fallback'
+                        self._lex_t_star = None
+                    self._current_sensing_power_w = lp.power_w.copy()
+                    self._last_analytical_power_balance_error = float(np.max(
+                        np.abs(np.sum(lp.power_w, axis=1) - budget)))
+                elif self._bargaining_objective_enabled:
+                    # D0.92: reference-normalized bargaining power allocation.
+                    # The reserve (if any) is dropped: opportunity fairness
+                    # already encodes "each target gets a fair share of its own
+                    # headroom", so there is no separate reserve counterbalance.
+                    from uav_isac.coordination.bargaining_power import (
+                        solve_fixed_structure_bargaining_lp,
+                    )
+                    lp = solve_fixed_structure_bargaining_lp(gain, budget)
+                    self._last_bargaining_value = lp.bargaining_value
+                    self._last_analytical_dual_prices = lp.prices
+                    self._current_sensing_power_w = lp.power_w.copy()
+                    self._last_analytical_power_balance_error = float(
+                        lp.power_balance_error_w)
+                else:
+                    from uav_isac.coordination.maxmin_power import (
+                        solve_fixed_structure_maxmin_power_lp,
+                    )
+                    try:
+                        lp = solve_fixed_structure_maxmin_power_lp(
+                            gain, budget, minimum_deflection=reserve)
+                    except RuntimeError:
+                        # Reserve infeasible: fall back to pure max-min and
+                        # record the shortfall so the reward can penalise it
+                        # rather than crashing the environment.
+                        lp = solve_fixed_structure_maxmin_power_lp(gain, budget)
+                        if reserve is not None:
+                            shortfall = float(np.max(np.maximum(
+                                reserve - lp.deflection, 0.0)))
+                        else:
+                            shortfall = 0.0
+                        lp = MaxMinPowerResult(
+                            power_w=lp.power_w,
+                            deflection=lp.deflection,
+                            worst_deflection=lp.worst_deflection,
+                            prices=lp.prices,
+                            dual_upper_bound=lp.dual_upper_bound,
+                            primal_dual_gap=lp.primal_dual_gap,
+                            rounds=lp.rounds,
+                            worst_history=lp.worst_history,
+                            reserve_feasible=False,
+                            reserve_shortfall=shortfall,
+                            minimum_deflection=tuple(
+                                () if reserve is None else reserve.tolist()),
+                        )
+                    self._current_sensing_power_w = lp.power_w.copy()
+                    self._last_analytical_power_balance_error = float(np.max(
+                        np.abs(np.sum(lp.power_w, axis=1) - budget)))
+                    if self._analytical_structure_ranking_enabled:
+                        # Expose the bottleneck dual price lambda* to the next
+                        # frame's structure ranking (lagged primal-dual weight).
+                        from uav_isac.coordination.maxmin_power import (
+                            optimal_maxmin_dual_prices,
+                        )
+                        dual, _ = optimal_maxmin_dual_prices(gain, budget)
+                        self._last_analytical_dual_prices = dual
+                # Recompute the realized Deflection with the LP power.  This is
+                # deterministic when the reporting link and Swerling are off.
+                deflection_entries = self.deflection_computer.compute(
+                    uav_positions, uav_velocities,
+                    target_positions, target_velocities,
+                    roles, self.fc_position,
+                    role_agnostic=role_agnostic,
+                    sensing_power_w=self._current_sensing_power_w,
+                )
+                self._last_deflection_entries = deflection_entries
 
         # Realized per-target deflection = TRUE d_eff of the SELECTED pairs.
         if self.p0_uses_belief or self._joint_isac_power_enabled:
@@ -2729,11 +3920,18 @@ class EnvironmentCore:
         )
 
         # 7. Compute rewards (constraint penalties handled by Lagrangian in trainer)
+        reward_gain = None
+        reward_budget = None
+        if self.reward_computer.utility_mode == 'maxmin_dual':
+            reward_gain, reward_budget = self._maxmin_dual_reward_gain(
+                deflection_entries, p0_solution.selected_set)
         team_reward = self.reward_computer.compute_team_reward(
             detection_D_q,            # evidence available under selected mode
             p0_solution.total_bits,
             0.0,  # constraint_penalty removed; Lagrangian handles constraints
             P_D_q=P_D_q,              # for direct P_D reward term (alpha_pd > 0)
+            gain_per_watt=reward_gain,
+            sensing_budget_w=reward_budget,
         )
         reward_components = {
             'base_detection_and_report': float(team_reward),
@@ -2926,6 +4124,32 @@ class EnvironmentCore:
         #    Fixes off-by-one: previously prev_P_D was updated AFTER
         #    _build_observations, so next_obs got P_D_{t-1} not P_D_t.
         self.prev_P_D = P_D_q.copy()
+
+        # D1.1-A audit hook: dump one JSONL record per frame when enabled.
+        if self._lex_audit_path:
+            try:
+                with open(self._lex_audit_path, 'a', encoding='utf-8') as _f:
+                    _f.write(json.dumps({
+                        "t": int(self.t),
+                        "mode": self._lex_mode,
+                        "lex_t_star": self._lex_t_star,
+                        "balance_error_w": float(
+                            self._last_analytical_power_balance_error),
+                        "P_D_q": [float(v) for v in P_D_q],
+                        "comm_power_w": [
+                            float(v) for v in self._current_comm_power_w],
+                        "sensing_row_sums_w": [
+                            float(np.sum(self._current_sensing_power_w[i]))
+                            for i in range(self.K)],
+                        "gain": (self._last_analytical_gain.tolist()
+                                 if self._last_analytical_gain is not None
+                                 else None),
+                        "budget": (self._last_analytical_budget.tolist()
+                                   if self._last_analytical_budget is not None
+                                   else None),
+                    }) + "\n")
+            except Exception:
+                pass
 
         # P1 FIX: per-UAV LOCAL detection confidence (RX-only by default).
         # Only the RX UAV of each bistatic pair gets local P_D credit;
@@ -3407,6 +4631,32 @@ class EnvironmentCore:
             'current_comm_power_w': self._current_comm_power_w.copy(),
             'current_sensing_power_w': self._current_sensing_power_w.copy(),
             'last_isac_metrics': copy.deepcopy(self._last_isac_metrics),
+            'external_structure_edge_values': (
+                None
+                if self._external_structure_edge_values is None
+                else self._external_structure_edge_values.copy()),
+            'external_structure_candidate_mask': (
+                None
+                if self._external_structure_candidate_mask is None
+                else self._external_structure_candidate_mask.copy()),
+            'dynamic_local_search_state': (
+                None
+                if self._dynamic_local_search_coordinator is None
+                else self._dynamic_local_search_coordinator.get_state()),
+            'pending_structure_student_protocol': {
+                k: v.copy()
+                for k, v in
+                self._pending_structure_student_protocol.items()},
+            'structure_student_public_protocol': (
+                self._structure_student_public_protocol.copy()),
+            'structure_student_public_valid': (
+                self._structure_student_public_valid.copy()),
+            'structure_student_public_last_seen': (
+                self._structure_student_public_last_seen.copy()),
+            'structure_student_mailbox': copy.deepcopy(
+                self._structure_student_mailbox),
+            'structure_student_metrics': copy.deepcopy(
+                self._structure_student_metrics),
             'received_comm_msgs': copy.deepcopy(self._received_comm_msgs),
             'received_comm_meta': copy.deepcopy(self._received_comm_meta),
             'comm_mailbox': copy.deepcopy(self._comm_mailbox),
@@ -3577,6 +4827,48 @@ class EnvironmentCore:
             dtype=np.float64).copy()
         self._last_isac_metrics = copy.deepcopy(
             state.get('last_isac_metrics', {}))
+        external_structure = state.get(
+            'external_structure_edge_values')
+        self._external_structure_edge_values = (
+            None if external_structure is None
+            else np.asarray(
+                external_structure, dtype=np.float64).copy())
+        external_candidate = state.get(
+            'external_structure_candidate_mask')
+        self._external_structure_candidate_mask = (
+            None if external_candidate is None
+            else np.asarray(external_candidate, dtype=bool).copy())
+        dynamic_state = state.get('dynamic_local_search_state')
+        if (self._dynamic_local_search_coordinator is not None
+                and dynamic_state is not None):
+            self._dynamic_local_search_coordinator.set_state(dynamic_state)
+        self._pending_structure_student_protocol = {
+            int(k): np.asarray(v, dtype=np.float64).copy()
+            for k, v in state.get(
+                'pending_structure_student_protocol', {}).items()}
+        self._structure_student_public_protocol = np.asarray(state.get(
+            'structure_student_public_protocol',
+            np.zeros((
+                self.K,
+                self.Q,
+                self._structure_student_endpoint_width,
+            ))),
+            dtype=np.float64,
+        ).copy()
+        self._structure_student_public_valid = np.asarray(state.get(
+            'structure_student_public_valid',
+            np.zeros(self.K, dtype=bool)),
+            dtype=bool,
+        ).copy()
+        self._structure_student_public_last_seen = np.asarray(state.get(
+            'structure_student_public_last_seen',
+            np.full(self.K, -10**9, dtype=np.int64)),
+            dtype=np.int64,
+        ).copy()
+        self._structure_student_mailbox = copy.deepcopy(state.get(
+            'structure_student_mailbox', []))
+        self._structure_student_metrics = copy.deepcopy(state.get(
+            'structure_student_metrics', {}))
         self._received_comm_msgs = copy.deepcopy(
             state.get('received_comm_msgs', {}))
         self._received_comm_meta = copy.deepcopy(

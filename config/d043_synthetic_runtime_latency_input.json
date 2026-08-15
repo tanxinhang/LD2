@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "epoch_id": "d043-synthetic-runtime-unit-smoke",
+  "source_kind": "synthetic_unit_test",
+  "controller_implementation_sha256": "ff4e12afca33c9769216426e9609bdd44999673e29c621ebb33e9580f564f1ab",
+  "hardware_id": "synthetic-not-hardware",
+  "runtime_id": "synthetic-runtime-not-deployment",
+  "clock_id": "synthetic-monotonic-clock",
+  "clock_calibration_id": "synthetic-no-clock-calibration",
+  "measurement_scope": "complete_parallel_controller_compute_critical_path_excluding_network",
+  "clock_semantics": "monotonic_wall_clock_includes_preemption",
+  "timer_difference_uncertainty_accounted": false,
+  "training_episode_ids": ["synthetic-runtime-train-00"],
+  "calibration_episode_ids": [
+    "synthetic-runtime-cal-00", "synthetic-runtime-cal-01",
+    "synthetic-runtime-cal-02", "synthetic-runtime-cal-03",
+    "synthetic-runtime-cal-04", "synthetic-runtime-cal-05",
+    "synthetic-runtime-cal-06", "synthetic-runtime-cal-07",
+    "synthetic-runtime-cal-08", "synthetic-runtime-cal-09",
+    "synthetic-runtime-cal-10", "synthetic-runtime-cal-11",
+    "synthetic-runtime-cal-12", "synthetic-runtime-cal-13",
+    "synthetic-runtime-cal-14", "synthetic-runtime-cal-15",
+    "synthetic-runtime-cal-16", "synthetic-runtime-cal-17",
+    "synthetic-runtime-cal-18"
+  ],
+  "validation_episode_ids": [
+    "synthetic-runtime-val-00", "synthetic-runtime-val-01",
+    "synthetic-runtime-val-02", "synthetic-runtime-val-03",
+    "synthetic-runtime-val-04"
+  ],
+  "risk": {"miscoverage": 0.05},
+  "calibration_events": [
+    {"episode_id":"synthetic-runtime-cal-00","event_id":"0","observed_complete_compute_latency_s":0.020,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-01","event_id":"0","observed_complete_compute_latency_s":0.021,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-02","event_id":"0","observed_complete_compute_latency_s":0.022,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-03","event_id":"0","observed_complete_compute_latency_s":0.023,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-04","event_id":"0","observed_complete_compute_latency_s":0.024,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-05","event_id":"0","observed_complete_compute_latency_s":0.025,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-06","event_id":"0","observed_complete_compute_latency_s":0.026,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-07","event_id":"0","observed_complete_compute_latency_s":0.027,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-08","event_id":"0","observed_complete_compute_latency_s":0.028,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-09","event_id":"0","observed_complete_compute_latency_s":0.029,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-10","event_id":"0","observed_complete_compute_latency_s":0.030,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-11","event_id":"0","observed_complete_compute_latency_s":0.031,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-12","event_id":"0","observed_complete_compute_latency_s":0.032,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-13","event_id":"0","observed_complete_compute_latency_s":0.033,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-14","event_id":"0","observed_complete_compute_latency_s":0.034,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-15","event_id":"0","observed_complete_compute_latency_s":0.035,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-16","event_id":"0","observed_complete_compute_latency_s":0.036,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-17","event_id":"0","observed_complete_compute_latency_s":0.037,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-cal-18","event_id":"0","observed_complete_compute_latency_s":0.038,"timer_resolution_s":0.000001,"window_censored":false}
+  ],
+  "validation_events": [
+    {"episode_id":"synthetic-runtime-val-00","event_id":"0","observed_complete_compute_latency_s":0.030,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-val-01","event_id":"0","observed_complete_compute_latency_s":0.034,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-val-02","event_id":"0","observed_complete_compute_latency_s":0.036,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-val-03","event_id":"0","observed_complete_compute_latency_s":0.038,"timer_resolution_s":0.000001,"window_censored":false},
+    {"episode_id":"synthetic-runtime-val-04","event_id":"0","observed_complete_compute_latency_s":0.042,"timer_resolution_s":0.000001,"window_censored":false}
+  ]
+}

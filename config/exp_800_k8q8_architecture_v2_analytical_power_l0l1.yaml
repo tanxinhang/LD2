@@ -1,0 +1,6 @@
+# D0.93 L0+L1: analytical minimum communication power (comm-slack recovery)
+# + analytical max-min sensing power, both in the live environment.
+extends: exp_800_k8q8_architecture_v2_analytical_power_d089a.yaml
+
+marl:
+  analytical_comm_power_enabled: true

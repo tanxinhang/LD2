@@ -1,0 +1,10 @@
+# D0.95: analytical capability-guided movement (L3 geometry) on top of the
+# L0+L1 task-constrained power stack.  The learned trajectory is overridden by
+# the receding-horizon deficit->capability descent; structure (L2) is
+# re-optimised by P0 at the moved geometry each frame (analytical structure
+# ranking on the per-watt gain).
+extends: exp_800_k8q8_architecture_v2_analytical_power_l0l1_taskconstrained.yaml
+
+marl:
+  analytical_structure_ranking_enabled: true
+  analytical_movement_enabled: true

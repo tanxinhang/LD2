@@ -5,7 +5,7 @@ using the Gaussian approximation from the OTFS-ISAC detection theory.
 """
 
 import numpy as np
-from uav_isac.utils.math_utils import compute_PD, utility_from_D
+from uav_isac.utils.math_utils import Q_inverse, compute_PD, utility_from_D
 
 
 def compute_detection_probabilities(
@@ -27,6 +27,32 @@ def compute_detection_probabilities(
         P_D: (Q,) detection probabilities in [0, 1]
     """
     return compute_PD(D_q_star, P_FA)
+
+
+def minimum_deflection_for_detection_probability(
+    probability: np.ndarray,
+    P_FA: float,
+) -> np.ndarray:
+    """Invert the Gaussian Deflection detector monotonically.
+
+    From ``P_D=Q(Q^{-1}(P_FA)-sqrt(D))``, the least non-negative Deflection
+    attaining a requested probability is
+    ``max(Q^{-1}(P_FA)-Q^{-1}(P_D), 0)^2``.  Requests below the false-alarm
+    floor need no sensing Deflection; exact probability one is intentionally
+    rejected because it requires unbounded Deflection in this model.
+    """
+    requested = np.asarray(probability, dtype=np.float64)
+    p_fa = float(P_FA)
+    if (
+        np.any(~np.isfinite(requested))
+        or np.any(requested < 0.0) or np.any(requested >= 1.0)
+        or not np.isfinite(p_fa) or not 0.0 < p_fa < 1.0
+    ):
+        raise ValueError(
+            "probability must lie in [0,1) and P_FA in (0,1)")
+    root = np.maximum(
+        float(Q_inverse(np.asarray(p_fa))) - Q_inverse(requested), 0.0)
+    return np.square(root)
 
 
 def compute_target_utilities(

@@ -1,0 +1,11 @@
+# D0.89-C: analytical inner power + reserve-first t* reward (retraining).
+# The outer Actor controls geometry/communication/structure; the fixed-owner
+# reserve-first max-min LP allocates sensing power; the reward is the LP value
+# t* mapped to worst-target detection probability.  lr is restored from the
+# frozen teacher chain (lr: 0.0) so the outer Actor actually retrains.
+extends: exp_800_k8q8_architecture_v2_analytical_power_d089a.yaml
+
+marl:
+  analytical_sensing_power_reserve_pd: 0.6
+  reward_utility_mode: tstar
+  lr: 0.00003

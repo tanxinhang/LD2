@@ -1,0 +1,18 @@
+# Controlled-density zero-shot scale audit for the frozen Architecture V2
+# policy.  The side length scales as 800*sqrt(6/4), preserving UAV/target
+# density relative to the formal 4/4 environment.
+extends: exp_800_q4_architecture_v2_maxmin_local_fusion_fullgraph_hold5_gate.yaml
+
+scenario:
+  region_size: [980, 980]
+  K: 6
+  Q: 6
+
+target:
+  omega_q: [0.1666666667, 0.1666666667, 0.1666666667,
+            0.1666666667, 0.1666666667, 0.1666666667]
+
+marl:
+  num_envs: 1
+  eval_seed_bank_path: config/stratified_seeds_980_k6q6.json
+  training_seed_bank_path: config/stratified_seeds_980_k6q6.json

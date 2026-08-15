@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "epoch_id": "d039-synthetic-pipeline-only",
+  "source_kind": "synthetic_unit_test",
+  "protocol_implementation_sha256": "19d761a52fc87c92de6fce822272422b2d2a14b449dd8ac41b3b24d64b3f4b2e",
+  "instrumentation_id": "observed-snr-complete-path-fixture-v1",
+  "training_episode_ids": ["train-link-0"],
+  "calibration_episode_ids": [
+    "link-cal-00", "link-cal-01", "link-cal-02", "link-cal-03",
+    "link-cal-04", "link-cal-05", "link-cal-06", "link-cal-07",
+    "link-cal-08", "link-cal-09", "link-cal-10", "link-cal-11",
+    "link-cal-12", "link-cal-13", "link-cal-14", "link-cal-15",
+    "link-cal-16", "link-cal-17", "link-cal-18"
+  ],
+  "validation_episode_ids": ["link-val-00", "link-val-01"],
+  "risk": {
+    "total_miscoverage": 0.10,
+    "erasure_miscoverage": 0.05,
+    "queue_miscoverage": 0.05
+  },
+  "calibration_events": [
+    {"episode_id":"link-cal-00","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02000,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-01","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02001,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-02","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02002,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-03","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02003,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-04","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02004,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-05","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02005,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-06","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02006,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-07","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02007,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-08","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02008,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-09","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02009,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-10","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02010,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-11","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02011,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-12","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02012,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-13","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02013,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-14","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02014,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-15","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02015,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-16","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02016,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-17","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02017,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-cal-18","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02018,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false}
+  ],
+  "validation_events": [
+    {"episode_id":"link-val-00","event_id":"0","erased_copies_before_success":1,"observed_complete_protocol_latency_s":0.02010,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false},
+    {"episode_id":"link-val-01","event_id":"0","erased_copies_before_success":0,"observed_complete_protocol_latency_s":0.02012,"observed_snr_modeled_protocol_latency_s":0.02000,"delivery_censored":false}
+  ]
+}

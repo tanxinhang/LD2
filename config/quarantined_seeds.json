@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "seeds": [2, 105, 747, 795, 860],
+  "reason": "2026-07-29 起被文档判定为测试集污染种子（首次 seed 291 全池命令漏写显式 selection split，普通 paired evaluator 误用了默认 test split 的前 5 个种子），必须永久隔离，不能再进入确认性或最终性能声明。见 docs/ARCHITECTURE_V2_RESULTS.md:1764 与 docs/CURRENT_SYSTEM_STATUS.md:412-416。",
+  "status": "registry active. Legacy banks (config/stratified_seeds_800_q4.json, _980_k6q6.json, _1130_k8q8.json) still contain these seeds in active splits and must be regenerated with tools/seed_stratification.py; until then strict loads of those splits fail closed. See docs/KNOWN_ISSUES.md.",
+  "consumers": [
+    "uav_isac/agents/trainer.py::load_stratified_seed_split (strict fail-closed)",
+    "uav_isac/agents/trainer.py::load_training_seed_pool (exclude)",
+    "tools/seed_stratification.py::generate_seed_bank (exclude on regeneration)"
+  ]
+}

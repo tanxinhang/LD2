@@ -1,0 +1,9 @@
+# D0.89-A: analytical inner sensing power on the frozen Architecture V2 8/8
+# teacher baseline.  The learned per-target sensing head is ignored for
+# execution; the fixed-owner max-min LP allocates sensing power after P0 fixes
+# role/owner/edge.  Everything else (motion, comm, structure) is unchanged.
+extends: exp_800_k8q8_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml
+
+marl:
+  analytical_sensing_power_enabled: true
+  analytical_sensing_power_reserve_pd: 0.0

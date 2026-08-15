@@ -590,8 +590,55 @@ def apply_cacsr_sensing_residual(
     return torch.softmax(logits, dim=-1), delta
 
 
-def load_stratified_seed_split(path: str, split: str) -> List[int]:
-    """Load one non-empty, duplicate-free split from a versioned seed bank."""
+# Seeds permanently isolated after the 2026-07-29 test-set contamination
+# event (see docs/ARCHITECTURE_V2_RESULTS.md:1764 and
+# docs/CURRENT_SYSTEM_STATUS.md:412-416).  The authoritative registry is
+# config/quarantined_seeds.json; this constant is only the fail-closed
+# fallback when that file is missing or malformed.  Keep the two in sync
+# (tests/test_quarantined_seeds.py locks the documented set).
+QUARANTINED_SEEDS_FALLBACK: frozenset[int] = frozenset({795, 747, 105, 860, 2})
+_QUARANTINE_DOC_REF = (
+    "docs/ARCHITECTURE_V2_RESULTS.md:1764, docs/CURRENT_SYSTEM_STATUS.md:412-416")
+
+
+def _project_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+
+
+def load_quarantined_seeds() -> frozenset[int]:
+    """Load the quarantined-seed registry (single source of truth).
+
+    The registry lives in config/quarantined_seeds.json so it can be
+    versioned and audited independently of code.  If the file is missing or
+    malformed the built-in fallback is returned so evaluation still fails
+    closed on the documented seeds.
+    """
+    path = os.path.join(_project_root(), "config", "quarantined_seeds.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        seeds = {int(seed) for seed in payload.get("seeds", [])}
+        if not seeds:
+            return QUARANTINED_SEEDS_FALLBACK
+        return frozenset(seeds)
+    except (OSError, ValueError, TypeError):
+        return QUARANTINED_SEEDS_FALLBACK
+
+
+def load_stratified_seed_split(
+    path: str, split: str, *, strict: bool = True,
+) -> List[int]:
+    """Load one non-empty, duplicate-free split from a versioned seed bank.
+
+    With strict=True (default) any split that still contains a quarantined
+    seed is rejected with an explicit error, so the documented "permanently
+    isolated" seeds can never silently enter a confirmatory or final
+    performance evaluation again.  Pass strict=False only for structural
+    validation of legacy banks that pre-date the quarantine (see
+    tests/test_robust_checkpoint_protocol.py); do not use it for any run that
+    produces a reported performance number.
+    """
     with open(os.path.abspath(path), "r", encoding="utf-8") as handle:
         bank = json.load(handle)
     splits = bank.get("splits", {})
@@ -602,6 +649,17 @@ def load_stratified_seed_split(path: str, split: str) -> List[int]:
         raise ValueError(f"seed split {split!r} is empty")
     if len(seeds) != len(set(seeds)):
         raise ValueError(f"seed split {split!r} contains duplicates")
+    if strict:
+        quarantined = load_quarantined_seeds()
+        hits = sorted(seed for seed in seeds if seed in quarantined)
+        if hits:
+            raise ValueError(
+                f"seed split {split!r} of {path} contains quarantined seeds "
+                f"{hits}; these seeds were permanently isolated "
+                f"({_QUARANTINE_DOC_REF}) and must not enter confirmatory or "
+                f"final performance evaluation. Regenerate the bank with "
+                f"tools/seed_stratification.py (quarantine is excluded "
+                f"automatically) or drop the split explicitly.")
     return seeds
 
 
@@ -626,10 +684,11 @@ def load_training_seed_pool(
         for values in bank.get("splits", {}).values()
         for seed in values
     }
+    quarantined = load_quarantined_seeds()
     candidates = []
     for raw_seed, raw_meta in metadata.items():
         seed = int(raw_seed)
-        if seed in reserved:
+        if seed in reserved or seed in quarantined:
             continue
         nearest = float(raw_meta.get("worst_nearest_m", np.inf))
         if nearest > float(max_nearest_m):
@@ -790,12 +849,19 @@ def compute_robust_checkpoint_statistics(
     bootstrap_samples: int = 2000,
     cvar_fraction: float = 0.20,
     bootstrap_seed: int = 20260721,
+    qos_tol: float = 1e-6,
 ) -> Dict[str, float]:
     """Compute selection statistics without replacing strict target worst.
 
     Wilson is applied only to the Bernoulli per-seed QoS feasibility event.
     The continuous worst metric uses a deterministic non-parametric bootstrap
     lower bound. CVaR is the mean over the lowest scenario tail.
+
+    ``qos_tol`` is a solver-level tolerance (advice 010): the task-constrained
+    gauge pins the worst target exactly at the floor, and P_D evaluated there
+    can sit 1e-16 below it, failing a strict comparison by float noise.  The
+    tolerance is tiny on P_D in [0,1] but far above binary error; raw values
+    and slacks are still reported so nothing below the floor is hidden.
     """
     steady = np.asarray(episode_steady, dtype=np.float64).reshape(-1)
     weak3 = np.asarray(episode_weak3, dtype=np.float64).reshape(-1)
@@ -805,6 +871,7 @@ def compute_robust_checkpoint_statistics(
         raise ValueError("episode QoS arrays must be non-empty and equal length")
     if targets.size != 3:
         raise ValueError("qos_targets must contain steady/weak3/worst")
+    tol = float(np.clip(qos_tol, 0.0, 0.01))
     alpha = float(np.clip(alpha, 1e-6, 0.499999))
     n = int(worst.size)
     rng = np.random.default_rng(int(bootstrap_seed))
@@ -815,9 +882,9 @@ def compute_robust_checkpoint_statistics(
     tail_n = max(1, int(np.ceil(float(cvar_fraction) * n)))
     worst_cvar = float(np.mean(np.sort(worst)[:tail_n]))
     feasible = (
-        (steady >= targets[0])
-        & (weak3 >= targets[1])
-        & (worst >= targets[2]))
+        (steady >= targets[0] - tol)
+        & (weak3 >= targets[1] - tol)
+        & (worst >= targets[2] - tol))
     successes = int(np.sum(feasible))
     p_hat = successes / n
     z = NormalDist().inv_cdf(1.0 - alpha)
@@ -832,6 +899,13 @@ def compute_robust_checkpoint_statistics(
         "eval_worst_cvar": worst_cvar,
         "eval_qos_feasible_rate": float(p_hat),
         "eval_qos_feasible_wilson_lcb": wilson_lcb,
+        "eval_qos_tol": float(tol),
+        "eval_worst_slack": float(np.mean(worst - targets[2])),
+        "eval_weak3_slack": float(np.mean(weak3 - targets[1])),
+        "eval_steady_slack": float(np.mean(steady - targets[0])),
+        "eval_raw_worst_P_D": float(np.mean(worst)),
+        "eval_raw_weak3_P_D": float(np.mean(weak3)),
+        "eval_raw_steady_P_D": float(np.mean(steady)),
     }
 
 
@@ -1405,6 +1479,14 @@ class MAPPTrainer:
         self.device = torch.device(device)
         self.K = len(agents)
         self.Q = config.scenario.Q
+        self._structure_student = None
+        self._structure_student_channel_enabled = False
+        self._structure_student_bits_per_dim = 8
+        self._structure_student_adaptive_min_bits_per_dim = 0
+        self._structure_student_min_comm_fraction = 0.01
+        self._structure_student_send_mode = "every_frame"
+        self._structure_student_allow_scale_migration = False
+        self._dynamic_local_search_config = None
 
         ma = config.marl
         self.gamma = ma.gamma
@@ -2141,6 +2223,135 @@ class MAPPTrainer:
                     })
                 self._target_allocation_aux_optimizer = torch.optim.Adam(
                     optimizer_groups)
+
+    def load_frozen_structure_student(
+        self,
+        checkpoint: str,
+        *,
+        channel_enabled: bool = False,
+        bits_per_dim: int = 8,
+        adaptive_min_bits_per_dim: int = 0,
+        min_comm_fraction: float = 0.01,
+        send_mode: str = "every_frame",
+        allow_scale_migration: bool = False,
+    ) -> None:
+        """Load an inference-only local-information structure surrogate."""
+        from uav_isac.agents.frozen_structure_student import (
+            FrozenStructureStudent,
+        )
+
+        student = FrozenStructureStudent(checkpoint, device=str(self.device))
+        cardinality_mismatch = (
+            student.num_uavs != self.K or student.num_targets != self.Q)
+        if cardinality_mismatch and not allow_scale_migration:
+            raise ValueError(
+                "structure-student K/Q does not match the environment")
+        if cardinality_mismatch:
+            scale_safe_actor = all((
+                bool(getattr(self.cfg.marl, 'architecture_v2_enabled', False)),
+                bool(getattr(
+                    self.cfg.marl,
+                    'scale_equivariant_comm_heads_enabled', False)),
+                bool(getattr(
+                    self.cfg.marl,
+                    'permutation_equivariant_round_encoding_enabled', False)),
+                bool(getattr(
+                    self.cfg.marl,
+                    'equivariant_value_critic_enabled', False)),
+                bool(getattr(student, 'cardinality_equivariant', False)),
+            ))
+            if not scale_safe_actor:
+                raise ValueError(
+                    "cross-scale structure-student evaluation requires the "
+                    "cardinality-equivariant Actor, communication heads, "
+                    "round encoding, Critic and Student")
+        self._structure_student = student
+        self._structure_student_channel_enabled = bool(channel_enabled)
+        self._structure_student_bits_per_dim = max(
+            1, int(bits_per_dim))
+        adaptive_min = int(adaptive_min_bits_per_dim)
+        self._structure_student_adaptive_min_bits_per_dim = (
+            int(np.clip(
+                adaptive_min,
+                1,
+                self._structure_student_bits_per_dim,
+            ))
+            if adaptive_min > 0 else 0
+        )
+        self._structure_student_min_comm_fraction = float(np.clip(
+            min_comm_fraction, 0.0, 1.0))
+        send_mode = str(send_mode).strip().lower()
+        if send_mode not in {"every_frame", "p0_resolve"}:
+            raise ValueError(
+                "structure-student send mode must be every_frame or "
+                "p0_resolve")
+        self._structure_student_send_mode = send_mode
+        self._structure_student_allow_scale_migration = bool(
+            allow_scale_migration)
+
+    def configure_dynamic_local_search(
+        self,
+        mode: str,
+        *,
+        ranker_checkpoint: str | None = None,
+        cold_initializer: str = "role_first",
+        factor_graph_checkpoint: str | None = None,
+        neighbor_topk: int = 4,
+        target_topk: int = 4,
+        coverage_fraction: float = 0.30,
+        cold_rounds: int = 8,
+        warm_rounds: int = 8,
+        warm_top_m: int = 3,
+        rebootstrap_mode: str = "off",
+        rebootstrap_interval_frames: int = 0,
+        rebootstrap_rounds: int = 8,
+        rebootstrap_require_deficit: bool = False,
+    ) -> None:
+        """Configure the dynamic Gate C1.7 evaluation controller."""
+        if self._structure_student is None:
+            raise ValueError(
+                "dynamic local search requires a frozen structure Student")
+        if self._structure_student_channel_enabled:
+            raise ValueError(
+                "C1.7a local candidate construction currently requires the "
+                "information-equivalent Student graph")
+        normalized = str(mode).strip().lower()
+        if normalized not in {"previous", "oracle", "hybrid", "replicated"}:
+            raise ValueError("unknown dynamic local-search mode")
+        if normalized == "hybrid" and not ranker_checkpoint:
+            raise ValueError("hybrid mode requires a local move ranker")
+        cold_initializer = str(cold_initializer).strip().lower()
+        if cold_initializer not in {"role_first", "factor_graph"}:
+            raise ValueError("unknown dynamic cold initializer")
+        if cold_initializer == "factor_graph" and not factor_graph_checkpoint:
+            raise ValueError(
+                "factor_graph cold initialization requires a checkpoint")
+        rebootstrap_mode = str(rebootstrap_mode).strip().lower()
+        if rebootstrap_mode not in {"off", "periodic", "oracle"}:
+            raise ValueError("unknown dynamic rebootstrap mode")
+        if (rebootstrap_mode == "periodic"
+                and int(rebootstrap_interval_frames) <= 0):
+            raise ValueError(
+                "periodic rebootstrap requires a positive frame interval")
+        self._dynamic_local_search_config = {
+            "mode": normalized,
+            "ranker_checkpoint": ranker_checkpoint,
+            "cold_initializer": cold_initializer,
+            "factor_graph_checkpoint": factor_graph_checkpoint,
+            "neighbor_topk": max(0, int(neighbor_topk)),
+            "target_topk": max(0, int(target_topk)),
+            "coverage_fraction": float(np.clip(
+                coverage_fraction, 0.0, 1.0)),
+            "cold_rounds": max(0, int(cold_rounds)),
+            "warm_rounds": max(0, int(warm_rounds)),
+            "warm_top_m": max(1, int(warm_top_m)),
+            "rebootstrap_mode": rebootstrap_mode,
+            "rebootstrap_interval_frames": max(
+                0, int(rebootstrap_interval_frames)),
+            "rebootstrap_rounds": max(0, int(rebootstrap_rounds)),
+            "rebootstrap_require_deficit": bool(
+                rebootstrap_require_deficit),
+        }
 
     def _effective_comm(self, comm_msgs: torch.Tensor) -> torch.Tensor:
         """Return zeroed comm if comm_off, else original. Single entry point."""
@@ -4700,7 +4911,15 @@ class MAPPTrainer:
                   sensing_oracle_control: bool = False,
                   joint_sensing_pair_audit_stride: int = 0,
                   physical_oracle_stride: int = 0,
-                  evidence_trace_output: Optional[str] = None) -> Dict[str, float]:
+                  evidence_trace_output: Optional[str] = None,
+                  structure_teacher_trace_output: Optional[str] = None,
+                  n5_counterfactual_output: Optional[str] = None,
+                  n5_counterfactual_max_events: int = 0,
+                  n5_counterfactual_target_mode: str = "both",
+                  n5_counterfactual_seed_filter: Optional[List[int]] = None,
+                  n5_counterfactual_max_candidates: int = 0,
+                  n5_counterfactual_require_proxy_positive: bool = False,
+                  ) -> Dict[str, float]:
         """Evaluation on fixed replayable scenarios (no exploration noise).
 
         All fairness metrics (worst, weak3, tstd) are computed from the STEADY
@@ -4720,6 +4939,47 @@ class MAPPTrainer:
         if eval_seeds is None:
             eval_seeds = self.eval_seeds[:n_episodes]
         eval_env = UAVISACEnv(config=self.cfg, seed=12345)
+        if self._dynamic_local_search_config is not None:
+            from uav_isac.coordination.dynamic_local_search import (
+                DynamicLocalSearchCoordinator,
+            )
+
+            local_cfg = self._dynamic_local_search_config
+            eval_env.core.configure_dynamic_local_search(
+                DynamicLocalSearchCoordinator(
+                    local_cfg["mode"],
+                    ranker_checkpoint=local_cfg["ranker_checkpoint"],
+                    cold_initializer=local_cfg["cold_initializer"],
+                    factor_graph_checkpoint=(
+                        local_cfg["factor_graph_checkpoint"]),
+                    cold_rounds=local_cfg["cold_rounds"],
+                    warm_rounds=local_cfg["warm_rounds"],
+                    warm_top_m=local_cfg["warm_top_m"],
+                    rebootstrap_mode=local_cfg["rebootstrap_mode"],
+                    rebootstrap_interval_frames=(
+                        local_cfg["rebootstrap_interval_frames"]),
+                    rebootstrap_rounds=(
+                        local_cfg["rebootstrap_rounds"]),
+                    rebootstrap_require_deficit=bool(
+                        local_cfg.get(
+                            "rebootstrap_require_deficit", False)),
+                )
+            )
+        if (
+            self._structure_student is not None
+            and self._structure_student_channel_enabled
+        ):
+            eval_env.core.configure_structure_student_channel(
+                self._structure_student,
+                bits_per_dim=(
+                    self._structure_student_bits_per_dim),
+                adaptive_min_bits_per_dim=(
+                    self._structure_student_adaptive_min_bits_per_dim),
+                min_comm_fraction=(
+                    self._structure_student_min_comm_fraction),
+                allow_cardinality_mismatch=(
+                    self._structure_student_allow_scale_migration),
+            )
 
         ep_full_means = []        # full-episode mean P_D per episode
         ep_steady_means = []      # steady-window mean P_D per episode
@@ -4740,8 +5000,24 @@ class MAPPTrainer:
         eval_comm_delivery = []
         eval_comm_active = []
         eval_comm_violation = []
+        eval_structure_payload_bits = []
+        eval_structure_atomic_delivery = []
+        eval_structure_selected_bits = []
+        eval_structure_public_valid = []
+        eval_structure_public_age = []
+        eval_structure_insufficient_cache = []
         eval_p0_resolved = []
         eval_p0_solve_time = []
+        eval_local_search_candidates = []
+        eval_local_search_verifications = []
+        eval_local_search_accepted = []
+        eval_local_search_cold = []
+        eval_local_search_rebootstrap_attempted = []
+        eval_local_search_rebootstrap_accepted = []
+        eval_local_search_rebootstrap_candidates = []
+        eval_local_search_rebootstrap_deficit_present = []
+        eval_local_search_rebootstrap_blocked_no_deficit = []
+        n5_counterfactual_events = []
         eval_evidence_comm_bits = []
         eval_evidence_comm_energy = []
         eval_evidence_comm_latency = []
@@ -4814,6 +5090,38 @@ class MAPPTrainer:
         evidence_trace_frame = []
         evidence_trace_positions = []
         evidence_trace_comm_power = []
+        structure_trace_episode = []
+        structure_trace_seed = []
+        structure_trace_frame = []
+        structure_trace_p0_resolved = []
+        structure_trace_obs = []
+        structure_trace_next_obs = []
+        structure_trace_delta_p = []
+        structure_trace_message = []
+        structure_trace_rate = []
+        structure_trace_token_mask = []
+        structure_trace_comm_fraction = []
+        structure_trace_sensing_weights = []
+        structure_trace_uav_positions = []
+        structure_trace_target_states = []
+        structure_trace_local_pd = []
+        structure_trace_coord_pd_ema = []
+        structure_trace_coord_pd_ema_valid = []
+        structure_trace_pair = []
+        structure_trace_tx_target = []
+        structure_trace_rx_target = []
+        structure_trace_endpoint_target = []
+        structure_trace_receiver_owner = []
+        structure_trace_role = []
+        structure_trace_candidate = []
+        structure_trace_d_eff = []
+        structure_trace_d_raw = []
+        structure_trace_alpha = []
+        structure_trace_g_dd = []
+        structure_trace_chi_rep = []
+        structure_trace_physical_pd = []
+        structure_trace_rebootstrap_attempted = []
+        structure_trace_rebootstrap_accepted = []
         W = steady_window
 
         for ep_seed in eval_seeds:
@@ -5276,6 +5584,136 @@ class MAPPTrainer:
                     eval_env.core._comm_msgs = {
                         k: legacy_comm[k].copy() for k in range(K)
                     }
+                if self._structure_student is not None:
+                    if not (
+                        self._comm_cost_aware
+                        and self._joint_isac_power_enabled
+                    ):
+                        raise RuntimeError(
+                            "structure student requires cost-aware target "
+                            "tokens and joint ISAC resource actions")
+                    from uav_isac.agents.frozen_structure_student import (
+                        build_structure_student_features,
+                    )
+
+                    slices = getattr(actor, "_obs_slices", None)
+                    if slices is None:
+                        raise RuntimeError(
+                            "structure student requires actor observation "
+                            "slice metadata")
+                    student_kwargs = dict(
+                        outgoing_message=(
+                            eval_comm.detach().cpu().numpy()),
+                        outgoing_token_mask=(
+                            eval_token_mask.detach().cpu().numpy()),
+                        outgoing_rate=(
+                            eval_rate.detach().cpu().numpy()),
+                        comm_fraction=(
+                            eval_comm_fraction.detach().cpu().numpy()),
+                        sensing_weights=(
+                            eval_sensing_weights.detach().cpu().numpy()),
+                        rate_scale=self._structure_student.rate_scale,
+                    )
+                    student_features = build_structure_student_features(
+                        ob,
+                        slices,
+                        **student_kwargs,
+                    )
+                    if self._structure_student_channel_enabled:
+                        send_structure = (
+                            self._structure_student_send_mode
+                            == "every_frame"
+                            or eval_env.core
+                            .structure_student_protocol_due_next_step()
+                        )
+                        if send_structure:
+                            endpoint_protocol = (
+                                self._structure_student
+                                .encode_endpoint_protocol(
+                                    student_features)[0])
+                            eval_env.core.submit_structure_student_endpoint_protocol(
+                                endpoint_protocol)
+                    else:
+                        if self._dynamic_local_search_config is not None:
+                            from uav_isac.evaluation.local_candidate_audit import (
+                                build_local_candidate_mask,
+                                delivered_target_tokens,
+                                select_local_neighbors,
+                                select_value_guided_neighbors,
+                            )
+
+                            local_cfg = self._dynamic_local_search_config
+                            frame_obs = ob[None, ...]
+                            token_visible, token_age = delivered_target_tokens(
+                                frame_obs, slices)
+                            local_pd = slices.extract_pd_hist(frame_obs)
+                            local_neighbors = select_local_neighbors(
+                                token_visible,
+                                token_age,
+                                neighbor_topk=local_cfg["neighbor_topk"],
+                            )
+                            provisional_features = (
+                                build_structure_student_features(
+                                    ob,
+                                    slices,
+                                    neighbor_subset_mask=(
+                                        local_neighbors[0]),
+                                    **student_kwargs,
+                                )
+                            )
+                            provisional_values = (
+                                self._structure_student.predict(
+                                    provisional_features)
+                            )
+                            local_neighbors = select_value_guided_neighbors(
+                                provisional_values,
+                                local_pd,
+                                token_visible,
+                                token_age,
+                                neighbor_topk=local_cfg["neighbor_topk"],
+                                qos_floor=float(getattr(
+                                    self.cfg.marl,
+                                    "comm_qos_worst_min",
+                                    0.60)),
+                                coverage_fraction=(
+                                    local_cfg["coverage_fraction"]),
+                            )
+                            student_features = (
+                                build_structure_student_features(
+                                    ob,
+                                    slices,
+                                    neighbor_subset_mask=(
+                                        local_neighbors[0]),
+                                    **student_kwargs,
+                                )
+                            )
+                            student_edge_values = (
+                                self._structure_student.predict(
+                                    student_features)[0]
+                            )
+                            candidate_mask, _ = build_local_candidate_mask(
+                                student_edge_values[None, ...],
+                                local_pd,
+                                local_neighbors,
+                                token_visible,
+                                target_topk=local_cfg["target_topk"],
+                                qos_floor=float(getattr(
+                                    self.cfg.marl,
+                                    "comm_qos_worst_min",
+                                    0.60)),
+                                coverage_fraction=(
+                                    local_cfg["coverage_fraction"]),
+                                require_reciprocal_link=True,
+                            )
+                            eval_env.core.submit_structure_student_candidate_mask(
+                                candidate_mask[0])
+                        else:
+                            student_edge_values = (
+                                self._structure_student.predict(
+                                    student_features)[0]
+                            )
+                        eval_env.core.submit_structure_student_edge_values(
+                            student_edge_values)
                 if (sensing_oracle_control
                         and eval_sensing_oracle_hold is not None
                         and int(eval_env.core.t) < eval_sensing_oracle_until):
@@ -5415,10 +5853,133 @@ class MAPPTrainer:
                         eval_env.core.prev_P_D,
                         dtype=np.float64).copy()
                 )
+                if structure_teacher_trace_output:
+                    structure_input_obs = ob.copy()
+                    structure_coord_pd_ema_value = getattr(
+                        eval_env.core, '_coord_pd_ema', None)
+                    structure_coord_pd_ema_valid = bool(
+                        structure_coord_pd_ema_value is not None)
+                    structure_coord_pd_ema = (
+                        np.asarray(
+                            structure_coord_pd_ema_value,
+                            dtype=np.float32,
+                        ).copy()
+                        if structure_coord_pd_ema_valid
+                        else np.zeros(Q, dtype=np.float32)
+                    )
+                    structure_delta_p = np.stack([
+                        np.asarray(
+                            actions[str(k)]['delta_p'],
+                            dtype=np.float32,
+                        )
+                        for k in range(K)
+                    ])
+                    if self._comm_cost_aware:
+                        structure_message = (
+                            eval_comm.detach().cpu().numpy().astype(
+                                np.float32, copy=True))
+                        structure_rate = (
+                            eval_rate.detach().cpu().numpy().astype(
+                                np.int16, copy=True))
+                        structure_token_mask = (
+                            eval_token_mask.detach().cpu().numpy().astype(
+                                np.uint8, copy=True))
+                        if self._joint_isac_power_enabled:
+                            structure_comm_fraction = (
+                                eval_comm_fraction.detach().cpu().numpy().astype(
+                                    np.float32, copy=True))
+                            structure_sensing_weights = (
+                                eval_sensing_weights.detach().cpu().numpy().astype(
+                                    np.float32, copy=True))
+                        else:
+                            structure_comm_fraction = np.zeros(
+                                K, dtype=np.float32)
+                            structure_sensing_weights = np.zeros(
+                                (K, Q), dtype=np.float32)
+                    else:
+                        structure_message = np.zeros(
+                            (K, int(getattr(
+                                self.cfg.marl,
+                                'comm_target_token_dim',
+                                16)) * Q),
+                            dtype=np.float32)
+                        structure_rate = np.zeros(K, dtype=np.int16)
+                        structure_token_mask = np.zeros(
+                            (K, Q), dtype=np.uint8)
+                        structure_comm_fraction = np.zeros(
+                            K, dtype=np.float32)
+                        structure_sensing_weights = np.zeros(
+                            (K, Q), dtype=np.float32)
                 responsibility_recorded = False
                 for _ in range(self.macro_interval):
+                    n5_pre_step_env = None
+                    if (
+                        n5_counterfactual_output
+                        and self._dynamic_local_search_config is not None
+                        and (
+                            int(n5_counterfactual_max_events) <= 0
+                            or len(n5_counterfactual_events)
+                            < int(n5_counterfactual_max_events)
+                        )
+                        and (
+                            not n5_counterfactual_seed_filter
+                            or int(ep_seed) in {
+                                int(value)
+                                for value in n5_counterfactual_seed_filter
+                            }
+                        )
+                    ):
+                        next_frame = int(eval_env.core.t) + 1
+                        hold_frames = max(1, int(
+                            eval_env.core._p0_maxmin_pairing_hold_frames))
+                        fixed_due = bool(
+                            eval_env.core._cached_p0_solution is None
+                            or next_frame == 1
+                            or next_frame % hold_frames == 0
+                        )
+                        if next_frame > 1 and fixed_due:
+                            # Copy after all communication/resource/Student
+                            # submissions but immediately before the physical
+                            # step, so every forced branch shares the complete
+                            # simulator and RNG state.
+                            n5_pre_step_env = deepcopy(eval_env)
                     obs, eval_rewards, term, trunc, info = eval_env.step(
                         actions)
+                    if (
+                        n5_pre_step_env is not None
+                        and bool(info.get('p0_resolved', False))
+                    ):
+                        from uav_isac.evaluation.n5_counterfactual_audit import (
+                            audit_atomic_n5_event,
+                            has_proxy_positive_atomic_n5,
+                        )
+
+                        try:
+                            should_audit_n5 = (
+                                not n5_counterfactual_require_proxy_positive
+                                or has_proxy_positive_atomic_n5(eval_env)
+                            )
+                            if should_audit_n5:
+                                n5_counterfactual_events.append(
+                                    audit_atomic_n5_event(
+                                        n5_pre_step_env,
+                                        eval_env,
+                                        actions,
+                                        info,
+                                        episode_seed=int(ep_seed),
+                                        frame=int(eval_env.core.t),
+                                        target_mode=(
+                                            n5_counterfactual_target_mode),
+                                        max_candidates=max(
+                                            0,
+                                            int(n5_counterfactual_max_candidates),
+                                        ),
+                                    )
+                                )
+                        finally:
+                            n5_pre_step_env.close()
+                    elif n5_pre_step_env is not None:
+                        n5_pre_step_env.close()
                     pd_q = info['P_D_q'].copy()
                     pd_hist.append(np.mean(pd_q))
                     pd_per_target.append(pd_q)
@@ -5499,6 +6060,90 @@ class MAPPTrainer:
                             ),
                             dtype=np.float64,
                         ).copy())
+                    if structure_teacher_trace_output:
+                        from uav_isac.evaluation.structure_teacher import (
+                            deflection_entry_tensors,
+                            structure_teacher_labels,
+                        )
+                        selected = (
+                            eval_env.current_step_info.p0_solution.selected_set)
+                        labels = structure_teacher_labels(selected, K, Q)
+                        physical = deflection_entry_tensors(
+                            eval_env.current_step_info.deflection_entries,
+                            K,
+                            Q,
+                        )
+                        structure_trace_episode.append(
+                            len(eval_evidence_global_histories))
+                        structure_trace_seed.append(int(ep_seed))
+                        structure_trace_frame.append(
+                            int(eval_env.current_step_info.frame))
+                        structure_trace_p0_resolved.append(bool(
+                            eval_env.current_step_info.p0_resolved))
+                        structure_trace_obs.append(
+                            structure_input_obs.astype(
+                                np.float32, copy=True))
+                        structure_trace_next_obs.append(np.stack([
+                            obs[str(k)] for k in range(K)
+                        ]).astype(np.float32, copy=False))
+                        structure_trace_delta_p.append(
+                            structure_delta_p.copy())
+                        structure_trace_message.append(
+                            structure_message.copy())
+                        structure_trace_rate.append(
+                            structure_rate.copy())
+                        structure_trace_token_mask.append(
+                            structure_token_mask.copy())
+                        structure_trace_comm_fraction.append(
+                            structure_comm_fraction.copy())
+                        structure_trace_sensing_weights.append(
+                            structure_sensing_weights.copy())
+                        structure_trace_uav_positions.append(np.stack([
+                            eval_env.core.uavs[k].pos
+                            for k in range(K)
+                        ]).astype(np.float32))
+                        structure_trace_target_states.append(np.stack([
+                            np.concatenate([
+                                target.get_position_3d()[:2],
+                                target.state[2:4],
+                            ])
+                            for target in eval_env.core.targets
+                        ]).astype(np.float32))
+                        structure_trace_local_pd.append(np.stack([
+                            eval_env.core.prev_P_D_local.get(
+                                k, np.zeros(Q, dtype=np.float64))
+                            for k in range(K)
+                        ]).astype(np.float32))
+                        structure_trace_coord_pd_ema.append(
+                            structure_coord_pd_ema.copy())
+                        structure_trace_coord_pd_ema_valid.append(
+                            structure_coord_pd_ema_valid)
+                        structure_trace_pair.append(labels["pair"])
+                        structure_trace_tx_target.append(
+                            labels["tx_target"])
+                        structure_trace_rx_target.append(
+                            labels["rx_target"])
+                        structure_trace_endpoint_target.append(
+                            labels["endpoint_target"])
+                        structure_trace_receiver_owner.append(
+                            labels["receiver_owner"])
+                        structure_trace_role.append(labels["role"])
+                        structure_trace_candidate.append(
+                            physical["candidate"])
+                        structure_trace_d_eff.append(physical["d_eff"])
+                        structure_trace_d_raw.append(physical["d_raw"])
+                        structure_trace_alpha.append(physical["alpha"])
+                        structure_trace_g_dd.append(physical["g_dd"])
+                        structure_trace_chi_rep.append(
+                            physical["chi_rep"])
+                        structure_trace_physical_pd.append(
+                            np.asarray(pd_q, dtype=np.float64).copy())
+                        structure_trace_rebootstrap_attempted.append(float(
+                            info.get(
+                                'local_search_rebootstrap_attempted', 0.0)))
+                        structure_trace_rebootstrap_accepted.append(float(
+                            info.get(
+                                'local_search_rebootstrap_accepted', 0.0)))
                     # Keep the central-oracle label independent of the active
                     # environment evidence boundary.
                     episode_evidence_global.append(
@@ -5640,10 +6285,53 @@ class MAPPTrainer:
                             'learned_comm_deadline_violation_rate', 0.0)))
                     eval_comm_active.append(float(
                         info.get('learned_comm_active_senders', 0.0)))
+                    eval_structure_payload_bits.append(float(info.get(
+                        'structure_student_payload_bits', 0.0)))
+                    if float(info.get(
+                            'structure_student_atomic_attempted_senders',
+                            0.0)) > 0.0:
+                        eval_structure_atomic_delivery.append(float(info.get(
+                            'structure_student_atomic_delivery_rate', 0.0)))
+                        eval_structure_selected_bits.append(float(info.get(
+                            'structure_student_selected_bits_per_dim',
+                            self._structure_student_bits_per_dim)))
+                    eval_structure_public_valid.append(float(info.get(
+                        'structure_student_public_valid_fraction', 0.0)))
+                    eval_structure_public_age.append(float(info.get(
+                        'structure_student_public_mean_age_frames', 0.0)))
+                    eval_structure_insufficient_cache.append(float(info.get(
+                        'structure_student_insufficient_cache', 0.0)))
                     eval_p0_resolved.append(float(
                         info.get('p0_resolved', False)))
                     eval_p0_solve_time.append(float(
                         info.get('p0_solve_time_s', 0.0)))
+                    if float(info.get('local_search_resolved', 0.0)) > 0.0:
+                        eval_local_search_candidates.append(float(info.get(
+                            'local_search_candidate_count', 0.0)))
+                        eval_local_search_verifications.append(float(info.get(
+                            'local_search_exact_verifications', 0.0)))
+                        eval_local_search_accepted.append(float(info.get(
+                            'local_search_accepted_moves', 0.0)))
+                        eval_local_search_cold.append(float(info.get(
+                            'local_search_cold_start', 0.0)))
+                        eval_local_search_rebootstrap_attempted.append(
+                            float(info.get(
+                                'local_search_rebootstrap_attempted', 0.0)))
+                        eval_local_search_rebootstrap_accepted.append(
+                            float(info.get(
+                                'local_search_rebootstrap_accepted', 0.0)))
+                        eval_local_search_rebootstrap_candidates.append(
+                            float(info.get(
+                                'local_search_rebootstrap_candidate_count',
+                                0.0)))
+                        eval_local_search_rebootstrap_deficit_present.append(
+                            float(info.get(
+                                'local_search_rebootstrap_deficit_present',
+                                0.0)))
+                        eval_local_search_rebootstrap_blocked_no_deficit.append(
+                            float(info.get(
+                                'local_search_rebootstrap_blocked_no_deficit',
+                                0.0)))
                     eval_evidence_comm_bits.append(float(
                         info.get('evidence_comm_bits', 0.0)))
                     eval_evidence_comm_energy.append(float(
@@ -5802,6 +6490,7 @@ class MAPPTrainer:
             alpha=self._checkpoint_confidence_alpha,
             bootstrap_samples=self._checkpoint_bootstrap_samples,
             cvar_fraction=self._checkpoint_cvar_fraction,
+            qos_tol=float(getattr(self.cfg.marl, 'qos_eval_tol', 1e-6)),
         )
         responsibility_stats = summarize_responsibility_episodes(
             eval_responsibility_episodes,
@@ -5876,6 +6565,151 @@ class MAPPTrainer:
                 num_agents=np.asarray(K, dtype=np.int32),
                 num_targets=np.asarray(Q, dtype=np.int32),
             )
+        if structure_teacher_trace_output:
+            trace_path = os.path.abspath(structure_teacher_trace_output)
+            os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+            np.savez_compressed(
+                trace_path,
+                schema_version=np.asarray([2], dtype=np.int16),
+                num_uavs=np.asarray([K], dtype=np.int16),
+                num_targets=np.asarray([Q], dtype=np.int16),
+                episode=np.asarray(structure_trace_episode, dtype=np.int32),
+                seed=np.asarray(structure_trace_seed, dtype=np.int64),
+                frame=np.asarray(structure_trace_frame, dtype=np.int32),
+                p0_resolved=np.asarray(
+                    structure_trace_p0_resolved, dtype=np.uint8),
+                local_obs=np.asarray(
+                    structure_trace_obs, dtype=np.float32),
+                next_local_obs=np.asarray(
+                    structure_trace_next_obs, dtype=np.float32),
+                delta_p=np.asarray(
+                    structure_trace_delta_p, dtype=np.float32),
+                outgoing_message=np.asarray(
+                    structure_trace_message, dtype=np.float32),
+                outgoing_rate=np.asarray(
+                    structure_trace_rate, dtype=np.int16),
+                outgoing_token_mask=np.asarray(
+                    structure_trace_token_mask, dtype=np.uint8),
+                comm_fraction=np.asarray(
+                    structure_trace_comm_fraction, dtype=np.float32),
+                sensing_weights=np.asarray(
+                    structure_trace_sensing_weights, dtype=np.float32),
+                uav_positions=np.asarray(
+                    structure_trace_uav_positions, dtype=np.float32),
+                target_states=np.asarray(
+                    structure_trace_target_states, dtype=np.float32),
+                local_pd=np.asarray(
+                    structure_trace_local_pd, dtype=np.float32),
+                coord_pd_ema=np.asarray(
+                    structure_trace_coord_pd_ema, dtype=np.float32),
+                coord_pd_ema_valid=np.asarray(
+                    structure_trace_coord_pd_ema_valid, dtype=np.uint8),
+                teacher_pair=np.asarray(
+                    structure_trace_pair, dtype=np.uint8),
+                teacher_tx_target=np.asarray(
+                    structure_trace_tx_target, dtype=np.uint8),
+                teacher_rx_target=np.asarray(
+                    structure_trace_rx_target, dtype=np.uint8),
+                teacher_endpoint_target=np.asarray(
+                    structure_trace_endpoint_target, dtype=np.uint8),
+                teacher_receiver_owner=np.asarray(
+                    structure_trace_receiver_owner, dtype=np.int16),
+                teacher_role=np.asarray(
+                    structure_trace_role, dtype=np.int8),
+                privileged_candidate=np.asarray(
+                    structure_trace_candidate, dtype=np.uint8),
+                privileged_d_eff=np.asarray(
+                    structure_trace_d_eff, dtype=np.float64),
+                privileged_d_raw=np.asarray(
+                    structure_trace_d_raw, dtype=np.float64),
+                privileged_alpha=np.asarray(
+                    structure_trace_alpha, dtype=np.float64),
+                privileged_g_dd=np.asarray(
+                    structure_trace_g_dd, dtype=np.float64),
+                privileged_chi_rep=np.asarray(
+                    structure_trace_chi_rep, dtype=np.float64),
+                physical_pd=np.asarray(
+                    structure_trace_physical_pd, dtype=np.float64),
+                local_search_rebootstrap_attempted=np.asarray(
+                    structure_trace_rebootstrap_attempted,
+                    dtype=np.uint8),
+                local_search_rebootstrap_accepted=np.asarray(
+                    structure_trace_rebootstrap_accepted,
+                    dtype=np.uint8),
+                p_fa=np.asarray(
+                    [self.cfg.detection.P_FA], dtype=np.float64),
+                qos_floor=np.asarray([
+                    float(getattr(
+                        self.cfg.marl,
+                        "comm_qos_worst_min",
+                        0.60,
+                    ))
+                ], dtype=np.float64),
+                deficit_priority_gain=np.asarray([
+                    float(getattr(
+                        self.cfg.marl,
+                        "p0_maxmin_deficit_priority_gain",
+                        3.0,
+                    ))
+                ], dtype=np.float64),
+                target_pair_limit=np.asarray(
+                    [self.cfg.detection.K_q_max], dtype=np.int16),
+                reports_per_receiver=np.asarray([
+                    Q * self.cfg.detection.K_q_max
+                ], dtype=np.int16),
+            )
+        n5_counterfactual_stats: Dict[str, float] = {}
+        if n5_counterfactual_output:
+            trace_path = os.path.abspath(n5_counterfactual_output)
+            os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+            with open(trace_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "schema_version": 1,
+                    "protocol": "atomic_n5_same_state_crn_h1",
+                    "target_mode": str(n5_counterfactual_target_mode),
+                    "max_candidates": int(
+                        n5_counterfactual_max_candidates),
+                    "require_proxy_positive": bool(
+                        n5_counterfactual_require_proxy_positive),
+                    "events": n5_counterfactual_events,
+                }, handle, indent=2)
+            proxy_deltas = [
+                float(event["proxy_choice"]["delta_worst"])
+                for event in n5_counterfactual_events
+                if event.get("proxy_choice") is not None
+            ]
+            proxy_oracle_deltas = [
+                float(event["oracle_proxy_pool"]["delta_worst"])
+                for event in n5_counterfactual_events
+                if event.get("oracle_proxy_pool") is not None
+            ]
+            all_oracle_deltas = [
+                float(event["oracle_all_target_pool"]["delta_worst"])
+                for event in n5_counterfactual_events
+                if event.get("oracle_all_target_pool") is not None
+            ]
+            n5_counterfactual_stats = {
+                "eval_n5_cf_event_count": float(
+                    len(n5_counterfactual_events)),
+                "eval_n5_cf_proxy_choice_delta_worst": float(np.mean(
+                    proxy_deltas or [0.0])),
+                "eval_n5_cf_proxy_pool_oracle_delta_worst": float(np.mean(
+                    proxy_oracle_deltas or [0.0])),
+                "eval_n5_cf_all_target_oracle_delta_worst": float(np.mean(
+                    all_oracle_deltas or [0.0])),
+                "eval_n5_cf_false_accept_rate": float(np.mean([
+                    float(event.get("false_accept_rate", 0.0))
+                    for event in n5_counterfactual_events
+                ] or [0.0])),
+                "eval_n5_cf_material_sign_agreement": float(np.mean([
+                    float(event.get("material_sign_agreement", 0.0))
+                    for event in n5_counterfactual_events
+                ] or [0.0])),
+                "eval_n5_cf_max_geometry_error": float(max([
+                    float(event.get("max_geometry_error", 0.0))
+                    for event in n5_counterfactual_events
+                ] or [0.0])),
+            }
         risk_stats: Dict[str, float] = {}
         if eval_risk_quantiles:
             risk_quantile_array = np.asarray(eval_risk_quantiles)
@@ -5963,6 +6797,7 @@ class MAPPTrainer:
             **physical_oracle_stats,
             **evidence_oracle_stats,
             **evidence_topk_capacity_stats,
+            **n5_counterfactual_stats,
             # Actor target-allocation and geometric coverage diagnostics.
             'eval_actor_move_unique_target_fraction': float(np.mean(
                 actor_move_unique_target or [0.0])),
@@ -6006,6 +6841,19 @@ class MAPPTrainer:
             'eval_comm_active_senders': float(np.mean(eval_comm_active)),
             'eval_comm_deadline_violation_rate': float(
                 np.mean(eval_comm_violation or [0.0])),
+            'eval_structure_student_payload_bits_per_frame': float(np.mean(
+                eval_structure_payload_bits or [0.0])),
+            'eval_structure_student_atomic_delivery_rate': float(np.mean(
+                eval_structure_atomic_delivery or [1.0])),
+            'eval_structure_student_selected_bits_per_dim': float(np.mean(
+                eval_structure_selected_bits or [
+                    self._structure_student_bits_per_dim])),
+            'eval_structure_student_public_valid_fraction': float(np.mean(
+                eval_structure_public_valid or [0.0])),
+            'eval_structure_student_public_mean_age_frames': float(np.mean(
+                eval_structure_public_age or [0.0])),
+            'eval_structure_student_insufficient_cache_rate': float(np.mean(
+                eval_structure_insufficient_cache or [0.0])),
             'eval_token_sensing_jaccard': float(np.mean(
                 eval_token_sensing_jaccard or [0.0])),
             'eval_token_sensing_exact_match_rate': float(np.mean(
@@ -6019,6 +6867,33 @@ class MAPPTrainer:
             'eval_p0_solve_time_s_per_resolve': float(
                 np.sum(eval_p0_solve_time)
                 / max(np.sum(eval_p0_resolved), 1.0)),
+            'eval_local_search_candidate_evaluations_per_resolve': float(
+                np.mean(eval_local_search_candidates or [0.0])),
+            'eval_local_search_exact_verifications_per_resolve': float(
+                np.mean(eval_local_search_verifications or [0.0])),
+            'eval_local_search_accepted_moves_per_resolve': float(
+                np.mean(eval_local_search_accepted or [0.0])),
+            'eval_local_search_cold_resolve_fraction': float(
+                np.mean(eval_local_search_cold or [0.0])),
+            'eval_local_search_rebootstrap_attempt_rate': float(
+                np.mean(
+                    eval_local_search_rebootstrap_attempted or [0.0])),
+            'eval_local_search_rebootstrap_accept_rate': float(
+                np.mean(
+                    eval_local_search_rebootstrap_accepted or [0.0])),
+            'eval_local_search_rebootstrap_accept_given_attempt': float(
+                np.sum(eval_local_search_rebootstrap_accepted)
+                / max(np.sum(
+                    eval_local_search_rebootstrap_attempted), 1.0)),
+            'eval_local_search_rebootstrap_candidates_per_resolve': float(
+                np.mean(
+                    eval_local_search_rebootstrap_candidates or [0.0])),
+            'eval_local_search_rebootstrap_deficit_present_rate': float(
+                np.mean(
+                    eval_local_search_rebootstrap_deficit_present or [0.0])),
+            'eval_local_search_rebootstrap_blocked_no_deficit_rate': float(
+                np.mean(
+                    eval_local_search_rebootstrap_blocked_no_deficit or [0.0])),
             'eval_evidence_comm_bits_per_frame': float(np.mean(
                 eval_evidence_comm_bits or [0.0])),
             'eval_evidence_comm_energy_j_per_frame': float(np.mean(

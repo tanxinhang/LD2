@@ -175,7 +175,16 @@ class InterUAVCommunicationModel:
     ) -> np.ndarray:
         """Quantize an arbitrary appended control stream at the packet rate."""
         idx = int(np.clip(rate_index, 0, len(self.rate_bits_per_dim) - 1))
-        bits = self.rate_bits_per_dim[idx]
+        return self.quantize_values_at_bits(
+            values, self.rate_bits_per_dim[idx])
+
+    @staticmethod
+    def quantize_values_at_bits(
+        values: np.ndarray,
+        bits_per_dimension: int,
+    ) -> np.ndarray:
+        """Uniformly quantize a separately coded stream at explicit precision."""
+        bits = max(0, int(bits_per_dimension))
         msg = np.asarray(values, dtype=np.float64)
         if bits <= 0:
             return np.zeros_like(msg)
@@ -201,6 +210,93 @@ class InterUAVCommunicationModel:
         latency_s = serialization_s + self.processing_delay_s
         return snr_db, rate_bps, serialization_s, latency_s
 
+    def link_budget(
+        self,
+        sender_pos: np.ndarray,
+        receiver_pos: np.ndarray,
+        payload_bits: int,
+        effective_bandwidth_hz: float,
+        tx_power_w: float = None,
+    ) -> tuple[float, float, float, float]:
+        """Return the physical one-hop budget used by packet transport.
+
+        Coordination certificates use this public, read-only interface so
+        their SNR, Shannon rate and latency calculations cannot silently
+        diverge from :meth:`transmit`.
+        """
+        if int(payload_bits) < 0:
+            raise ValueError("payload_bits must be non-negative")
+        if float(effective_bandwidth_hz) <= 0.0:
+            raise ValueError("effective_bandwidth_hz must be positive")
+        return self._link(
+            np.asarray(sender_pos, dtype=np.float64),
+            np.asarray(receiver_pos, dtype=np.float64),
+            int(payload_bits),
+            float(effective_bandwidth_hz),
+            tx_power_w,
+        )
+
+    def robust_link_budget(
+        self,
+        sender_pos: np.ndarray,
+        receiver_pos: np.ndarray,
+        payload_bits: int,
+        effective_bandwidth_hz: float,
+        tx_power_w: float = None,
+        *,
+        snr_margin_db: float = 0.0,
+        latency_margin_s: float = 0.0,
+    ) -> tuple[float, float, float, float]:
+        """Return a lower-SNR, upper-latency one-hop budget.
+
+        ``snr_margin_db`` is applied before Shannon rate is evaluated, rather
+        than being attached to a nominal latency after the fact.  The separate
+        ``latency_margin_s`` must therefore bound only *excess* queue,
+        scheduling or processing error after observed-SNR serialization has
+        been removed.  This avoids charging the same channel fade twice.
+
+        Infinite non-negative margins are allowed deliberately: an unresolved
+        conformal quantile then produces zero rate/infinite latency and forces
+        the enclosing protocol certificate to fail closed.
+        """
+        snr_margin = float(snr_margin_db)
+        latency_margin = float(latency_margin_s)
+        if np.isnan(snr_margin) or snr_margin < 0.0:
+            raise ValueError("snr_margin_db must be non-negative and not NaN")
+        if np.isnan(latency_margin) or latency_margin < 0.0:
+            raise ValueError(
+                "latency_margin_s must be non-negative and not NaN")
+        snr_db, _rate, _serialization, _latency = self.link_budget(
+            sender_pos,
+            receiver_pos,
+            payload_bits,
+            effective_bandwidth_hz,
+            tx_power_w,
+        )
+        robust_snr_db = float(snr_db - snr_margin)
+        if np.isneginf(robust_snr_db):
+            robust_snr = 0.0
+        else:
+            robust_snr = float(10.0 ** (robust_snr_db / 10.0))
+        bandwidth = float(effective_bandwidth_hz)
+        rate_bps = bandwidth * np.log2(1.0 + max(robust_snr, 0.0))
+        bits = int(payload_bits)
+        if bits == 0:
+            serialization_s = 0.0
+        elif rate_bps <= 0.0:
+            serialization_s = float("inf")
+        else:
+            serialization_s = bits / float(rate_bps)
+        latency_s = (
+            float(serialization_s) + self.processing_delay_s + latency_margin
+        )
+        return (
+            robust_snr_db,
+            float(rate_bps),
+            float(serialization_s),
+            float(latency_s),
+        )
+
     def transmit(
         self,
         messages: Dict[int, np.ndarray],
@@ -209,6 +305,7 @@ class InterUAVCommunicationModel:
         tx_powers_w: Dict[int, float] = None,
         token_masks: Dict[int, np.ndarray] = None,
         extra_payload_dimensions: Dict[int, int] = None,
+        extra_payload_bits: Dict[int, int] = None,
     ) -> tuple[List[DeliveredMessage], CommunicationStepStats]:
         """Transport one learned broadcast per active sender.
 
@@ -219,14 +316,25 @@ class InterUAVCommunicationModel:
         K = int(positions.shape[0])
         masks = token_masks or {}
         extra_dims = extra_payload_dimensions or {}
+        exact_extra_bits = extra_payload_bits or {}
+
+        def packet_bits(sender: int) -> int:
+            rate_index = int(rate_indices.get(sender, 0))
+            idx = int(np.clip(
+                rate_index, 0, len(self.rate_bits_per_dim) - 1))
+            bits_per_dim = self.rate_bits_per_dim[idx]
+            learned_dimensions = (
+                self._active_dimensions(masks.get(sender))
+                + max(0, int(extra_dims.get(sender, 0)))
+            )
+            appended_bits = max(
+                0, int(exact_extra_bits.get(sender, 0)))
+            payload = learned_dimensions * bits_per_dim + appended_bits
+            return self.header_bits + payload if payload > 0 else 0
+
         active = []
         for k in range(K):
-            active_dims = (
-                self._active_dimensions(masks.get(k))
-                + max(0, int(extra_dims.get(k, 0)))
-            )
-            if (k in messages and self.payload_bits(
-                    rate_indices.get(k, 0), active_dims) > 0):
+            if k in messages and packet_bits(k) > 0:
                 active.append(k)
         stats = CommunicationStepStats(active_senders=len(active))
         if not active or K <= 1:
@@ -239,11 +347,7 @@ class InterUAVCommunicationModel:
         for sender in active:
             rate_idx = int(rate_indices.get(sender, 0))
             sender_mask = masks.get(sender)
-            active_dims = (
-                self._active_dimensions(sender_mask)
-                + max(0, int(extra_dims.get(sender, 0)))
-            )
-            n_bits = self.payload_bits(rate_idx, active_dims)
+            n_bits = packet_bits(sender)
             quantized = self.quantize(messages[sender], rate_idx)
             if sender_mask is not None:
                 mask = np.asarray(sender_mask, dtype=np.float64).reshape(-1)

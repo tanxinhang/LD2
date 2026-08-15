@@ -1,0 +1,7 @@
+extends: exp_800_k6q6_architecture_v2_gate_d0_18_action_aligned_calibration.yaml
+
+marl:
+  eval_seed_bank_path: config/d019_distributed_horizon_holdout_seeds_k6q6.json
+  eval_seed_split: d019_distributed_horizon_holdout
+  final_eval_seed_split: d019_distributed_horizon_holdout
+  checkpoint_confirmation_enabled: false

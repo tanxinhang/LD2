@@ -1,9 +1,54 @@
 # 已知问题与技术债务
 
+> **2026-08-16 测试集污染隔离审计闭环。** 此前文档声明 seed `795/747/105/860/2`
+> "必须永久隔离"（`ARCHITECTURE_V2_RESULTS.md:1764`、`CURRENT_SYSTEM_STATUS.md:412-416`），
+> 但代码层**零隔离**：`load_stratified_seed_split` 只查非空/去重；三个正式 seed bank
+> 仍把隔离种子放在活跃 split（`980_k6q6` 的 test split 前 5 个即全部隔离种子），且
+> `CURRENT_SYSTEM_STATUS.md` 中 6/6 三行决策数据（0.543/0.645/0.635）来自含全部隔离种子的
+> gate10 运行，未加披露。现已落地代码级隔离（详见下文"测试集污染种子隔离"），6/6 决策行
+> 需重跑、bank 需回填。
+
 > **2026-07-14 基础设施审计闭环。** 截至 commit `c77f3e0`，recurrent PPO rollout–buffer–update 条件一致性、streaming GRU 评估、动态 K/Q、per-target GAE bootstrap、RX-only 局部检测置信度边界均已通过自动化回归测试（8 个测试文件，全部硬断言）。此前基于非法 PPO ratio 和全局 P_D 历史输入得到的训练退化与模块归因结果不再作为有效证据。后续实验统一基于修复后的 local-PD 代码路径。
 
 统一格式:问题 / 现象 / 原因 / 状态 / 诊断方法 / 优先级 / 相关文件。
 **已修复**与**开放**分列。
+
+---
+
+## 测试集污染种子隔离 (2026-08-16 审计闭环)
+
+**现象**：文档声明 5 个种子 `795/747/105/860/2`"必须永久隔离"，但代码层无任何拦截；
+`stratified_seeds_980_k6q6.json` 的 test split 前 5 个种子恰为这 5 个，且
+`CURRENT_SYSTEM_STATUS.md`（2026-08-01）中 6/6 三行决策数据来自含全部隔离种子的
+`gate10` 运行（`architecture_v2_scale_k6q6_structure_student_adaptive_b4b8_gate10`、
+`..._cardinality_residual46_gate10`，10 个种子全部命中隔离清单），未加披露。
+
+**原因**：2026-07-29 隔离声明（commit `28cbca9`）只写进文档，未回填三个正式 bank
+（`800_q4` 的 selection 含 795、confirmation 含 747；`980_k6q6` 的 test 含全部 5 个；
+`1130_k8q8` 的 confirmation 含 747/105），`load_stratified_seed_split` 也只校验非空/去重。
+
+**修复（2026-08-16）**：
+- 新增隔离注册表 `config/quarantined_seeds.json`（单一事实来源，可版本化审计）。
+- `uav_isac/agents/trainer.py::load_stratified_seed_split(..., strict=True)`
+  默认 fail-closed：split 含隔离种子即抛错；`load_training_seed_pool` 排除隔离种子。
+- `tools/seed_stratification.py::generate_seed_bank` 生成新 bank 时自动排除隔离种子，
+  并写入 `quarantined_excluded` 字段。
+- 回归测试 `tests/test_quarantined_seeds.py`（含 legacy bank 审计哨兵）；
+  `tests/test_robust_checkpoint_protocol.py` 结构验证改用显式 `strict=False`。
+
+**遗留（开放，P0）**：
+1. 三个 legacy bank 未回填——需用 `tools/seed_stratification.py` 重建
+   `980_k6q6` 的 test bank（保留 `scenario_fingerprint` v2）并重跑 6/6 三行决策
+   运行（adaptive_b4b8 / cardinality_residual46 / teacher_trace）；
+2. `CURRENT_SYSTEM_STATUS.md` 6/6 表需加污染披露或换用干净种子结果；
+3. 回填后 `tests/test_quarantined_seeds.py` 的 980_k6q6 哨兵断言需同步更新
+   （改为断言不再命中）。
+
+**诊断方法**：`python -m pytest tests/test_quarantined_seeds.py -q`。
+**优先级**：P0。
+**相关文件**：`config/quarantined_seeds.json`、`uav_isac/agents/trainer.py`、
+`tools/seed_stratification.py`、`tests/test_quarantined_seeds.py`、
+`tests/test_robust_checkpoint_protocol.py`。
 
 ---
 

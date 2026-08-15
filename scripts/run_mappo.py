@@ -72,10 +72,231 @@ def main():
         help="optional .npz path for receiver-target deflection traces from "
              "the final paired evaluation; used by offline Gate 1b only",
     )
+    ap.add_argument(
+        "--structure-teacher-trace-output",
+        default=None,
+        help="optional .npz path containing frozen centralized P0 structure "
+             "labels, the student's actual local information, and a separate "
+             "privileged physical graph for identifiability audit",
+    )
+    ap.add_argument(
+        "--structure-student-checkpoint",
+        default=None,
+        help="optional frozen continuous-edge student used instead of the "
+             "privileged ranking graph during final evaluation",
+    )
+    ap.add_argument(
+        "--structure-student-channel",
+        action="store_true",
+        help="transport the frozen student's per-target Tx/Rx endpoint "
+             "embeddings through the physical U2U Token channel instead of "
+             "assembling the edge graph information-equivalently",
+    )
+    ap.add_argument(
+        "--structure-student-bits-per-dim",
+        type=int,
+        default=8,
+        help="independent quantization precision for structural endpoint "
+             "Tokens (default: 8 bits/dimension)",
+    )
+    ap.add_argument(
+        "--structure-student-adaptive-min-bits-per-dim",
+        type=int,
+        default=0,
+        help="enable capacity-aware structural quantization when positive; "
+             "each sender selects the highest deadline-feasible precision "
+             "between this minimum and --structure-student-bits-per-dim",
+    )
+    ap.add_argument(
+        "--structure-student-min-comm-fraction",
+        type=float,
+        default=0.01,
+        help="minimum per-UAV power fraction reserved when a mandatory "
+             "structural packet is sent (default: 0.01)",
+    )
+    ap.add_argument(
+        "--structure-student-send-mode",
+        choices=["every_frame", "p0_resolve"],
+        default="every_frame",
+        help="send structural endpoints every frame or only before a fixed "
+             "P0 Hold-N re-solve (default: every_frame)",
+    )
+    ap.add_argument(
+        "--structure-student-allow-scale-migration",
+        action="store_true",
+        help="explicitly allow a cardinality-equivariant frozen structural "
+             "student to run at K/Q different from its training metadata",
+    )
+    ap.add_argument(
+        "--dynamic-local-search-mode",
+        choices=["off", "previous", "oracle", "hybrid", "replicated"],
+        default="off",
+        help="Gate C1.7 dynamic candidate-graph controller",
+    )
+    ap.add_argument("--local-move-ranker-checkpoint", default=None)
+    ap.add_argument(
+        "--local-search-cold-initializer",
+        choices=["role_first", "factor_graph"],
+        default="role_first",
+    )
+    ap.add_argument("--factor-graph-coordinator-checkpoint", default=None)
+    ap.add_argument("--local-candidate-neighbor-topk", type=int, default=4)
+    ap.add_argument("--local-candidate-target-topk", type=int, default=4)
+    ap.add_argument("--local-candidate-coverage-fraction", type=float,
+                    default=0.30)
+    ap.add_argument("--local-search-cold-rounds", type=int, default=8)
+    ap.add_argument("--local-search-warm-rounds", type=int, default=8)
+    ap.add_argument("--local-search-warm-top-m", type=int, default=3)
+    ap.add_argument(
+        "--local-search-rebootstrap-mode",
+        choices=["off", "periodic", "oracle"],
+        default="off",
+    )
+    ap.add_argument(
+        "--local-search-rebootstrap-interval-frames", type=int, default=0)
+    ap.add_argument("--local-search-rebootstrap-rounds", type=int, default=8)
+    ap.add_argument(
+        "--local-search-rebootstrap-require-deficit",
+        action="store_true",
+        help=(
+            "diagnostic safety gate: allow a scheduled N5 rebootstrap only "
+            "when at least one public QoS estimate is below the floor"),
+    )
+    ap.add_argument(
+        "--n5-counterfactual-output",
+        default=None,
+        help="optional JSON output for the atomic same-state CRN N5 audit",
+    )
+    ap.add_argument(
+        "--n5-counterfactual-max-events", type=int, default=0,
+        help="maximum warm resolve events to audit; 0 means all eligible",
+    )
+    ap.add_argument(
+        "--n5-counterfactual-target-mode",
+        choices=["proxy_weak", "all", "both"],
+        default="both",
+        help="audit deployed weak-target N5, diagnostic all-target N5, or both",
+    )
+    ap.add_argument(
+        "--n5-counterfactual-seeds",
+        default="",
+        help="optional comma-separated development seeds eligible for audit",
+    )
+    ap.add_argument(
+        "--n5-counterfactual-max-candidates", type=int, default=0,
+        help="proxy-ranked candidate cap for smoke tests; 0 evaluates the pool",
+    )
+    ap.add_argument(
+        "--n5-counterfactual-require-proxy-positive",
+        action="store_true",
+        help="audit only warm states containing an atomic proxy-positive N5",
+    )
+    ap.add_argument(
+        "--comm-channel-control",
+        choices=["configured", "perfect"],
+        default="configured",
+        help="evaluation audit control: 'perfect' uses a very wide, permissive "
+             "U2U channel to isolate representation/quantization loss",
+    )
+    ap.add_argument(
+        "--comm-nonzero-bits-override",
+        type=int,
+        default=0,
+        help="evaluation audit control for two-level rate configurations; "
+             "replace the non-silent bits/dimension when positive",
+    )
+    ap.add_argument(
+        "--comm-bandwidth-hz-override",
+        type=float,
+        default=0.0,
+        help="evaluation-only U2U bandwidth override in Hz; non-positive "
+             "keeps the configured value",
+    )
+    ap.add_argument(
+        "--comm-deadline-s-override",
+        type=float,
+        default=0.0,
+        help="evaluation-only U2U packet deadline override in seconds; "
+             "non-positive keeps the configured value",
+    )
+    ap.add_argument(
+        "--comm-snr-threshold-db-override",
+        type=float,
+        default=None,
+        help="evaluation-only U2U receive-SNR threshold override in dB",
+    )
     args = ap.parse_args()
+    try:
+        n5_counterfactual_seeds = [
+            int(value.strip())
+            for value in str(args.n5_counterfactual_seeds).split(",")
+            if value.strip()
+        ]
+    except ValueError:
+        ap.error("--n5-counterfactual-seeds must be comma-separated integers")
+    if args.structure_student_channel and not args.structure_student_checkpoint:
+        ap.error(
+            "--structure-student-channel requires "
+            "--structure-student-checkpoint")
+    if (args.dynamic_local_search_mode != "off"
+            and not args.structure_student_checkpoint):
+        ap.error(
+            "--dynamic-local-search-mode requires "
+            "--structure-student-checkpoint")
+    if (args.dynamic_local_search_mode == "hybrid"
+            and not args.local_move_ranker_checkpoint):
+        ap.error(
+            "hybrid dynamic local search requires "
+            "--local-move-ranker-checkpoint")
+    if (args.dynamic_local_search_mode != "off"
+            and args.local_search_cold_initializer == "factor_graph"
+            and not args.factor_graph_coordinator_checkpoint):
+        ap.error(
+            "factor_graph cold initialization requires "
+            "--factor-graph-coordinator-checkpoint")
+    if (args.local_search_rebootstrap_mode == "periodic"
+            and args.local_search_rebootstrap_interval_frames <= 0):
+        ap.error(
+            "periodic rebootstrap requires a positive "
+            "--local-search-rebootstrap-interval-frames")
+    if (args.n5_counterfactual_output
+            and args.dynamic_local_search_mode == "off"):
+        ap.error(
+            "--n5-counterfactual-output requires dynamic local search")
+    if (args.n5_counterfactual_output
+            and args.local_search_rebootstrap_mode != "off"):
+        ap.error(
+            "N5 counterfactual baseline requires rebootstrap mode off")
 
     # Config: single source of truth (default.yaml) or an explicit --config.
     config = load_config(args.config) if args.config else get_default_config()
+    if args.comm_channel_control == "perfect":
+        config.marl.comm_bandwidth_hz = 1.0e9
+        config.marl.comm_deadline_s = 1.0
+        config.marl.comm_snr_threshold_db = -300.0
+        config.marl.comm_channel_randomization_enabled = False
+    if args.comm_nonzero_bits_override > 0:
+        if len(config.marl.comm_rate_bits_per_dim) != 2:
+            ap.error(
+                "--comm-nonzero-bits-override currently requires a "
+                "two-level [silence, active] rate configuration")
+        config.marl.comm_rate_bits_per_dim = [
+            0, int(args.comm_nonzero_bits_override)]
+    channel_override = False
+    if args.comm_bandwidth_hz_override > 0.0:
+        config.marl.comm_bandwidth_hz = float(
+            args.comm_bandwidth_hz_override)
+        channel_override = True
+    if args.comm_deadline_s_override > 0.0:
+        config.marl.comm_deadline_s = float(
+            args.comm_deadline_s_override)
+        channel_override = True
+    if args.comm_snr_threshold_db_override is not None:
+        config.marl.comm_snr_threshold_db = float(
+            args.comm_snr_threshold_db_override)
+        channel_override = True
+    if channel_override:
+        config.marl.comm_channel_randomization_enabled = False
 
     seed = args.seed
     set_seed(seed)
@@ -462,6 +683,53 @@ def main():
         config=config,
         device=device,
     )
+    if args.structure_student_checkpoint:
+        trainer.load_frozen_structure_student(
+            args.structure_student_checkpoint,
+            channel_enabled=args.structure_student_channel,
+            bits_per_dim=args.structure_student_bits_per_dim,
+            adaptive_min_bits_per_dim=(
+                args.structure_student_adaptive_min_bits_per_dim),
+            min_comm_fraction=(
+                args.structure_student_min_comm_fraction),
+            send_mode=args.structure_student_send_mode,
+            allow_scale_migration=(
+                args.structure_student_allow_scale_migration),
+        )
+        print(
+            "loaded frozen structure student from "
+            f"{args.structure_student_checkpoint}"
+            + (" through physical U2U endpoint transport"
+               if args.structure_student_channel
+               else " through information-equivalent graph assembly"))
+    if args.dynamic_local_search_mode != "off":
+        trainer.configure_dynamic_local_search(
+            args.dynamic_local_search_mode,
+            ranker_checkpoint=args.local_move_ranker_checkpoint,
+            cold_initializer=args.local_search_cold_initializer,
+            factor_graph_checkpoint=(
+                args.factor_graph_coordinator_checkpoint),
+            neighbor_topk=args.local_candidate_neighbor_topk,
+            target_topk=args.local_candidate_target_topk,
+            coverage_fraction=(
+                args.local_candidate_coverage_fraction),
+            cold_rounds=args.local_search_cold_rounds,
+            warm_rounds=args.local_search_warm_rounds,
+            warm_top_m=args.local_search_warm_top_m,
+            rebootstrap_mode=args.local_search_rebootstrap_mode,
+            rebootstrap_interval_frames=(
+                args.local_search_rebootstrap_interval_frames),
+            rebootstrap_rounds=args.local_search_rebootstrap_rounds,
+            rebootstrap_require_deficit=bool(
+                args.local_search_rebootstrap_require_deficit),
+        )
+        print(
+            "configured dynamic local search: "
+            f"mode={args.dynamic_local_search_mode}, "
+            f"cold={args.local_search_cold_initializer}, "
+            f"neighbors={args.local_candidate_neighbor_topk}, "
+            f"targets={args.local_candidate_target_topk}, "
+            f"top_m={args.local_search_warm_top_m}")
     trainer._bc_actor = bc_actor.actor if bc_actor else None
     if warm_runtime and not args.ignore_warm_runtime:
         trainer.restore_policy_runtime_state(warm_runtime)
@@ -927,6 +1195,61 @@ def main():
         "physical_oracle_stride": max(
             0, int(args.physical_oracle_stride)),
         "evidence_trace_output": args.evidence_trace_output,
+        "structure_teacher_trace_output": (
+            args.structure_teacher_trace_output),
+        "structure_student_checkpoint": (
+            args.structure_student_checkpoint),
+        "dynamic_local_search": {
+            "mode": args.dynamic_local_search_mode,
+            "ranker_checkpoint": args.local_move_ranker_checkpoint,
+            "cold_initializer": args.local_search_cold_initializer,
+            "factor_graph_checkpoint": (
+                args.factor_graph_coordinator_checkpoint),
+            "neighbor_topk": args.local_candidate_neighbor_topk,
+            "target_topk": args.local_candidate_target_topk,
+            "coverage_fraction": (
+                args.local_candidate_coverage_fraction),
+            "cold_rounds": args.local_search_cold_rounds,
+            "warm_rounds": args.local_search_warm_rounds,
+            "warm_top_m": args.local_search_warm_top_m,
+            "rebootstrap_mode": args.local_search_rebootstrap_mode,
+            "rebootstrap_interval_frames": (
+                args.local_search_rebootstrap_interval_frames),
+            "rebootstrap_rounds": args.local_search_rebootstrap_rounds,
+            "rebootstrap_require_deficit": bool(
+                args.local_search_rebootstrap_require_deficit),
+        },
+        "n5_counterfactual": {
+            "output": args.n5_counterfactual_output,
+            "max_events": int(args.n5_counterfactual_max_events),
+            "target_mode": args.n5_counterfactual_target_mode,
+            "seeds": n5_counterfactual_seeds,
+            "max_candidates": int(
+                args.n5_counterfactual_max_candidates),
+            "require_proxy_positive": bool(
+                args.n5_counterfactual_require_proxy_positive),
+        },
+        "structure_student_channel": bool(
+            args.structure_student_channel),
+        "structure_student_bits_per_dim": int(
+            args.structure_student_bits_per_dim),
+        "structure_student_adaptive_min_bits_per_dim": int(
+            args.structure_student_adaptive_min_bits_per_dim),
+        "structure_student_min_comm_fraction": float(
+            args.structure_student_min_comm_fraction),
+        "structure_student_send_mode": (
+            args.structure_student_send_mode),
+        "structure_student_allow_scale_migration": bool(
+            args.structure_student_allow_scale_migration),
+        "comm_channel_control": args.comm_channel_control,
+        "comm_nonzero_bits_override": int(
+            args.comm_nonzero_bits_override),
+        "comm_bandwidth_hz_override": float(
+            args.comm_bandwidth_hz_override),
+        "comm_deadline_s_override": float(
+            args.comm_deadline_s_override),
+        "comm_snr_threshold_db_override": (
+            args.comm_snr_threshold_db_override),
     }
     with open(os.path.join(out_dir, "run_manifest.json"), "w") as f:
         _json.dump(manifest, f, indent=2)
@@ -972,6 +1295,18 @@ def main():
             physical_oracle_stride=max(
                 0, int(args.physical_oracle_stride)),
             evidence_trace_output=args.evidence_trace_output,
+            structure_teacher_trace_output=(
+                args.structure_teacher_trace_output),
+            n5_counterfactual_output=args.n5_counterfactual_output,
+            n5_counterfactual_max_events=max(
+                0, int(args.n5_counterfactual_max_events)),
+            n5_counterfactual_target_mode=(
+                args.n5_counterfactual_target_mode),
+            n5_counterfactual_seed_filter=n5_counterfactual_seeds,
+            n5_counterfactual_max_candidates=max(
+                0, int(args.n5_counterfactual_max_candidates)),
+            n5_counterfactual_require_proxy_positive=bool(
+                args.n5_counterfactual_require_proxy_positive),
         )
         eval_keys = sorted(ev.keys())
         with open(os.path.join(out_dir, "paired_eval.csv"), "w", newline="") as f:

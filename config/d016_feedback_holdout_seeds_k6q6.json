@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "source_bank": "config/stratified_seeds_980_k6q6.json",
+  "selection_rule": "20 evenly spaced unused ranks from the same 468 eligible non-reserved training seeds sorted by difficulty_score_m; excludes all prior D0.16 calibration and diagnostic-validation episodes",
+  "protected_splits_excluded": ["selection", "stress", "test", "confirmation"],
+  "splits": {
+    "d016_feedback_holdout": [
+      718, 16, 834, 434, 717, 793, 521, 20, 76, 509,
+      278, 169, 486, 183, 302, 767, 552, 580, 680, 855
+    ]
+  }
+}

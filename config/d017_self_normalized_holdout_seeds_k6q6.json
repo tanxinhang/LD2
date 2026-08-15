@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "source_bank": "config/stratified_seeds_980_k6q6.json",
+  "selection_rule": "20 evenly spaced ranks from the 388 remaining eligible non-reserved K6Q6 training seeds sorted by difficulty_score_m, frozen after the D0.17 normalized margin and excluding all 80 prior D0.12/D0.16 calibration and development episodes",
+  "protected_splits_excluded": ["selection", "stress", "test", "confirmation"],
+  "splits": {
+    "d017_self_normalized_holdout": [
+      719, 78, 104, 808, 463, 390, 229, 967, 41, 53,
+      557, 963, 753, 765, 37, 858, 46, 924, 535, 713
+    ]
+  }
+}

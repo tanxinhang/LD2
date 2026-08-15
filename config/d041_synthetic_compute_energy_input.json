@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "epoch_id": "d041-synthetic-compute-energy-unit-smoke",
+  "source_kind": "synthetic_unit_test",
+  "controller_implementation_sha256": "ff4e12afca33c9769216426e9609bdd44999673e29c621ebb33e9580f564f1ab",
+  "hardware_id": "synthetic-not-hardware",
+  "runtime_id": "synthetic-runtime-not-deployment",
+  "meter_id": "synthetic-counter-not-a-physical-meter",
+  "meter_calibration_id": "synthetic-no-calibration",
+  "meter_difference_uncertainty_accounted": false,
+  "meter_scope": "complete_controller_package",
+  "counter_semantics": "monotone_quantized_energy_joule",
+  "training_episode_ids": ["synthetic-energy-train-00"],
+  "calibration_episode_ids": [
+    "synthetic-energy-cal-00", "synthetic-energy-cal-01",
+    "synthetic-energy-cal-02", "synthetic-energy-cal-03",
+    "synthetic-energy-cal-04", "synthetic-energy-cal-05",
+    "synthetic-energy-cal-06", "synthetic-energy-cal-07",
+    "synthetic-energy-cal-08", "synthetic-energy-cal-09",
+    "synthetic-energy-cal-10", "synthetic-energy-cal-11",
+    "synthetic-energy-cal-12", "synthetic-energy-cal-13",
+    "synthetic-energy-cal-14", "synthetic-energy-cal-15",
+    "synthetic-energy-cal-16", "synthetic-energy-cal-17",
+    "synthetic-energy-cal-18"
+  ],
+  "validation_episode_ids": [
+    "synthetic-energy-val-00", "synthetic-energy-val-01",
+    "synthetic-energy-val-02", "synthetic-energy-val-03",
+    "synthetic-energy-val-04"
+  ],
+  "risk": {"miscoverage": 0.05},
+  "calibration_events": [
+    {"episode_id":"synthetic-energy-cal-00","event_id":"0","counter_start_j":100.0,"counter_end_j":100.100,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-01","event_id":"0","counter_start_j":100.0,"counter_end_j":100.102,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-02","event_id":"0","counter_start_j":100.0,"counter_end_j":100.104,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-03","event_id":"0","counter_start_j":100.0,"counter_end_j":100.106,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-04","event_id":"0","counter_start_j":100.0,"counter_end_j":100.108,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-05","event_id":"0","counter_start_j":100.0,"counter_end_j":100.110,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-06","event_id":"0","counter_start_j":100.0,"counter_end_j":100.112,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-07","event_id":"0","counter_start_j":100.0,"counter_end_j":100.114,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-08","event_id":"0","counter_start_j":100.0,"counter_end_j":100.116,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-09","event_id":"0","counter_start_j":100.0,"counter_end_j":100.118,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-10","event_id":"0","counter_start_j":100.0,"counter_end_j":100.120,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-11","event_id":"0","counter_start_j":100.0,"counter_end_j":100.122,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-12","event_id":"0","counter_start_j":100.0,"counter_end_j":100.124,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-13","event_id":"0","counter_start_j":100.0,"counter_end_j":100.126,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-14","event_id":"0","counter_start_j":100.0,"counter_end_j":100.128,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-15","event_id":"0","counter_start_j":100.0,"counter_end_j":100.130,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-16","event_id":"0","counter_start_j":100.0,"counter_end_j":100.132,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-17","event_id":"0","counter_start_j":100.0,"counter_end_j":100.134,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-cal-18","event_id":"0","counter_start_j":100.0,"counter_end_j":100.136,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false}
+  ],
+  "validation_events": [
+    {"episode_id":"synthetic-energy-val-00","event_id":"0","counter_start_j":200.0,"counter_end_j":200.120,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-val-01","event_id":"0","counter_start_j":200.0,"counter_end_j":200.125,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-val-02","event_id":"0","counter_start_j":200.0,"counter_end_j":200.130,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-val-03","event_id":"0","counter_start_j":200.0,"counter_end_j":200.135,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false},
+    {"episode_id":"synthetic-energy-val-04","event_id":"0","counter_start_j":200.0,"counter_end_j":200.140,"counter_resolution_j":0.001,"counter_wrap_count":0,"window_censored":false}
+  ]
+}

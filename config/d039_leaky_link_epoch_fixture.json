@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "frozen_link_reliability_epoch_validation_complete",
+  "epoch": {
+    "epoch_id": "d039-intentional-leakage-test",
+    "joint_coverage_floor_union_bound": 0.9,
+    "calibration_episode_ids": ["959"],
+    "training_episode_ids": [],
+    "finite": true
+  },
+  "recommended_controller_parameters": {
+    "horizon_network_repetition_count": 2,
+    "horizon_network_excess_queue_bound_s": 0.00018,
+    "usable_for_shadow_controller": true
+  },
+  "validation": {
+    "validation_episode_ids": ["link-val-disjoint"]
+  },
+  "provenance": {
+    "source_kind": "synthetic_unit_test",
+    "protocol_implementation_sha256": "0e0ea6b4a68ff6b5dcdec4ca83146ff0ae22d5cad466c6e0d95ad274e3a299b9",
+    "input": null
+  },
+  "authority": {
+    "empirical_hardware_source": false,
+    "independent_validation_present": true,
+    "link_certificate_candidate": false,
+    "system_commit_authority": false
+  }
+}

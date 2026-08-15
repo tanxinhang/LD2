@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source_bank": "config/stratified_seeds_980_k6q6.json",
+  "selection_rule": "30 evenly spaced midpoint ranks from the 288 remaining eligible non-reserved K6Q6 training seeds sorted by difficulty_score_m after excluding every D0.12-D0.19 development episode; frozen before D0.20 trace generation",
+  "protected_splits_excluded": ["selection", "stress", "test", "confirmation"],
+  "prior_development_episode_count_excluded": 180,
+  "splits": {
+    "d020_paired_horizon_holdout": [
+      508, 971, 788, 15, 10, 440, 523, 271, 50, 745,
+      219, 457, 277, 748, 26, 161, 674, 530, 850, 419,
+      826, 329, 376, 728, 786, 279, 72, 561, 670, 117
+    ]
+  }
+}

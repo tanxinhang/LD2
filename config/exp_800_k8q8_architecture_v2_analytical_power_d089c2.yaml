@@ -1,0 +1,8 @@
+# D0.89-C2: analytical inner power + historical log reward + outer retrain.
+# Isolates the "shrunk action space" learning contribution (C2 - C1), keeping
+# the historical -log(1-P_D) utility so the reward alignment is not confounded.
+extends: exp_800_k8q8_architecture_v2_analytical_power_d089a.yaml
+
+marl:
+  lr: 0.00003
+  reward_utility_mode: log

@@ -1,0 +1,7 @@
+extends: exp_800_k6q6_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml
+
+marl:
+  eval_seed_bank_path: config/d016_feedback_holdout_seeds_k6q6.json
+  eval_seed_split: d016_feedback_holdout
+  final_eval_seed_split: d016_feedback_holdout
+  checkpoint_confirmation_enabled: false

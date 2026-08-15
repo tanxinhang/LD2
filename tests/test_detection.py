@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from uav_isac.physical.detection import (
     compute_detection_probabilities,
+    minimum_deflection_for_detection_probability,
     compute_target_utilities,
     compute_weighted_utility,
     compute_team_reward,
@@ -56,6 +57,14 @@ class TestDetectionProbabilities:
         D_q = np.array([5.0, 50.0])
         P_D = compute_detection_probabilities(D_q, P_FA=0.001)
         assert P_D[1] > P_D[0]
+
+    def test_probability_inverse_recovers_minimum_deflection(self):
+        requested = np.asarray([0.2, 0.6, 0.9])
+        deflection = minimum_deflection_for_detection_probability(
+            requested, P_FA=0.001)
+        reconstructed = compute_detection_probabilities(
+            deflection, P_FA=0.001)
+        np.testing.assert_allclose(reconstructed, requested, atol=1e-10)
 
 
 class TestTargetUtilities:

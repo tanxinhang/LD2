@@ -142,6 +142,89 @@ class MARLParams:
     lambda_report: float = 1.0e-5
     alpha_pd: float = 0.0                    # direct P_D reward weight (0=utility-only, 0.5=hybrid)
     lambda_tail: float = 0.0                 # bottom-3 bonus weight
+    # Detection-utility curvature for the team reward.
+    #   "log"         -> -log(1-P_D) (historical; convex in Deflection)
+    #   "concave"     -> 1-exp(-kappa*D) (concave/submodular, fixes B8)
+    #   "maxmin_dual" -> LP-dual-price weighted reward aligned with the
+    #                    fixed-structure max-min power coordinator.
+    reward_utility_mode: str = "log"
+    reward_concave_kappa: float = 1.0        # saturation scale for concave/dual modes
+    # Analytical inner sensing-power solver (D0.89).  When enabled, the
+    # learned per-target sensing head is ignored for execution and the fixed-
+    # owner max-min power LP allocates sensing power after P0 selects the
+    # structure.  The learned policy still controls the communication/sensing
+    # budget split (P_comm -> b_i = 1 - P_comm).  reserve_pd > 0 adds a
+    # reserve-first per-target floor derived from that detection probability.
+    analytical_sensing_power_enabled: bool = False
+    analytical_sensing_power_reserve_pd: float = 0.0
+    # D0.92: reference-normalized bargaining objective for the inner power
+    # layer.  When enabled (requires analytical_sensing_power_enabled), the
+    # fixed-owner power LP maximizes the common normalized headroom gain
+    # eta = min_q (D_q - D^0_q)/(D^I_q - D^0_q) instead of pure max-min, so a
+    # hard target with a small reachable ceiling gets a fair share of its own
+    # opportunity rather than being starved.  steady/worst/weak3 remain
+    # evaluation metrics only.
+    bargaining_objective_enabled: bool = False
+    # D0.93 L0: analytical minimum communication power.  When enabled (requires
+    # joint_isac_power_enabled), each active sender's communication power is the
+    # analytic minimum needed to meet the SNR/deadline delivery criterion for
+    # every receiver, instead of the learned fraction.  This reclaims the link
+    # margin into the sensing budget (b_i = 1 - P_comm^min) before capability is
+    # evaluated.  Transport semantics (active set, token bits, receiver set,
+    # deadline) are unchanged.
+    analytical_comm_power_enabled: bool = False
+    # D0.93-A1: task-constrained power allocation.  When enabled (requires
+    # analytical_sensing_power_enabled), the inner solver solves the capability
+    # gauge (min gamma s.t. worst+bottom-k+steady floors, budget <= gamma*b) via
+    # the PWL LP; if gamma* <= 1 the returned power satisfies the FULL task, else
+    # it falls back to reserve-first max-min (best effort).  This makes QoS a
+    # hard constraint rather than a scalar weight.
+    task_constrained_power_enabled: bool = False
+    # Gauge floor targets for task_constrained_power_enabled, as
+    # [worst, weak3(k-floor mean), steady, k].  A small worst margin (e.g. 0.61)
+    # above the evaluation floor 0.60 makes the realized worst robustly clear
+    # the strict `>= 0.60` check (the solver otherwise pins worst exactly at the
+    # floor, failing the exact comparison by float noise ~1e-16).
+    task_constrained_qos_floors: List[float] = field(
+        default_factory=lambda: [0.60, 0.70, 0.80, 3])
+    # D1.1-A (advice 010): inner L1 mode under task_constrained_power_enabled.
+    #   "gauge"         -> capability gauge only (satisficing at the floors).
+    #   "lexicographic" -> Stage A gauge proves the floors feasible; Stage B
+    #                      maximises the worst within the feasible region
+    #                      (QoS-constrained max-min); infeasible frames fall back
+    #                      to reserve-first max-min (best effort).
+    task_constrained_mode: str = "gauge"
+    # D1.1-A (advice 010): solver-level tolerance in the QoS feasibility check.
+    # The task-constrained gauge pins the worst target exactly at the 0.60 floor
+    # (target of the LP), and P_D = Q(Q^-1(P_FA) - sqrt(D)) evaluated there can
+    # land 1e-16 below the floor, failing a strict `>=` comparison by float
+    # noise.  1e-6 is negligible on P_D in [0,1] but far above binary error.
+    qos_eval_tol: float = 1e-6
+    # D0.89-B: make the P0 structure ranking power-independent.  When enabled
+    # (requires analytical_sensing_power_enabled), the deflection fed to P0 is
+    # computed at unit sensing power so P0 ranks on the per-watt gain a_ijq
+    # instead of the (now LP-determined) powered deflection, breaking the
+    # structure<-power<-structure circular dependency.  The bottleneck target
+    # priority uses the previous frame's max-min LP dual price lambda*.
+    analytical_structure_ranking_enabled: bool = False
+    # D0.95: analytical capability-guided movement (L3 geometry layer).  When
+    # enabled (requires analytical_sensing_power_enabled and
+    # analytical_structure_ranking_enabled), the learned trajectory increment is
+    # overridden by a receding-horizon price-mediated geometry step: using the
+    # previous frame's per-watt coefficient, owner map and sensing budget, the
+    # capability gauge is solved and each UAV moves one step along the
+    # deficit->capability gradient (steepest descent of the feasibility
+    # violation, then of gamma*).  This is the distributed L3 hook; structure
+    # (L2) is re-optimised by P0 at the moved geometry each frame.
+    analytical_movement_enabled: bool = False
+    # D1.1-B (advice 010): bounded multi-candidate trust-region L3.  Instead of
+    # one normalized gradient step per frame, generate ~6 whole-fleet movement
+    # candidates (stay, dual-price step, half step, capability-price step, and
+    # radial steps toward the two weakest targets), evaluate each at the moved
+    # geometry with the exact max-min power LP, and execute the best.  Adds a
+    # small fixed number of LP evaluations per frame; a no-op when the
+    # single-step gradient is already optimal.
+    analytical_movement_candidates_enabled: bool = False
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.

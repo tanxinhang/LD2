@@ -1,0 +1,10 @@
+# D1.1-A (advice 010): lexicographic QoS-constrained max-min L1 on top of the
+# D0.95 L0+L1+L3 analytical stack with the robust margin floors.  Stage A: the
+# capability gauge proves the three floors feasible; Stage B: maximise the worst
+# within the feasible region (instead of executing the gauge's satisficing
+# allocation).  Goal: keep QoS=20/20 (strict, via the 0.61 margin) while pushing
+# mean worst above the gauge's floor-pinned 0.60.
+extends: exp_800_k8q8_analytical_l0l1_movement_margin.yaml
+
+marl:
+  task_constrained_mode: lexicographic

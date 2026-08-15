@@ -408,6 +408,12 @@ def test_fast_token_rounds_hold_only_movement():
     cfg.marl.rollout_steps = 4
     cfg.marl.ppo_epochs = 1
     cfg.marl.minibatch_size = 4
+    # The 800_q4 selection/confirmation splits still contain quarantined
+    # seeds 795/747; use the clean test split and disable checkpoint
+    # confirmation so trainer construction does not fail closed on the legacy
+    # bank (see tests/test_quarantined_seeds.py).
+    cfg.marl.eval_seed_split = "test"
+    cfg.marl.checkpoint_confirmation_enabled = False
     assert cfg.marl.actor_decision_interval == 1
     assert cfg.marl.movement_decision_interval == 2
 
@@ -501,6 +507,11 @@ def test_headwise_credit_rollout_builds_four_gae_streams_and_updates():
     cfg.marl.ppo_epochs = 1
     cfg.marl.minibatch_size = 4
     cfg.marl.early_stop = False
+    # 800_q4 selection/confirmation still contain quarantined seeds 795/747;
+    # use the clean test split and disable confirmation (see
+    # tests/test_quarantined_seeds.py).
+    cfg.marl.eval_seed_split = "test"
+    cfg.marl.checkpoint_confirmation_enabled = False
 
     env = UAVISACEnv(cfg, seed=37)
     shared = _small_joint_agent(cfg, env)
@@ -634,6 +645,11 @@ def test_causal_ccp_rollout_collects_paired_interventions_and_updates():
     cfg.marl.causal_ccp_intervention_stride = 1
     cfg.marl.causal_ccp_min_samples = 4
     cfg.marl.causal_ccp_epochs = 2
+    # 800_q4 selection/confirmation still contain quarantined seeds 795/747;
+    # use the clean test split and disable confirmation (see
+    # tests/test_quarantined_seeds.py).
+    cfg.marl.eval_seed_split = "test"
+    cfg.marl.checkpoint_confirmation_enabled = False
 
     env = UAVISACEnv(cfg, seed=47)
     shared = _small_joint_agent(cfg, env)

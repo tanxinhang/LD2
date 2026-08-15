@@ -1,0 +1,5 @@
+# D0.93 L0+L1(bargaining): comm-slack recovery + opportunity-fair power LP.
+extends: exp_800_k8q8_architecture_v2_analytical_power_l0l1.yaml
+
+marl:
+  bargaining_objective_enabled: true

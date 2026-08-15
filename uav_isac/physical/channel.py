@@ -90,7 +90,10 @@ def generate_rician_channel(
     nlos_imag = rng.normal(0.0, 1.0 / np.sqrt(2.0))
     nlos = complex(nlos_real, nlos_imag)
 
-    h = np.sqrt(path_loss_linear) * (los + nlos)
+    # Both components must carry their Rician normalization.  Omitting the
+    # NLoS factor makes E|h|^2 = PL*(K/(K+1)+1), which overstates average link
+    # gain and invalidates any residual calibration built from this channel.
+    h = np.sqrt(path_loss_linear) * (los + nlos_factor * nlos)
     return h
 
 

@@ -81,9 +81,15 @@ def test_versioned_seed_bank_is_disjoint_and_loaded_by_canonical_config():
     path = "config/stratified_seeds_800_q4.json"
     with open(path, "r", encoding="utf-8") as handle:
         bank = json.load(handle)
-    selection = load_stratified_seed_split(path, "selection")
-    confirmation = load_stratified_seed_split(path, "confirmation")
-    test = load_stratified_seed_split(path, "test")
+    # strict=False: this legacy bank pre-dates the 2026-07-29 quarantine and
+    # still contains quarantined seeds in selection (795) / confirmation (747)
+    # splits.  This test only validates structure; any run producing a
+    # reported performance number must use strict loads, which fail closed
+    # until the banks are regenerated (see test_quarantined_seeds.py and
+    # docs/KNOWN_ISSUES.md).
+    selection = load_stratified_seed_split(path, "selection", strict=False)
+    confirmation = load_stratified_seed_split(path, "confirmation", strict=False)
+    test = load_stratified_seed_split(path, "test", strict=False)
     assert len(selection) == 20
     assert len(confirmation) == 60
     assert len(test) == 100

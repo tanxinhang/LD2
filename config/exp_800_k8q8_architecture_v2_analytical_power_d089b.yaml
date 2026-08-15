@@ -1,0 +1,8 @@
+# D0.89-B: power-independent structure ranking with bottleneck dual prices.
+# Requires (and extends) D0.89-A.  P0 now ranks on the per-watt gain a_ijq
+# (unit-power deflection) instead of the powered deflection, and uses the
+# previous frame's max-min LP dual price lambda* as the target priority.
+extends: exp_800_k8q8_architecture_v2_analytical_power_d089a.yaml
+
+marl:
+  analytical_structure_ranking_enabled: true

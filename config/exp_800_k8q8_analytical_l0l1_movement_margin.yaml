@@ -1,0 +1,9 @@
+# D1.0-B margin test: task-constrained gauge targets a small worst-floor margin
+# (0.61/0.71/0.81) so the realized worst robustly clears the evaluation floor
+# (0.60) under the strict `>=` QoS check, instead of sitting exactly at 0.60 and
+# failing by float noise ~1e-16.  Everything else identical to the D0.95 L0+L1+L3
+# analytical stack.
+extends: exp_800_k8q8_architecture_v2_analytical_power_l0l1_movement.yaml
+
+marl:
+  task_constrained_qos_floors: [0.61, 0.71, 0.81, 3]
