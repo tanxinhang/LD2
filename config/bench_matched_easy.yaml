@@ -1,4 +1,4 @@
-channel:
+﻿channel:
   NF: 4.0
   eta_los_dB: 0.1
   eta_nlos_dB: 21.0
@@ -18,7 +18,6 @@ detection:
 marl:
   active_probe_aoi_weight: 0.5
   active_probe_enabled: false
-  active_probe_interval: 5
   active_probe_nis_weight: 0.2
   active_probe_threshold: 3.0
   active_probe_uncertainty_weight: 0.3
@@ -29,9 +28,6 @@ marl:
   bc_beta_init: 0.05
   belief_cov_floor_pos: 25.0
   belief_cov_floor_vel: 1.0
-  belief_cov_lambda_max: 100.0
-  belief_cov_lambda_min: 0.01
-  belief_cov_regularization: false
   belief_detection_sampling: true
   belief_nis_deflate_rate: 0.95
   belief_nis_enabled: false
@@ -42,9 +38,7 @@ marl:
   belief_nis_inflate_k: 2.0
   belief_nis_lambda_max: 5.0
   belief_nis_window: 0.1
-  centralized_actor: false
   centralized_critic: true
-  comm_cost_weight: 0.001
   critic_lr_mult: 5.0
   diff_weight: 0.3
   early_stop: true
@@ -88,7 +82,6 @@ marl:
   p0_beta_uncertainty: 0.0
   p0_eta_aoi: 0.0
   p0_fusion_confidence_min: 0.3
-  p0_fusion_correction_delta: 0.05
   p0_safe_fallback: false
   p0_uses_belief: true
   ppo_clip: 0.1

@@ -1,13 +1,16 @@
 # 当前系统全景：现状、问题与应对思路
 
-> 文档日期：2026-08-15。
+> 文档日期：2026-08-16（审计修正：并入 T2/T3/D1A/D1_1A，修正 8/8 主缺口表述；
+> 建立 D0.87–D0.95 ≡ D0.10–D0.18 编号映射，见 §1.4）。
 > 本文是**总纲**，汇总当前系统的整体架构、已量化的性能缺口、问题清单、理论框架与
 > 分阶段应对路线。各 Gate 的详细证据见 `CURRENT_SYSTEM_STATUS.md`、
 > `D087_POWER_DEPLOYMENT.md`、`D088_WARMSTART_STALENESS.md`、
 > `D089_ANALYTICAL_INNER_POWER.md`、`D089B_STRUCTURE_RANKING.md`、
 > `D089C_TSTAR_REWARD.md`、`D091_STEADY_CEILING.md`、`D092_BARGAINING_OBJECTIVE.md`、
 > `D093_CAPABILITY_GAUGE.md`、`D093_L2_STRUCTURE.md`、`D093_POWER_SIDE_E2E.md`、
-> `D094_L3D_DISTRIBUTED_GEOMETRY.md`、`D095_JOINT_L2_L3_ALTERNATING.md`。
+> `D094_L3D_DISTRIBUTED_GEOMETRY.md`、`D095_JOINT_L2_L3_ALTERNATING.md`、
+> `D1A_HORIZON_JOINT_ORACLE.md`、`D1_1A_LEXICOGRAPHIC_L1.md`、
+> `T2_CENTRAL_ORACLE.md`、`T3_DETECTION_CAPABILITY.md`、`CURRENT_SYSTEM_MODEL.md`。
 
 ---
 
@@ -46,9 +49,39 @@
 |---|---:|---:|---:|---:|
 | 4/4 冻结部署版 | 100 | **0.739** | 0.913 | 0.72 |
 | 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.871 | 0.7303 |
-| 8/8 原子控制 D0.86 | 20 | 0.4372 | — | 0.50 |
+| 8/8 解析栈端到端 D0.95 | 20 | 0.662 | 0.808 | 0.65* |
+| 8/8 lexicographic L1 oracle（D1.1-A，教师几何起点） | 20 | **0.844** | 0.8569 | **1.0**（LCB 0.881） |
 
-**8/8 是主要缺口**：worst 0.437 距 0.60 差 0.163，QoS 可行率 0.50 距 0.70 差 0.20。
+`*` D0.95 的 0.65 是严格比较的浮点伪影：7 个 seed 的 worst 恰好钉在 0.60 地板
+（`0.60 − 1.11e-16`）；容差 ≥1e-12 时 QoS=1.0。口径修正见
+[`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2。
+
+**8/8 缺口状态（2026-08-16 修正）**：旧表述"8/8 worst 0.437 是主要缺口"对应
+D0.86 原子控制（20 seed）。D0.95 解析栈端到端已将 8/8 均值 worst 提到 **0.662**、
+steady 0.808（三地板均值达标，7/20 seed 早期帧存在滚动时域收敛瞬态）；D1.1-A
+lexicographic L1 oracle 进一步显示 8/8 在**教师最终几何**上可达 worst **0.844**、
+严格 QoS **1.0（20/20）**。因此：**8/8 的物理可行域足够，缺口收敛为"有限视野
+一阶分布式控制器 → 多步联合优化器（lex L1 / horizon joint）"的算法差距与
+"端点部署执行"差距**，不再是"不可达"。
+
+### 1.4 Gate 编号映射（审计修正）
+
+同一 8/8 解析功率/几何链在项目内存在两套编号，本总纲统一使用 **D0.87–D0.95**
+（官方 Gate 编号），与 `CURRENT_SYSTEM_STATUS.md` 的 **D0.10–D0.18** 为同一物理内容：
+
+| 总纲编号 | 状态文档编号 | 内容 |
+|---|---|---|
+| D0.87 | D0.10 | LP 功率接入部署路径 |
+| D0.88 | D0.11 | H=5 功率 hold + 认证 staleness 界 |
+| D0.89-A/B/C | D0.12–D0.13 | 删头复现 / 排名负结果 / tstar 接线 |
+| D0.91 | D0.14 | steady 天花板 0.993 / worst 0.955 |
+| D0.92 | D0.15 | Kalai–Smorodinsky 讨价还价 |
+| D0.93 | D0.16 | capability gauge + epoch 包络 + L0 余量 |
+| D0.94 | D0.17 | L3 分布式价格几何 |
+| D0.95 | D0.18 | 联合 L2+L3 交替下降 + 端到端 |
+
+两套编号并存是历史原因（文档各自演进），不改变任何冻结数值；后续新 Gate 一律使用
+**D0.9x 单套编号**并在总纲登记。
 
 ---
 
@@ -58,11 +91,16 @@
 
 | 层级 | worst | 增量 | 含义 |
 |---|---:|---:|---|
-| deployed | 0.355 | — | 当前部署 |
+| deployed（D0.86 原子控制） | 0.355 | — | 旧部署口径（D1A 复测为 0.44） |
 | C1（LP 功率，固定结构） | 0.582 | +0.227 | **功率缺口**（最大） |
 | single-duplex（最优结构+功率） | 0.700 | +0.118 | **结构缺口** |
 | full-duplex | 0.706 | +0.006 | 全双工（可忽略） |
 | relaxed ceiling | 0.955 | +0.249 | 几何/去耦合上界 |
+| **horizon_joint oracle（D1.0-A，H=20）** | **0.852** | — | 允许移动后的多步联合上界（从部署几何出发） |
+
+> 注意：瀑布各台阶不允许 UAV 移动；D1.0-A 增加移动维度后 mean worst 0.852 /
+> QoS 0.75（`docs/D1A_HORIZON_JOINT_ORACLE.md`）。因此 **0.60 门槛在可执行几何上
+> 也是可达的**（20 seed 中 85% 达 ≥0.72、80% 达 ≥0.75）。
 
 ### 2.2 steady 天花板（D0.91，决定性）
 
@@ -90,10 +128,13 @@
 
 ### A. 性能问题
 
-- **A1**：8/8 worst 0.437（deployed 0.355）距 0.60 缺口大，QoS 0.50 距 0.70 缺口大。
+- **A1（2026-08-16 修正）**：8/8 部署执行仍落后于可达上界——D0.95 解析栈端到端
+  mean worst 0.662（20 seed，7/20 早期帧瞬态 <0.60），而 lex L1 oracle 显示同几何
+  可达 0.844 / QoS 1.0。缺口性质从"不可达"修正为"**有限视野一阶控制器 → 多步
+  联合优化器（lex L1 / horizon joint）的算法差距 + 端点部署执行差距**"。
 - **A2**：4/4 尾部危险（5/100 种子 worst<0.1，bottom-20% CVaR 0.288）。
 - **A3**：近一个月主线增益塌缩到 1e-5（D0.85/0.86 严格配对增益），优化锁死在
-  fail-closed 不动点。
+  fail-closed 不动点（D0.95 解析栈已以 ~0.2 的端到端增益打破该不动点）。
 
 ### B. 架构—实现错位
 
@@ -222,22 +263,35 @@ reserve/steady、容量、角色影子价，会系统性偏向最差目标（D0.
 | D0.93 | capability gauge（三地板硬约束）+ epoch 包络 + L0 通信余量 + PWL 证书 |
 | D0.94 | L3 分布式价格几何（T0/T2/T4 单测）+ 长时域 48% 硬帧修复 |
 | D0.95 | 联合 L2(结构)+L3(几何) 交替下降 67.5% 硬帧修复；端到端 worst 0.662 / steady 0.808 |
+| D1.0-A/B/C | Horizon joint oracle（H=20）：worst 0.852 / QoS 0.75；内层求解器消融；责任分配联合移动为负结果 |
+| D1.1-A | **Lexicographic L1（QoS 优先 ≻ worst 最大化）：oracle 级 mean worst 0.844、严格 QoS 1.0（20/20，LCB 0.881），Gate 大幅通过**；浮点 QoS 口径修正（0.65→1.0） |
+| T2 | 安全/低暴露统一母问题（standoff + Γ）：oracle worst 保持 0.79–0.81；**standoff 是主要限制**（需从满足约束的初始几何重规划） |
+| T3 | **Detection-Capability-Constrained（advice 012）**：三档对方能力三向对比——power-only 在 medium/strong 下被 75%/100% 发现，exposure 在 strong 下同样失效，只有 detection 约束恒成立（strong 下必须近乎静默） |
 
 ### 下一步（按优先级，每步可单测验证）
 
 > **Step 1–4 已在 D0.93–D0.95 链闭合**：single-duplex steady（D0.91/D0.93）、
 > 结构 MILP/价格驱动结构重分配（D0.93-L2/D0.95 `priced_structure.py`）、几何层
-> （D0.94/D0.95 `analytical_movement_enabled`）均已实现并验证。当前剩余：
+> （D0.94/D0.95 `analytical_movement_enabled`）均已实现并验证。D1.1-A 已证明
+> lex L1 在 oracle 级达成 Phase 2（worst≥0.75、QoS≥0.90）。当前剩余：
 
-**Step 5（统计修复，仍待做）**：主 Gate 改 QoS feasible rate + 单侧 95% Wilson LCB，
+**Step 5（统计修复，审计后 P1）**：主 Gate 改 QoS feasible rate + 单侧 95% Wilson LCB，
 ≥100 blind seeds；冻结 versioned 独立 test bank；mean-worst/CVaR 降为尾部指标。
+**审计警示：6/6（10 seed）、8/8（20 seed）Gate 目前仍以 mean-worst≥0.60 为主指标，
+与 E1 自相矛盾，须在论文正式声明前切换。**
 
 **Step 6（端到端瞬态补齐）**：D0.95 端到端三地板均值达标但 7/20 seed 早期帧
 worst<0.60（滚动时域收敛瞬态）。候选：提前触发运动 / warm-start 几何 / 粘性瓶颈。
 
 **Step 7（结构层部署化收尾）**：`priced_structure.py` 的价格驱动贪心（25.7%）距
-oracle（~40%）仍有 gap，属"分布式 vs 全局规划"的代价；如需逼近可做价格加权局部
-搜索（RX 交换邻域）。
+oracle（~40%）仍有 gap；D1.1-A 的 lex L1 目前是 **oracle 诊断**（教师几何起点、
+全局信息），**尚未作为部署执行路径接入**（与 D1A §2 的"端点部署执行差距"一致）。
+下一步是把 lex L1 的 Stage-B QoS-constrained max-min 做成逐帧可部署求解器。
+
+**Step 8（T3 分布式化）**：T3 的 detection-capability 约束目前是中央 oracle；按
+advice 012 §11，用统一三价格 `s_iq = λ_q a_iq − μ_w a^I[i,q]` 做本地 bid 的分布式
+列生成是后续主线（μ 即对方探测能力价格）。strong 对手下"必须静默"是 1 W/28 GHz
+的物理结论，需波形层（扩频/LPI）或大幅降功率。
 
 ---
 
@@ -257,8 +311,10 @@ oracle（~40%）仍有 gap，属"分布式 vs 全局规划"的代价；如需逼
 1. **路 A vs 路 B**：可部署优先（λ* 排序 + MILP 兜底，结构最优性只能 ε-经验）vs
    理论优先（branch-and-price，结构有精确证书但计算重）。倾向**路 A + 局部候选图
    ε-近似界**。
-2. **结构 gap 到底多大**：取决于 Step 2 的 McCormick MILP 结果。若 gap 小（交替式
-   已近最优），结构层不值得大改；若 gap 大，才是真正"大调整"。
+2. **结构 gap 到底多大**：D1.1-A 已给出关键数据——**L1 内层从 gauge（satisficing）
+   换成 lexicographic（QoS 优先 ≻ worst 最大化）就把 20-seed mean worst 从 0.671
+   推到 0.844**（不动 L3/结构/轨迹）。这证明"结构+功率+几何的联合机会"主要卡在
+   内层目标的字典序选择上，而不是结构枚举本身；剩余 gap 是部署执行（Step 7）。
 3. **几何是否必要（已答，D0.95）**：joint structure+power 单独只有 26.7% 硬帧修复，
    steady 停在 0.736；几何层（+ 结构交替）把硬帧修复推到 67.5%、steady 拉到 0.808。
    **几何是性能必需，不只是稳健性。**
@@ -266,3 +322,9 @@ oracle（~40%）仍有 gap，属"分布式 vs 全局规划"的代价；如需逼
    工程裕量。
 5. **C2/C3 训练结果**（进行中）：将给出"缩小动作空间 / 换 reward"的干净消融，但
    预期不是性能主贡献。
+6. **T3 隐蔽性与 QoS 的对抗**：detection-constrained 在 strong 对手下 QoS 坍缩到
+   0.001（必须静默）——这是 1 W/28 GHz 下的物理结论；若要同时保 QoS 与隐蔽性，
+   必须进入波形层设计（扩频/LPI/波束成形），超出当前解析层边界。
+7. **统计口径纪律**（审计 E1）：8/8 的"worst 0.662 达标"建立在 20 个种子上，0.662
+   与 0.60 的差距小于 bootstrap 噪声尺度；正式声明必须配 95% bootstrap CI 或改用
+   QoS+Wilson LCB 主指标，不能以均值达标口径头条呈现。

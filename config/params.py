@@ -132,7 +132,6 @@ class MARLParams:
     use_difference_reward: bool = True   # fixed-assignment no-op difference reward
     team_weight: float = 0.7             # team reward weight (E3 baseline)
     diff_weight: float = 0.3             # difference reward weight (E3 baseline)
-    comm_cost_weight: float = 0.001     # ||comm_msg||^2 penalty (ISAC resource constraint)
     use_distance_shaping: bool = False  # potential-based "approach target" shaping
     shape_w: float = 0.01               # shaping weight (action signal ~ shape_w * 2.5/step)
     # Communication-cost weight in reward. MUST be small vs detection utility
@@ -277,7 +276,6 @@ class MARLParams:
     oracle_obs: bool = False  # diagnostic: feed true target pos (not beliefs) to actor
     rel_features: bool = True  # explicit per-target (dx,dy,dist,bearing) in actor obs
     structured_actor: bool = True  # entity-attention actor (vs flat MLP)
-    centralized_actor: bool = False  # diagnostic: actor sees global state (upper bound)
     # Tracking-free sensing mode. When False, targets are fixed sensing objects
     # whose locations are mission-known; the actor receives their current
     # coordinates directly and the Kalman predict/update loop is bypassed.
@@ -698,10 +696,6 @@ class MARLParams:
     # Per-module LR: encoder=1e-5, attention=1e-5, head=5e-5 (Full).
     # When freeze_attention=True: attention LR→0. False = single LR for all.
     use_per_module_lr: bool = False
-    # B1: Covariance regularization (clip Kalman eigenvalues).
-    belief_cov_regularization: bool = False
-    belief_cov_lambda_min: float = 0.01
-    belief_cov_lambda_max: float = 100.0
     # Neighbor belief fusion via multi-head attention + CI.
     neighbor_belief_fusion: bool = False
     # B3: Uncertainty-aware P0 scoring weights.
@@ -732,7 +726,6 @@ class MARLParams:
     trust_quarantine_duration: int = 10     # frames to quarantine after trigger
     # Layer 3: Safe P0 with bounded fusion correction.
     p0_safe_fallback: bool = False          # master switch for safe P0
-    p0_fusion_correction_delta: float = 0.05   # δ_J max correction magnitude
     p0_fusion_confidence_min: float = 0.3   # min fusion confidence to use correction
     # DU-P0: Decision-Uncertainty-aware scheduling
     du_enabled: bool = False                # master switch for DU-P0
@@ -740,7 +733,6 @@ class MARLParams:
     du_ambiguity_bonus: float = 0.1         # gamma: bonus weight per unit ambiguity
     # Layer 4: Active probing + trust feedback recovery.
     active_probe_enabled: bool = False      # master switch for active probing
-    active_probe_interval: int = 5          # (deprecated) probe every M frames
     active_probe_threshold: float = 3.0     # event-triggered: min score to probe
     active_probe_uncertainty_weight: float = 0.3  # c₁: covariance trace weight
     active_probe_nis_weight: float = 0.2         # c₂: NIS anomaly weight

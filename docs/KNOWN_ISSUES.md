@@ -52,6 +52,24 @@
 
 ---
 
+## 2026-08 月 Gate 问题登记（审计补充，2026-08-16）
+
+本目录此前停留在 2026-07-19；以下为 8 月各 Gate 期间发现并处理的数值/工程问题
+（均已在原 Gate 文档记录，此处集中登记以便跟踪）：
+
+| # | 问题 | 证据 | 状态 |
+|---|---|---|---|
+| 1 | **Rician helper 归一化错误**：`sqrt(1/(K+1))` 计算后未乘到 NLoS 项，`E\|h\|²` 高估约 79.9%，影响上报链路可靠性分支 | `CURRENT_SYSTEM_STATUS.md:848`、`ARCHITECTURE_V2_RESULTS.md:2234` | 已修复；seed 483/frame 75 的既有结论经精确 trace 重放未失效 |
+| 2 | **gauge γ 缩放功率 bug**：`capability_gauge_pwl_lp_full` 在 γ*>1 时返回 `Σp ≤ γ·b > 1 W` 的越预算功率（seed 15 曾用 69.6× 预算），Round 1 的 "gauge QoS 0.90" 被高估 | `D1_1A_LEXICOGRAPHIC_L1.md:25-28`、`D1A_HORIZON_JOINT_ORACLE.md:77` | 已修正：γ*>1 回退 max-min best effort |
+| 3 | **浮点 QoS 口径**：gauge/lex 把 worst 精确钉在 0.60 地板时，严格 `>=` 比较以 `0.60−1.11e-16` 误判失败（D095 报 QoS 0.65 实为伪影；容差 ≥1e-12 时 1.0） | `D1_1A_LEXICOGRAPHIC_L1.md:166-176` | 已修复：新增 `marl.qos_eval_tol=1e-6`；**D095 文档需补修正注（待办）** |
+| 4 | **Windows/MKL `numpy.linalg.eigvalsh` 原生中止**：合并 belief 进程在既有 MKL 路径崩溃（D0.9/D0.17/D0.18 反复出现），需按 MKL 稳定边界拆分进程运行 | `CURRENT_SYSTEM_STATUS.md:830,1385,1482`、`ARCHITECTURE_V2_RESULTS.md:2180` | 未修复（运行库并发问题）；文档以"拆分重跑"绕过，**无自动化进程隔离** |
+| 5 | **B5（径向投影概率密度）在新主线下的状态**：`Δp ← (max_dp/‖Δp‖)·Δp` 多对一映射使重算 log-prob ≠ 投影后真实密度（P0 级科学正确性） | `KNOWN_ISSUES.md` B5 条目 | **未解决**；D0.95 解析栈以解析运动覆盖学习运动后，该问题影响面收窄（学习运动仅在 analytical_movement_enabled=false 时执行），但未消除，正式训练前仍须处理 |
+| 6 | **测试集污染（5 seed 永久隔离）**：见上一条目 | — | 已代码级隔离（2026-08-16），bank 回填待办 |
+
+**遗留待办**：D095 文档补浮点 QoS 修正注；B5 在论文正式训练前处理；MKL 崩溃的自动化进程隔离（pytest-xdist 或按测试文件拆分 CI）。
+
+---
+
 
 ## DAgger 变体对照 (D0/D1, chunk BPTT v3, 2026-07-15)
 

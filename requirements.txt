@@ -1,0 +1,25 @@
+# D:\BYLW\LD3 — multi-UAV distributed ISAC project dependencies
+#
+# Audit remediation 2026-08-16: this file previously did not exist; the
+# virtualenv was the only record of dependencies, which left tests broken in
+# clean environments (e.g. sklearn was missing -> tests/test_crisis_gate_probe.py
+# failed with ModuleNotFoundError).  Versions below are the minimums known to
+# work; the project tracks recent releases (numpy 2.5 / scipy 1.18 / torch
+# 2.12+cu130 in the reference environment).
+#
+# Install:
+#   pip install -r requirements.txt
+# For PyTorch with a specific CUDA build, install torch first from the
+# official index (https://pytorch.org/get-started/locally/) and then the rest.
+
+# --- Core simulation / learning ---
+numpy>=1.24
+scipy>=1.10
+torch>=2.1          # install the CUDA build matching your driver first
+pyyaml>=6.0
+gymnasium>=0.29
+psutil>=5.9
+
+# --- Evaluation / statistics / testing ---
+scikit-learn>=1.2   # tests/test_crisis_gate_probe.py (balanced_accuracy_score)
+pytest>=7.0
