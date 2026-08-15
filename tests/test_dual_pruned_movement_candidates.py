@@ -247,6 +247,34 @@ def test_weak_duality_pruning_stays_exact_under_lex_scoring():
         assert st[0] <= u_lambda + 1e-9
 
 
+def test_standoff_candidates_never_degrade_and_are_switchable():
+    """D1.1-F: the standoff (away-from-weakest) candidates join the set only
+    under the covertness path and never degrade the chosen exact-LP score
+    (stay retained, superset).  Under the plain max-min scoring they never
+    win either (documented negative result: the scorer is not covertness-
+    aware), which is what the A/B e2e comparison showed."""
+    env = _small_env()
+    rng = np.random.default_rng(20260823)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    grads = {
+        0: np.array([1.0, 0.5]),
+        1: np.array([-0.3, 0.9]),
+    }
+    scores = {}
+    for intercept, standoff in ((False, True), (True, True), (True, False)):
+        env.core.cfg.marl.intercept_constrained_power_enabled = bool(intercept)
+        env.core.cfg.marl.analytical_movement_standoff_candidates = bool(standoff)
+        env.core.cfg.marl.analytical_movement_dual_prune = True
+        out = env.core._select_best_movement_candidate(
+            coefficient, selected, budget, uav, tgt, grads, step=2.5)
+        scores[(intercept, standoff)] = _exact_candidate_score(
+            env, coefficient, selected, budget, uav, tgt, out)
+    # Superset with stay retained: enabling standoff never lowers the chosen
+    # exact score (intercept on/off and standoff on/off all comparable).
+    assert scores[(True, True)] >= scores[(True, False)] - 1e-12
+    assert scores[(True, True)] >= scores[(False, True)] - 1e-12
+
+
 def test_dual_pruning_reduces_lp_evaluations(monkeypatch):
     env = _small_env()
     rng = np.random.default_rng(20260816)

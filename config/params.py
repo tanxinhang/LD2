@@ -202,6 +202,14 @@ class MARLParams:
     intercept_capability: str = "medium"   # weak | medium | strong
     intercept_eps: float = 0.1             # opponent detection prob. bound
     intercept_pfa: float = 1e-3            # opponent false-alarm prob.
+    # D1.1-F (2026-08-16): standoff movement candidates under covertness.
+    # The opponent's per-watt gain is a^I ~ 1/d^2, so moving AWAY from the
+    # weakest target relaxes the counter-detection bound and lets more power
+    # through (the standoff knob couples naturally through the constraint,
+    # T3 SS2), at the cost of sensing gain 1/(R_tx^2 R_rx^2); the exact
+    # max-min LP decides the trade-off per candidate.  Only meaningful when
+    # intercept_constrained_power_enabled; default on, set False to A/B.
+    analytical_movement_standoff_candidates: bool = True
     # D0.93-A1: task-constrained power allocation.  When enabled (requires
     # analytical_sensing_power_enabled), the inner solver solves the capability
     # gauge (min gamma s.t. worst+bottom-k+steady floors, budget <= gamma*b) via

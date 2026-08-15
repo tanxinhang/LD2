@@ -3231,6 +3231,20 @@ class EnvironmentCore:
                     d[k] = step * v / n
             return d
 
+        def radial_away(weak_q: int) -> np.ndarray:
+            # D1.1-F standoff candidate: AWAY from the weakest target.  Under
+            # the covertness constraint the opponent's per-watt gain is
+            # a^I ~ 1/d^2, so moving away relaxes the counter-detection bound
+            # and lets more power through, at the cost of sensing gain
+            # (1/(R_tx^2 R_rx^2)).  The exact max-min LP decides the trade-off.
+            d = np.zeros((K, 2), dtype=np.float64)
+            for k in range(K):
+                v = uav[k] - tgt[weak_q]
+                n = float(np.linalg.norm(v))
+                if n > 1e-9:
+                    d[k] = step * v / n
+            return d
+
         candidates = [
             np.zeros((K, 2), dtype=np.float64),
             base,
@@ -3239,6 +3253,16 @@ class EnvironmentCore:
         ]
         if Q >= 2:
             candidates.append(radial(int(weak_order[1])))
+        # D1.1-F: when the live covertness path is active, the standoff
+        # directions (away from the two weakest targets) join the candidate
+        # set so the geometry can trade sensing range for covertness headroom.
+        if (self._intercept_constrained_power_enabled
+                and bool(getattr(self.cfg.marl,
+                                 'analytical_movement_standoff_candidates',
+                                 True))):
+            candidates.append(radial_away(int(weak_order[0])))
+            if Q >= 2:
+                candidates.append(radial_away(int(weak_order[1])))
 
         # D1.1-B++ gauge-price step: the capability-gauge dual pi* is the
         # shadow price of the full task set (worst+bottom-k+steady), while
