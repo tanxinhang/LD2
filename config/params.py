@@ -224,6 +224,17 @@ class MARLParams:
     # small fixed number of LP evaluations per frame; a no-op when the
     # single-step gradient is already optimal.
     analytical_movement_candidates_enabled: bool = False
+    # D1.1-B+ (2026-08-16, dual-pruned candidates): when the multi-candidate L3
+    # is enabled, prune candidates by the weak-duality upper bound before
+    # running the exact max-min LP.  For any simplex price lambda (e.g. the
+    # current frame's optimal dual lambda*), the candidate geometry's max-min
+    # deflection is bounded above by U_lambda = sum_i b_i max_q lambda_q a'_iq
+    # (weak duality), and P_D is strictly monotone in deflection, so
+    # U_lambda <= best_deflection proves the candidate cannot beat the current
+    # best and its exact LP can be skipped.  The pruning is exact (never
+    # changes the chosen candidate), it only removes provably-dominated LP
+    # evaluations.  Default on; set False to reproduce the unpruned path.
+    analytical_movement_dual_prune: bool = True
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.

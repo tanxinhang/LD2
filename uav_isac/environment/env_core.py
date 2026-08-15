@@ -2944,6 +2944,21 @@ class EnvironmentCore:
         candidate is scored at the moved geometry with the exact max-min power
         LP (structure fixed at the current P0 selection); the best is executed.
         ``stay`` is always included, so the proxy score is monotone.
+
+        D1.1-B+ dual pruning (2026-08-16): before running the exact LP for a
+        candidate, its weak-duality upper bound is computed with the current
+        frame's optimal dual price ``lambda*``:
+
+            U_lambda(g') = sum_i b_i * max_q lambda*_q * a'_iq
+                           >= t*(g') = max-min deflection at g'
+
+        (weak duality: any feasible simplex price bounds the max-min value from
+        above).  P_D = Q(Q^{-1}(P_FA) - sqrt(D)) is strictly monotone in D, so
+        ``U_lambda(g') <= best_deflection`` implies the candidate's worst P_D
+        cannot exceed the current best and its exact LP is provably dominated.
+        The pruning is exact: it never changes the selected candidate, it only
+        skips LP evaluations that cannot win.  The price is computed once per
+        frame on the current geometry (O(KQ) per candidate check).
         """
         K, Q = self.K, self.Q
         area = tuple(float(v) for v in self.cfg.scenario.region_size)
@@ -2951,6 +2966,7 @@ class EnvironmentCore:
         p_fa = float(self.cfg.detection.P_FA)
         from uav_isac.coordination.maxmin_power import (
             fixed_owner_gain_matrix,
+            optimal_maxmin_dual_prices,
             solve_fixed_structure_maxmin_power_lp,
         )
         from uav_isac.physical.detection import (
@@ -2973,6 +2989,18 @@ class EnvironmentCore:
         ceiling = np.sum(gain_cur * budget[:, None], axis=0)
         weak_order = np.argsort(ceiling)
 
+        # D1.1-B+ dual pruning price (optimal dual of the CURRENT geometry).
+        # lambda* is a feasible simplex price for every candidate geometry, so
+        # weak duality holds per candidate regardless of where the UAVs move.
+        dual_prune = bool(getattr(
+            self.cfg.marl, 'analytical_movement_dual_prune', True))
+        lam = None
+        if dual_prune:
+            try:
+                lam, _ = optimal_maxmin_dual_prices(gain_cur, budget)
+            except ValueError:
+                lam = None
+
         def radial(weak_q: int) -> np.ndarray:
             d = np.zeros((K, 2), dtype=np.float64)
             for k in range(K):
@@ -2991,32 +3019,39 @@ class EnvironmentCore:
         if Q >= 2:
             candidates.append(radial(int(weak_order[1])))
 
-        def score(nu: np.ndarray) -> float:
+        best = np.zeros((K, 2), dtype=np.float64)
+        best_s = float('-inf')
+        best_deflection: float | None = None
+        for cand in candidates:
+            nu = np.clip(uav + cand, 0.0, area)
             # Collision / proximity guard: no UAV may come closer than d_safe
             # to any target (the 1/R^4 gain would otherwise explode and the
             # greedy candidate search would keep ramming UAVs into targets).
             dist = np.linalg.norm(
                 nu[:, None, :] - tgt[None, :, :], axis=2)  # (K,Q)
             if float(np.min(dist)) < d_safe - 1e-9:
-                return float('-inf')
+                continue
             coeff_c = self._friis_rescale_tensor(coefficient, uav, tgt, nu)
             try:
                 g_c, _ = fixed_owner_gain_matrix(coeff_c, selected)
             except ValueError:
-                return float('-inf')
+                continue
+            # D1.1-B+ dual pruning: U_lambda(g') <= best_deflection proves the
+            # candidate's max-min deflection (hence worst P_D) cannot beat the
+            # incumbent, so the exact LP evaluation is provably dominated.
+            if lam is not None and best_deflection is not None:
+                u_lambda = float(np.sum(
+                    budget * np.max(lam[None, :] * g_c, axis=1)))
+                if u_lambda <= best_deflection + 1e-9:
+                    continue
             res = solve_fixed_structure_maxmin_power_lp(g_c, budget)
             # Score in P_D space (saturates at 1), so once a target is already
             # saturated, ramming UAVs closer yields no further score gain.
             pd = compute_detection_probabilities(res.deflection, p_fa)
-            return float(np.min(pd))
-
-        best = np.zeros((K, 2), dtype=np.float64)
-        best_s = float('-inf')
-        for cand in candidates:
-            nu = np.clip(uav + cand, 0.0, area)
-            s = score(nu)
+            s = float(np.min(pd))
             if s > best_s + 1e-9:
                 best_s, best = s, cand
+                best_deflection = res.worst_deflection
         out: dict = {}
         for k in range(K):
             if np.any(best[k] != 0.0):
