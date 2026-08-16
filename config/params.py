@@ -308,6 +308,20 @@ class MARLParams:
     # (L1 uses the gauge, L3 uses lambda*).  Keep OFF; recorded for future
     # non-equilibrating inner modes only.
     analytical_movement_lex_scoring: bool = False
+    # D1.9 (2026-08-16, bottleneck lookahead): evaluate the radial weak-target
+    # candidates at the geometry AFTER H frames of sustained full-speed
+    # approach (uav + H*step*dir) instead of after the single 1-step move,
+    # while still executing only 1 step (receding horizon).  Theory: P_D =
+    # Q(Q^{-1}(P_FA)-sqrt(D)) with D ~ 1/(R_tx^2 R_rx^2), so at R ~ 300-450 m a
+    # single 2.5 m step changes the ceiling by ~0 (no LP discrimination, the
+    # candidate pool often picks stay) while H frames of approach close the
+    # gap to the 200 m regime where P_D saturates.  The blind100 left tail
+    # (QoS 0.40 at 450-550 m worst_nearest vs 0.91 below 350 m) is exactly the
+    # regime where the 1-step trust region stalls.  Physics: the lookahead
+    # geometry rescales the per-watt tensor by the exact 1/R^4 law, respects
+    # d_safe, and stay remains a candidate so the score is monotone.  H = 0
+    # reproduces the D1.1-B single-step scoring.
+    analytical_movement_lookahead_frames: int = 0
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.

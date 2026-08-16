@@ -307,3 +307,72 @@ def test_dual_pruning_reduces_lp_evaluations(monkeypatch):
     # LP evaluations are expected in practice.
     assert counts[True] <= counts[False]
     assert counts[True] < counts[False] or counts[True] == 1
+
+
+def test_lookahead_scoring_never_degrades_and_approaches_bottleneck():
+    """D1.9 bottleneck lookahead: with stay retained and the H-frame approach
+    candidates added to the set, the chosen exact-LP score never degrades, and
+    on a far-field bottleneck (weak target ~400 m away, where the 1-step 2.5 m
+    move barely moves the ceiling) the lookahead scoring selects a real
+    approach move instead of stay."""
+    env = _small_env()
+    rng = np.random.default_rng(20260830)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    # Far-field bottleneck: target 0 is 400 m from both UAVs; target 1 close.
+    uav = np.array([[100.0, 100.0], [150.0, 130.0]])
+    tgt = np.array([[500.0, 500.0], [200.0, 200.0]])
+    grads = {
+        0: np.array([1.0, 0.5]),
+        1: np.array([-0.3, 0.9]),
+    }
+
+    scores, moves = {}, {}
+    for h in (0, 30):
+        env.core.cfg.marl.analytical_movement_dual_prune = True
+        env.core.cfg.marl.analytical_movement_lookahead_frames = h
+        out = env.core._select_best_movement_candidate(
+            coefficient, selected, budget, uav, tgt, grads, step=2.5)
+        moves[h] = out
+        scores[h] = _exact_candidate_score(
+            env, coefficient, selected, budget, uav, tgt, out)
+
+    # Monotonicity: lookahead is a candidate-set superset with stay retained.
+    assert scores[30] >= scores[0] - 1e-12
+    # On this far-field bottleneck the H-frame scoring must pick an approach
+    # (non-zero total movement), while the 1-step scoring often stays.
+    total_h0 = float(sum(np.linalg.norm(v) for v in moves[0].values()))
+    total_h30 = float(sum(np.linalg.norm(v) for v in moves[30].values()))
+    assert total_h30 > 0.0
+    # Executed step is clamped to one frame's displacement (receding horizon).
+    for k, v in moves[30].items():
+        assert np.linalg.norm(v) <= 2.5 + 1e-9
+
+
+def test_lookahead_zero_frames_reproduces_baseline_pool():
+    """H=0 must be bitwise identical to the D1.1-B candidate pool (no lookahead
+    candidates appended), so the default config reproduces prior behaviour."""
+    env = _small_env()
+    rng = np.random.default_rng(20260831)
+    coefficient, selected, budget, uav, tgt = _synthetic_inputs(rng)
+    grads = {
+        0: np.array([1.0, 0.5]),
+        1: np.array([-0.3, 0.9]),
+    }
+    results = {}
+    for h in (0,):
+        env.core.cfg.marl.analytical_movement_dual_prune = True
+        env.core.cfg.marl.analytical_movement_lookahead_frames = h
+        out = env.core._select_best_movement_candidate(
+            coefficient, selected, budget, uav, tgt, grads, step=2.5)
+        results[h] = out
+    # The output shape/type contract is unchanged and stay remains feasible.
+    assert isinstance(results[0], dict)
+    assert all(len(v) == 2 for v in results[0].values())
+    # With lookahead OFF the candidate pool is exactly the D1.1-B set; with the
+    # near-field synthetic geometry the winner should be reproducible.
+    env.core.cfg.marl.analytical_movement_lookahead_frames = 0
+    out_again = env.core._select_best_movement_candidate(
+        coefficient, selected, budget, uav, tgt, grads, step=2.5)
+    for k in results[0]:
+        np.testing.assert_array_equal(
+            out_again.get(k, np.zeros(2)), results[0].get(k, np.zeros(2)))

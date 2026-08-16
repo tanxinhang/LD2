@@ -43,6 +43,11 @@ def main():
     ap.add_argument("--max-final-eval-seeds", type=int, default=0,
                     help="limit final fixed-bank episodes for diagnostic screening; "
                          "0 evaluates the complete split")
+    ap.add_argument("--final-eval-seeds", default=None,
+                    help="comma-separated explicit seed list for the final "
+                         "evaluation; overrides the bank split (and "
+                         "--max-final-eval-seeds).  Diagnostic use only (e.g. "
+                         "D1.9 bottleneck smoke on selected blind seeds).")
     ap.add_argument("--target-choice-audit-stride", type=int, default=0,
                     help="at movement boundaries, run a common-random-number "
                          "single-UAV target-direction intervention every N "
@@ -1181,6 +1186,9 @@ def main():
         "policy_runtime": trainer.get_policy_runtime_state(),
         "total_episodes": len(metrics_history),
         "max_final_eval_seeds": max(0, int(args.max_final_eval_seeds)),
+        "final_eval_seeds": (
+            [int(s) for s in args.final_eval_seeds.split(",") if s.strip()]
+            if args.final_eval_seeds else None),
         "target_choice_audit_stride": max(
             0, int(args.target_choice_audit_stride)),
         "sensing_choice_audit_stride": max(
@@ -1273,7 +1281,10 @@ def main():
                         30006, 30007, 30008, 30009, 30010,
                         30011, 30012, 30013, 30014, 30015,
                         30016, 30017, 30018, 30019, 30020]
-    if args.max_final_eval_seeds > 0:
+    if args.final_eval_seeds:
+        paired_seeds = [int(s) for s in args.final_eval_seeds.split(",")
+                        if s.strip()]
+    elif args.max_final_eval_seeds > 0:
         paired_seeds = paired_seeds[:args.max_final_eval_seeds]
     try:
         trainer.agents[0].actor.eval()

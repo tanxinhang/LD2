@@ -3309,6 +3309,31 @@ class EnvironmentCore:
         ]
         if Q >= 2:
             candidates.append(radial(int(weak_order[1])))
+        # D1.9 (2026-08-16): bottleneck lookahead scoring.  The radial
+        # candidates above are scored at the 1-step geometry; at
+        # R ~ 300-450 m a 2.5 m step barely moves the ceiling, so the exact
+        # LP cannot discriminate the approach direction and the pool often
+        # picks stay -- the blind100 left-tail mechanism.  Re-score the weak
+        # radial candidates at the H-frame sustained-approach geometry
+        # (uav + H*step*dir), executing only 1 step (receding horizon).  The
+        # per-watt tensor is rescaled by the exact 1/R^4 law; d_safe and the
+        # stay candidate keep the proxy monotone.
+        lookahead_h = int(getattr(
+            self.cfg.marl, 'analytical_movement_lookahead_frames', 0))
+        if lookahead_h > 0:
+            for wq in range(min(2, Q)):
+                d_la = np.zeros((K, 2), dtype=np.float64)
+                for k in range(K):
+                    v = tgt[int(weak_order[wq])] - uav[k]
+                    n = float(np.linalg.norm(v))
+                    if n > 1e-9:
+                        d_la[k] = step * v / n
+                # same direction as radial(weak_q), but scored after H
+                # sustained frames (receding horizon): executing this
+                # candidate still clamps to one 2.5 m step, while the score
+                # sees the H-frame approach geometry where 1/R^4 P_D
+                # discrimination is strong.
+                candidates.append(float(lookahead_h) * d_la)
         # D1.1-F: when the live covertness path is active, the standoff
         # directions (away from the two weakest targets) join the candidate
         # set so the geometry can trade sensing range for covertness headroom.

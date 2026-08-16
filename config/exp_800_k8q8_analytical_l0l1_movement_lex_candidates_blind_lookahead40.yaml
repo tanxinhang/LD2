@@ -1,0 +1,10 @@
+# D1.9 bottleneck-lookahead variant of the D1.5 blind certification config
+# (advice 013): adds analytical_movement_lookahead_frames=40 so the L3
+# multi-candidate pool scores the weak-target radial approach at the H-frame
+# sustained geometry (receding horizon, execute 1 step) instead of the 1-step
+# geometry.  Target: the blind100 left tail (worst_nearest 300-450 m) where a
+# single 2.5 m step cannot move the 1/R^4 ceiling, so the pool used to stall.
+extends: exp_800_k8q8_analytical_l0l1_movement_lex_candidates_blind.yaml
+
+marl:
+  analytical_movement_lookahead_frames: 40
