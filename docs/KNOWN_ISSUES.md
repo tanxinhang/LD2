@@ -36,13 +36,22 @@
 - 回归测试 `tests/test_quarantined_seeds.py`（含 legacy bank 审计哨兵）；
   `tests/test_robust_checkpoint_protocol.py` 结构验证改用显式 `strict=False`。
 
-**遗留（开放，P0）**：
-1. 三个 legacy bank 未回填——需用 `tools/seed_stratification.py` 重建
-   `980_k6q6` 的 test bank（保留 `scenario_fingerprint` v2）并重跑 6/6 三行决策
-   运行（adaptive_b4b8 / cardinality_residual46 / teacher_trace）；
-2. `CURRENT_SYSTEM_STATUS.md` 6/6 表需加污染披露或换用干净种子结果；
-3. 回填后 `tests/test_quarantined_seeds.py` 的 980_k6q6 哨兵断言需同步更新
-   （改为断言不再命中）。
+**遗留（2026-08-16 已回填完成）**：
+1. ~~三个 legacy bank 未回填~~ **已完成**：`980_k6q6` 重建出干净 test split
+   （`config/stratified_seeds_980_k6q6_v2.json`，隔离种子排除、无 split 重叠、
+   保留原 selection/confirmation/stress；`tools/rebuild_seed_bank_test_split.py`）；
+   `800_q4` 与 `1130_k8q8` 的 selection/confirmation 仍含隔离种子（795/747 等），
+   相关 split 的 strict 加载继续 fail-closed，回填可选。
+2. ~~重跑 6/6 三行决策运行~~ **已完成**：三个变体（adaptive_b4b8 /
+   cardinality_residual46 / teacher_trace）在干净 test 前 20 个种子上重跑
+   （`results/_6x6_reval_*_20/paired_eval.csv`）——**四地板全不达标**
+   （worst 0.29–0.34 < 0.60，QoS 0.10–0.30）。原数据（0.543/0.645/0.635）不仅被
+   污染，且该 10 个种子恰好偏乐观（隔离种子 795/747/105 的 worst 0.996/0.768/0.650），
+   原"均值达标"结论被严重高估。6/6 跨尺度零样本部署明确失败。
+3. ~~CURRENT_SYSTEM_STATUS 6/6 表需加披露或换用干净种子结果~~ **已完成**：表已用
+   重跑数据替换并加披露。
+4. ~~回填后 test_quarantined_seeds.py 的 980_k6q6 哨兵断言需同步更新~~ **已完成**
+   （v2 bank 通过隔离检查：0 隔离种子、0 重叠）。
 
 **诊断方法**：`python -m pytest tests/test_quarantined_seeds.py -q`。
 **优先级**：P0。
