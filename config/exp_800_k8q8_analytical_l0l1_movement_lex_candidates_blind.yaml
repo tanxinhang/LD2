@@ -1,0 +1,9 @@
+# D1.5 blind certification config (advice 013): the frozen deployment
+# candidate (L0-KKT + Lex-L1 + P0-L2 + multi-candidate L3 + dual pruning)
+# evaluated on the 100-seed BLIND bank whose seeds never appeared in any
+# results/ run, any bank split, or the quarantine list.
+extends: exp_800_k8q8_analytical_l0l1_movement_lex_candidates.yaml
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
+  training_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json

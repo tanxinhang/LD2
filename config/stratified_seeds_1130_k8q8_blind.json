@@ -1,0 +1,733 @@
+{
+  "blind_draw_seed": 20260827,
+  "excluded": {
+    "bank_splits": 586,
+    "exposed_in_results": 457,
+    "quarantined": [
+      2,
+      105,
+      747,
+      795,
+      860
+    ]
+  },
+  "purpose": "D1.5 blind certification bank (advice 013)",
+  "scenario_fingerprint": "c7dd74ad93a9fbaf",
+  "schema_version": 1,
+  "seed_metadata": {
+    "107": {
+      "bottleneck_matching_m": 482.5241284287575,
+      "difficulty_score_m": 482.5241284287575,
+      "worst_nearest_m": 294.0879407398001,
+      "worst_second_nearest_m": 466.55602733704296
+    },
+    "118": {
+      "bottleneck_matching_m": 487.2598234820643,
+      "difficulty_score_m": 487.2598234820643,
+      "worst_nearest_m": 220.9226423272548,
+      "worst_second_nearest_m": 373.67845217320394
+    },
+    "144": {
+      "bottleneck_matching_m": 710.4225698815344,
+      "difficulty_score_m": 710.4225698815344,
+      "worst_nearest_m": 398.30620406736904,
+      "worst_second_nearest_m": 738.9783595927444
+    },
+    "158": {
+      "bottleneck_matching_m": 555.4777373346642,
+      "difficulty_score_m": 555.4777373346642,
+      "worst_nearest_m": 450.36549010652953,
+      "worst_second_nearest_m": 529.7957237817649
+    },
+    "164": {
+      "bottleneck_matching_m": 517.9871004041864,
+      "difficulty_score_m": 518.5464694738847,
+      "worst_nearest_m": 265.6816993621015,
+      "worst_second_nearest_m": 771.4112395856679
+    },
+    "175": {
+      "bottleneck_matching_m": 550.9719562536884,
+      "difficulty_score_m": 550.9719562536884,
+      "worst_nearest_m": 446.7455909839308,
+      "worst_second_nearest_m": 465.08890834576334
+    },
+    "176": {
+      "bottleneck_matching_m": 346.7837353232865,
+      "difficulty_score_m": 387.68913375080604,
+      "worst_nearest_m": 306.66423286224864,
+      "worst_second_nearest_m": 468.7140346393635
+    },
+    "18": {
+      "bottleneck_matching_m": 389.56147014107125,
+      "difficulty_score_m": 389.56147014107125,
+      "worst_nearest_m": 335.5432753217511,
+      "worst_second_nearest_m": 389.56147014107125
+    },
+    "185": {
+      "bottleneck_matching_m": 726.0856288969217,
+      "difficulty_score_m": 726.0856288969217,
+      "worst_nearest_m": 655.9140164981733,
+      "worst_second_nearest_m": 675.2953985739085
+    },
+    "186": {
+      "bottleneck_matching_m": 502.9628981306275,
+      "difficulty_score_m": 502.9628981306275,
+      "worst_nearest_m": 418.3903321706606,
+      "worst_second_nearest_m": 452.61889751252227
+    },
+    "187": {
+      "bottleneck_matching_m": 548.5202734521098,
+      "difficulty_score_m": 548.5202734521098,
+      "worst_nearest_m": 236.37839724989198,
+      "worst_second_nearest_m": 369.4451604785741
+    },
+    "196": {
+      "bottleneck_matching_m": 465.96847881848873,
+      "difficulty_score_m": 465.96847881848873,
+      "worst_nearest_m": 275.2610651700213,
+      "worst_second_nearest_m": 414.9797116768011
+    },
+    "202": {
+      "bottleneck_matching_m": 723.4592300816237,
+      "difficulty_score_m": 723.4592300816237,
+      "worst_nearest_m": 415.1522005214175,
+      "worst_second_nearest_m": 457.6181380682087
+    },
+    "23": {
+      "bottleneck_matching_m": 610.277876028151,
+      "difficulty_score_m": 610.277876028151,
+      "worst_nearest_m": 417.88681472652314,
+      "worst_second_nearest_m": 487.69739830541863
+    },
+    "241": {
+      "bottleneck_matching_m": 472.74052467558136,
+      "difficulty_score_m": 472.74052467558136,
+      "worst_nearest_m": 346.59669715421876,
+      "worst_second_nearest_m": 405.24544756575784
+    },
+    "247": {
+      "bottleneck_matching_m": 750.9410771765565,
+      "difficulty_score_m": 750.9410771765565,
+      "worst_nearest_m": 522.0351769327447,
+      "worst_second_nearest_m": 582.0570710936524
+    },
+    "248": {
+      "bottleneck_matching_m": 656.4202898055787,
+      "difficulty_score_m": 656.4202898055787,
+      "worst_nearest_m": 299.8954847175641,
+      "worst_second_nearest_m": 485.04183853068224
+    },
+    "253": {
+      "bottleneck_matching_m": 437.40294279704835,
+      "difficulty_score_m": 440.84637091603906,
+      "worst_nearest_m": 437.40294279704835,
+      "worst_second_nearest_m": 444.28979903502983
+    },
+    "259": {
+      "bottleneck_matching_m": 559.7897692471337,
+      "difficulty_score_m": 559.7897692471337,
+      "worst_nearest_m": 501.23166305288083,
+      "worst_second_nearest_m": 559.7897692471337
+    },
+    "29": {
+      "bottleneck_matching_m": 673.3112444163124,
+      "difficulty_score_m": 673.3112444163124,
+      "worst_nearest_m": 393.6698084566789,
+      "worst_second_nearest_m": 444.3984975355746
+    },
+    "295": {
+      "bottleneck_matching_m": 629.1941183761726,
+      "difficulty_score_m": 629.1941183761726,
+      "worst_nearest_m": 528.863448601991,
+      "worst_second_nearest_m": 629.1941183761726
+    },
+    "298": {
+      "bottleneck_matching_m": 494.7107638406633,
+      "difficulty_score_m": 494.7107638406633,
+      "worst_nearest_m": 479.2281942912205,
+      "worst_second_nearest_m": 494.7107638406633
+    },
+    "316": {
+      "bottleneck_matching_m": 644.803144703035,
+      "difficulty_score_m": 644.803144703035,
+      "worst_nearest_m": 557.0602136746801,
+      "worst_second_nearest_m": 644.803144703035
+    },
+    "321": {
+      "bottleneck_matching_m": 792.4962856071528,
+      "difficulty_score_m": 792.4962856071528,
+      "worst_nearest_m": 506.72369006554186,
+      "worst_second_nearest_m": 527.5636295720778
+    },
+    "327": {
+      "bottleneck_matching_m": 568.8907534166651,
+      "difficulty_score_m": 568.8907534166651,
+      "worst_nearest_m": 368.5171510725498,
+      "worst_second_nearest_m": 398.9631861452688
+    },
+    "328": {
+      "bottleneck_matching_m": 618.751735610038,
+      "difficulty_score_m": 618.751735610038,
+      "worst_nearest_m": 433.47565685035903,
+      "worst_second_nearest_m": 550.3589572020862
+    },
+    "335": {
+      "bottleneck_matching_m": 586.2935691692734,
+      "difficulty_score_m": 586.2935691692734,
+      "worst_nearest_m": 387.30497926930434,
+      "worst_second_nearest_m": 435.77359720421344
+    },
+    "338": {
+      "bottleneck_matching_m": 334.46694234454816,
+      "difficulty_score_m": 366.5457020629394,
+      "worst_nearest_m": 272.97575794769284,
+      "worst_second_nearest_m": 460.11564617818607
+    },
+    "358": {
+      "bottleneck_matching_m": 459.27278113905913,
+      "difficulty_score_m": 459.27278113905913,
+      "worst_nearest_m": 413.5541705088194,
+      "worst_second_nearest_m": 459.27278113905913
+    },
+    "367": {
+      "bottleneck_matching_m": 453.60914763110696,
+      "difficulty_score_m": 453.60914763110696,
+      "worst_nearest_m": 360.46193160008414,
+      "worst_second_nearest_m": 533.6858314994741
+    },
+    "372": {
+      "bottleneck_matching_m": 670.8635042406461,
+      "difficulty_score_m": 670.8635042406461,
+      "worst_nearest_m": 365.6322178290907,
+      "worst_second_nearest_m": 422.0724914805314
+    },
+    "377": {
+      "bottleneck_matching_m": 447.5513354618088,
+      "difficulty_score_m": 447.5513354618088,
+      "worst_nearest_m": 342.80858928465574,
+      "worst_second_nearest_m": 419.16528803805795
+    },
+    "391": {
+      "bottleneck_matching_m": 712.6641079150899,
+      "difficulty_score_m": 712.6641079150899,
+      "worst_nearest_m": 517.7615197118841,
+      "worst_second_nearest_m": 529.6905508398723
+    },
+    "396": {
+      "bottleneck_matching_m": 616.1441776701731,
+      "difficulty_score_m": 616.1441776701731,
+      "worst_nearest_m": 561.8587874026664,
+      "worst_second_nearest_m": 573.3974381466537
+    },
+    "4": {
+      "bottleneck_matching_m": 457.27758357115084,
+      "difficulty_score_m": 488.79716342982715,
+      "worst_nearest_m": 357.7313872860162,
+      "worst_second_nearest_m": 619.8629395736382
+    },
+    "403": {
+      "bottleneck_matching_m": 626.6007666543628,
+      "difficulty_score_m": 626.6007666543628,
+      "worst_nearest_m": 317.7415339664578,
+      "worst_second_nearest_m": 369.97822529109607
+    },
+    "404": {
+      "bottleneck_matching_m": 478.5335625235477,
+      "difficulty_score_m": 478.5335625235477,
+      "worst_nearest_m": 184.42324458502603,
+      "worst_second_nearest_m": 656.0460042820993
+    },
+    "407": {
+      "bottleneck_matching_m": 395.1155396940119,
+      "difficulty_score_m": 395.1155396940119,
+      "worst_nearest_m": 382.3769717143451,
+      "worst_second_nearest_m": 395.1155396940119
+    },
+    "415": {
+      "bottleneck_matching_m": 583.7407975365841,
+      "difficulty_score_m": 583.7407975365841,
+      "worst_nearest_m": 374.04849942717186,
+      "worst_second_nearest_m": 586.7201592041707
+    },
+    "418": {
+      "bottleneck_matching_m": 577.6706024804479,
+      "difficulty_score_m": 577.6706024804479,
+      "worst_nearest_m": 341.69150738569715,
+      "worst_second_nearest_m": 385.81033735706956
+    },
+    "427": {
+      "bottleneck_matching_m": 245.36160541435436,
+      "difficulty_score_m": 250.71473764719147,
+      "worst_nearest_m": 162.22584755780713,
+      "worst_second_nearest_m": 339.2036277365758
+    },
+    "430": {
+      "bottleneck_matching_m": 390.0446661580995,
+      "difficulty_score_m": 407.82109655917327,
+      "worst_nearest_m": 360.91348556288847,
+      "worst_second_nearest_m": 454.728707555458
+    },
+    "437": {
+      "bottleneck_matching_m": 537.2300692913406,
+      "difficulty_score_m": 537.2300692913406,
+      "worst_nearest_m": 432.8664788863859,
+      "worst_second_nearest_m": 478.46132708114334
+    },
+    "446": {
+      "bottleneck_matching_m": 613.0325912354909,
+      "difficulty_score_m": 613.0325912354909,
+      "worst_nearest_m": 344.1802613407927,
+      "worst_second_nearest_m": 428.67637401631544
+    },
+    "449": {
+      "bottleneck_matching_m": 707.1551600645436,
+      "difficulty_score_m": 707.1551600645436,
+      "worst_nearest_m": 392.73139857827914,
+      "worst_second_nearest_m": 497.3320321588977
+    },
+    "45": {
+      "bottleneck_matching_m": 805.7541368505647,
+      "difficulty_score_m": 805.7541368505647,
+      "worst_nearest_m": 665.7500639325851,
+      "worst_second_nearest_m": 674.9821974523771
+    },
+    "464": {
+      "bottleneck_matching_m": 412.8570081143237,
+      "difficulty_score_m": 412.8570081143237,
+      "worst_nearest_m": 259.855434037387,
+      "worst_second_nearest_m": 417.360351783626
+    },
+    "465": {
+      "bottleneck_matching_m": 562.382579075169,
+      "difficulty_score_m": 562.382579075169,
+      "worst_nearest_m": 330.9247656864599,
+      "worst_second_nearest_m": 393.30117504812165
+    },
+    "470": {
+      "bottleneck_matching_m": 453.4105737842489,
+      "difficulty_score_m": 453.4105737842489,
+      "worst_nearest_m": 216.4081224613357,
+      "worst_second_nearest_m": 390.49959042072703
+    },
+    "505": {
+      "bottleneck_matching_m": 739.9518675185058,
+      "difficulty_score_m": 739.9518675185058,
+      "worst_nearest_m": 339.7951440100307,
+      "worst_second_nearest_m": 409.44376462643874
+    },
+    "524": {
+      "bottleneck_matching_m": 466.2014236086529,
+      "difficulty_score_m": 466.2014236086529,
+      "worst_nearest_m": 240.60068018196094,
+      "worst_second_nearest_m": 435.1458476273895
+    },
+    "54": {
+      "bottleneck_matching_m": 603.7740057089135,
+      "difficulty_score_m": 603.7740057089135,
+      "worst_nearest_m": 244.38458859153647,
+      "worst_second_nearest_m": 400.9939734161581
+    },
+    "549": {
+      "bottleneck_matching_m": 326.3309490196567,
+      "difficulty_score_m": 354.48537397853914,
+      "worst_nearest_m": 264.35991495638325,
+      "worst_second_nearest_m": 444.61083300069504
+    },
+    "555": {
+      "bottleneck_matching_m": 543.9262274461458,
+      "difficulty_score_m": 573.7348333270529,
+      "worst_nearest_m": 389.4534624394406,
+      "worst_second_nearest_m": 758.0162042146652
+    },
+    "57": {
+      "bottleneck_matching_m": 293.6285944001766,
+      "difficulty_score_m": 343.49472535989435,
+      "worst_nearest_m": 273.92915594093597,
+      "worst_second_nearest_m": 413.06029477885266
+    },
+    "574": {
+      "bottleneck_matching_m": 640.3524107754923,
+      "difficulty_score_m": 640.3524107754923,
+      "worst_nearest_m": 360.81797722544474,
+      "worst_second_nearest_m": 400.44546238916325
+    },
+    "585": {
+      "bottleneck_matching_m": 638.1695292835194,
+      "difficulty_score_m": 638.1695292835194,
+      "worst_nearest_m": 199.6314268061265,
+      "worst_second_nearest_m": 349.03963978036666
+    },
+    "594": {
+      "bottleneck_matching_m": 758.1828257372192,
+      "difficulty_score_m": 758.1828257372192,
+      "worst_nearest_m": 509.5147957973036,
+      "worst_second_nearest_m": 563.0217094546894
+    },
+    "598": {
+      "bottleneck_matching_m": 459.0165251804228,
+      "difficulty_score_m": 459.0165251804228,
+      "worst_nearest_m": 351.3560978352792,
+      "worst_second_nearest_m": 556.354631068667
+    },
+    "6": {
+      "bottleneck_matching_m": 607.6194054692014,
+      "difficulty_score_m": 607.6194054692014,
+      "worst_nearest_m": 319.1568483926812,
+      "worst_second_nearest_m": 472.72402423599794
+    },
+    "605": {
+      "bottleneck_matching_m": 769.4453313226818,
+      "difficulty_score_m": 769.4453313226818,
+      "worst_nearest_m": 410.719076588813,
+      "worst_second_nearest_m": 510.3570670346759
+    },
+    "609": {
+      "bottleneck_matching_m": 679.1755802530425,
+      "difficulty_score_m": 679.1755802530425,
+      "worst_nearest_m": 565.0177215718825,
+      "worst_second_nearest_m": 627.562136488092
+    },
+    "613": {
+      "bottleneck_matching_m": 566.269360186547,
+      "difficulty_score_m": 566.269360186547,
+      "worst_nearest_m": 255.1397490890447,
+      "worst_second_nearest_m": 424.22709297403503
+    },
+    "615": {
+      "bottleneck_matching_m": 723.1943414978497,
+      "difficulty_score_m": 723.1943414978497,
+      "worst_nearest_m": 354.5072055948577,
+      "worst_second_nearest_m": 612.307780815067
+    },
+    "620": {
+      "bottleneck_matching_m": 669.3982099887245,
+      "difficulty_score_m": 669.3982099887245,
+      "worst_nearest_m": 269.8845504824754,
+      "worst_second_nearest_m": 358.25162714221767
+    },
+    "63": {
+      "bottleneck_matching_m": 402.38622081079535,
+      "difficulty_score_m": 493.5537912571989,
+      "worst_nearest_m": 402.38622081079535,
+      "worst_second_nearest_m": 584.7213617036025
+    },
+    "631": {
+      "bottleneck_matching_m": 407.5274099768509,
+      "difficulty_score_m": 429.8866111583222,
+      "worst_nearest_m": 407.5274099768509,
+      "worst_second_nearest_m": 452.2458123397935
+    },
+    "645": {
+      "bottleneck_matching_m": 389.71701660538275,
+      "difficulty_score_m": 413.01067718274896,
+      "worst_nearest_m": 389.71701660538275,
+      "worst_second_nearest_m": 436.3043377601151
+    },
+    "660": {
+      "bottleneck_matching_m": 304.63579502530837,
+      "difficulty_score_m": 326.7847301794316,
+      "worst_nearest_m": 304.63579502530837,
+      "worst_second_nearest_m": 348.93366533355487
+    },
+    "661": {
+      "bottleneck_matching_m": 555.201354819241,
+      "difficulty_score_m": 555.201354819241,
+      "worst_nearest_m": 361.50351905686034,
+      "worst_second_nearest_m": 482.0940273099084
+    },
+    "664": {
+      "bottleneck_matching_m": 600.9320782048177,
+      "difficulty_score_m": 600.9320782048177,
+      "worst_nearest_m": 422.81026458195703,
+      "worst_second_nearest_m": 442.54768743389695
+    },
+    "671": {
+      "bottleneck_matching_m": 692.5972295480751,
+      "difficulty_score_m": 692.5972295480751,
+      "worst_nearest_m": 468.72646812566563,
+      "worst_second_nearest_m": 481.8173697948061
+    },
+    "688": {
+      "bottleneck_matching_m": 359.1944033023895,
+      "difficulty_score_m": 388.2521391478849,
+      "worst_nearest_m": 359.1944033023895,
+      "worst_second_nearest_m": 417.3098749933804
+    },
+    "693": {
+      "bottleneck_matching_m": 671.2935430188088,
+      "difficulty_score_m": 671.2935430188088,
+      "worst_nearest_m": 400.44693244558493,
+      "worst_second_nearest_m": 468.671457498242
+    },
+    "696": {
+      "bottleneck_matching_m": 512.1069370051067,
+      "difficulty_score_m": 512.1069370051067,
+      "worst_nearest_m": 380.4134653326489,
+      "worst_second_nearest_m": 411.38276106378567
+    },
+    "70": {
+      "bottleneck_matching_m": 542.7570107695909,
+      "difficulty_score_m": 542.7570107695909,
+      "worst_nearest_m": 236.00554077886446,
+      "worst_second_nearest_m": 338.58635416367997
+    },
+    "703": {
+      "bottleneck_matching_m": 332.34568738716786,
+      "difficulty_score_m": 409.9170208052631,
+      "worst_nearest_m": 332.34568738716786,
+      "worst_second_nearest_m": 487.4883542233584
+    },
+    "746": {
+      "bottleneck_matching_m": 745.6774231587956,
+      "difficulty_score_m": 745.6774231587956,
+      "worst_nearest_m": 341.7818550317192,
+      "worst_second_nearest_m": 341.91677721243946
+    },
+    "750": {
+      "bottleneck_matching_m": 478.01462216094507,
+      "difficulty_score_m": 478.01462216094507,
+      "worst_nearest_m": 423.3572350603084,
+      "worst_second_nearest_m": 468.1750256534773
+    },
+    "763": {
+      "bottleneck_matching_m": 411.69824038740614,
+      "difficulty_score_m": 411.69824038740614,
+      "worst_nearest_m": 262.8788219948673,
+      "worst_second_nearest_m": 402.76880341197653
+    },
+    "764": {
+      "bottleneck_matching_m": 686.8865530434261,
+      "difficulty_score_m": 686.8865530434261,
+      "worst_nearest_m": 438.232577510505,
+      "worst_second_nearest_m": 639.4584970819044
+    },
+    "77": {
+      "bottleneck_matching_m": 548.9422441776749,
+      "difficulty_score_m": 548.9422441776749,
+      "worst_nearest_m": 303.16590431747284,
+      "worst_second_nearest_m": 450.84156228070964
+    },
+    "774": {
+      "bottleneck_matching_m": 462.43877996485605,
+      "difficulty_score_m": 462.43877996485605,
+      "worst_nearest_m": 254.5284528730081,
+      "worst_second_nearest_m": 373.54862096526136
+    },
+    "81": {
+      "bottleneck_matching_m": 724.7135561830954,
+      "difficulty_score_m": 724.7135561830954,
+      "worst_nearest_m": 379.76120429394643,
+      "worst_second_nearest_m": 450.3583355991473
+    },
+    "824": {
+      "bottleneck_matching_m": 440.7072696788874,
+      "difficulty_score_m": 440.7072696788874,
+      "worst_nearest_m": 324.1517098397105,
+      "worst_second_nearest_m": 404.72617115520757
+    },
+    "829": {
+      "bottleneck_matching_m": 576.3320477232936,
+      "difficulty_score_m": 576.3320477232936,
+      "worst_nearest_m": 512.9990041043563,
+      "worst_second_nearest_m": 634.1205103628394
+    },
+    "851": {
+      "bottleneck_matching_m": 584.8840882875875,
+      "difficulty_score_m": 584.8840882875875,
+      "worst_nearest_m": 400.9254916040845,
+      "worst_second_nearest_m": 427.03229075651274
+    },
+    "876": {
+      "bottleneck_matching_m": 433.9160228017831,
+      "difficulty_score_m": 433.9160228017831,
+      "worst_nearest_m": 357.6161710166216,
+      "worst_second_nearest_m": 407.77553513900824
+    },
+    "881": {
+      "bottleneck_matching_m": 321.72892429305637,
+      "difficulty_score_m": 321.72892429305637,
+      "worst_nearest_m": 183.73267964038342,
+      "worst_second_nearest_m": 405.67518575205366
+    },
+    "886": {
+      "bottleneck_matching_m": 807.1277071457791,
+      "difficulty_score_m": 807.1277071457791,
+      "worst_nearest_m": 582.0918166174147,
+      "worst_second_nearest_m": 594.9288484486472
+    },
+    "887": {
+      "bottleneck_matching_m": 758.2712005419833,
+      "difficulty_score_m": 758.2712005419833,
+      "worst_nearest_m": 238.37457544385796,
+      "worst_second_nearest_m": 506.7562104315848
+    },
+    "890": {
+      "bottleneck_matching_m": 437.028902854503,
+      "difficulty_score_m": 437.028902854503,
+      "worst_nearest_m": 324.8799581664337,
+      "worst_second_nearest_m": 382.44527815921134
+    },
+    "915": {
+      "bottleneck_matching_m": 638.9232168033737,
+      "difficulty_score_m": 638.9232168033737,
+      "worst_nearest_m": 264.27669102485487,
+      "worst_second_nearest_m": 384.75972246301353
+    },
+    "918": {
+      "bottleneck_matching_m": 788.3392132367869,
+      "difficulty_score_m": 788.3392132367869,
+      "worst_nearest_m": 270.3902424768152,
+      "worst_second_nearest_m": 458.3948962895494
+    },
+    "936": {
+      "bottleneck_matching_m": 400.32604587219726,
+      "difficulty_score_m": 400.32604587219726,
+      "worst_nearest_m": 250.45537039439282,
+      "worst_second_nearest_m": 483.8956413912033
+    },
+    "953": {
+      "bottleneck_matching_m": 638.6940512644547,
+      "difficulty_score_m": 638.6940512644547,
+      "worst_nearest_m": 254.76564245715485,
+      "worst_second_nearest_m": 393.5051480645073
+    },
+    "957": {
+      "bottleneck_matching_m": 640.5747050266415,
+      "difficulty_score_m": 640.5747050266415,
+      "worst_nearest_m": 257.6874155407643,
+      "worst_second_nearest_m": 426.27122081253333
+    },
+    "977": {
+      "bottleneck_matching_m": 453.00252361679617,
+      "difficulty_score_m": 453.00252361679617,
+      "worst_nearest_m": 355.7327736662637,
+      "worst_second_nearest_m": 400.3380626919865
+    },
+    "98": {
+      "bottleneck_matching_m": 620.0911894131649,
+      "difficulty_score_m": 620.0911894131649,
+      "worst_nearest_m": 408.09117387958844,
+      "worst_second_nearest_m": 546.9441008336337
+    },
+    "983": {
+      "bottleneck_matching_m": 566.6629321051271,
+      "difficulty_score_m": 566.6629321051271,
+      "worst_nearest_m": 255.50895806732873,
+      "worst_second_nearest_m": 502.7462562407997
+    }
+  },
+  "source_config": "config\\exp_800_k8q8_dcb_top1_scale.yaml",
+  "splits": {
+    "test": [
+      29,
+      241,
+      437,
+      248,
+      703,
+      4,
+      470,
+      196,
+      549,
+      829,
+      688,
+      977,
+      164,
+      598,
+      631,
+      321,
+      6,
+      415,
+      446,
+      407,
+      851,
+      957,
+      918,
+      574,
+      645,
+      98,
+      464,
+      824,
+      764,
+      327,
+      358,
+      158,
+      427,
+      953,
+      118,
+      202,
+      609,
+      335,
+      615,
+      915,
+      144,
+      187,
+      661,
+      594,
+      664,
+      247,
+      613,
+      430,
+      983,
+      316,
+      70,
+      605,
+      671,
+      886,
+      418,
+      750,
+      54,
+      175,
+      890,
+      876,
+      774,
+      377,
+      107,
+      253,
+      367,
+      259,
+      77,
+      57,
+      585,
+      746,
+      404,
+      81,
+      391,
+      186,
+      372,
+      620,
+      298,
+      660,
+      23,
+      881,
+      295,
+      465,
+      693,
+      328,
+      45,
+      763,
+      185,
+      18,
+      403,
+      63,
+      176,
+      524,
+      887,
+      505,
+      396,
+      338,
+      696,
+      449,
+      936,
+      555
+    ]
+  },
+  "tier_counts": {
+    "easy": 25,
+    "hard": 25,
+    "medium": 50
+  },
+  "tier_quantiles_m": {
+    "q25": 458.48851968558563,
+    "q75": 655.3157348596304
+  }
+}
