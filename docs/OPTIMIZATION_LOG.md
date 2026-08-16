@@ -138,6 +138,22 @@ t* 差距全部 ≤ 3.6e-15（机器精度），平均 |gap| = 5.8e-16；收敛�
 pricing、隐蔽性约束成立）。下一步：实现完整分布式协调器（每帧 RMP + 价格
 广播 + 本地 bid 执行）。
 
+## D1.8：feasibility-aware L3 warm start（2026-08-16，advice 013 §6）
+
+**问题**：帧 0 完全不动（`_last_deflection_entries` 在 reset 后为空，L3 hook 返回
+`{}`），浪费滚动时域几何下降的第一帧——早期瞬态（7/20 seed 前 19 帧 worst<0.60）
+因此多延 1 帧。
+
+**理论（advice 013）**：初始位置 capability gauge `γ₀* > 1`（三地板初始不可行）
+应触发 frame-0 几何修复，而非等滚动 deficit 出现。实现 `_initial_analytical_state`：
+reset 后用**当前几何**预计算 deflection entries + 最小单 owner 结构（每目标 owner =
+最近 UAV，TX = 最远 UAV 形成双基地基线），使 `_analytical_movement_delta` 帧 0
+即进入 Phase-1 deficit 下降。
+
+**验证**：帧 0 位移 0.00 → 7.50（4 UAV × 2.5m 步长内）；早期 worst 全程领先
+~1 帧（seed 503：帧 0 worst 0.5029→0.5165）；3 项回归（帧 0 移动、结构可行性、
+多 seed 不退化）。早期瞬态从"滚动收敛"变为"帧 0 即修复"。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化

@@ -3032,6 +3032,51 @@ class EnvironmentCore:
             return None, budget
         return gain, budget
 
+    def _initial_analytical_state(
+        self,
+    ) -> tuple[object | None, tuple]:
+        """Frame-0 warm-start state (D1.8, advice 013).
+
+        Computes the initial deflection entries at unit sensing power and a
+        minimal feasible single-owner structure (each target owned by its
+        nearest UAV, TX = the farthest UAV for a bistatic baseline) so the
+        analytical L3 hook can move on frame 0 instead of waiting for the
+        first resolved structure.  Returns ``(entries, selected)`` or
+        ``(None, ())`` when the geometry cannot form a structure (K < 2).
+        """
+        if self.K < 2:
+            return None, ()
+        try:
+            uav_p = np.array([u.pos.copy() for u in self.uavs])  # (K, 3)
+            uav_v = np.array([u.vel.copy() for u in self.uavs])  # (K, 3)
+            tgt_p = np.array([t.get_position_3d() for t in self.targets])
+            tgt_v = np.array([
+                np.array([t.state[2], t.state[3], 0.0]) for t in self.targets
+            ])
+            roles0 = np.full(self.K, 2, dtype=int)  # idle placeholder
+            entries = self.deflection_computer.compute(
+                uav_p, uav_v, tgt_p, tgt_v, roles0, self.fc_position,
+                role_agnostic=True,
+                sensing_power_w=(
+                    np.ones((self.K, self.Q), dtype=np.float64)
+                    if self._joint_isac_power_enabled else None),
+            )
+            d = np.linalg.norm(uav_p[:, None, :2] - tgt_p[None, :, :2],
+                               axis=2)  # (K, Q)
+            selected = []
+            for q in range(self.Q):
+                jq = int(np.argmin(d[:, q]))
+                iq = int(np.argmax(d[:, q]))
+                if iq == jq:
+                    iq = (iq + 1) % self.K
+                selected.append((iq, jq, q))
+            self._last_deflection_entries = entries
+            self._last_selected_set = tuple(selected)
+            return entries, tuple(tuple(int(v) for v in e)
+                                  for e in selected)
+        except Exception:
+            return None, ()
+
     def _analytical_movement_delta(self) -> dict:
         """Receding-horizon capability-guided movement (L3 geometry hook).
 
@@ -3049,7 +3094,18 @@ class EnvironmentCore:
             for e in getattr(self, '_last_selected_set', ())
         )
         if entries is None or not selected:
-            return {}
+            # D1.8 feasibility-aware warm start (advice 013): on the first
+            # frame the previous-frame structure is unavailable (reset does
+            # not compute it), so the L3 hook used to waste frame 0.  Build
+            # the initial deflection entries and a minimal single-owner
+            # structure from the CURRENT geometry so the deficit descent can
+            # act immediately.  If the initial capability gauge gamma_0* > 1
+            # (worst floor infeasible at the initial geometry), Phase 1 below
+            # drives the geometry repair from frame 0.
+            if self.t <= 1:
+                entries, selected = self._initial_analytical_state()
+            if entries is None or not selected:
+                return {}
         coefficient = self._per_watt_coefficient_from_entries(entries)
         try:
             gain, owner = fixed_owner_gain_matrix(coefficient, selected)
