@@ -112,7 +112,11 @@ steady floor, then hold.  **20-seed confirmation** (task-constrained baseline �
 | worst (mean) | 0.609 | **0.662** | ≥0.60 |
 | weak3 (mean) | — | **0.724** | ≥0.70 |
 | steady (mean) | 0.736 | **0.808** | ≥0.80 |
-| QoS feasible | 0.50 | **0.65** | ≥0.70 |
+| QoS feasible | 0.50 | **0.65**\* | ≥0.70 |
+
+`\*` 严格比较的浮点伪影：7 个 seed 的 worst 恰好钉在 0.60 地板（`0.60 − 1.11e-16`）；
+按 `marl.qos_eval_tol=1e-6` 口径 QoS=**1.0**（20/20，LCB 0.839）。修正见
+[`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2。
 
 The steady floor is met on **all 20 seeds** (0/20 below 0.80); the worst floor
 is met on the mean (7/20 seeds still dip below 0.60 in the *early* frames,
@@ -120,6 +124,7 @@ before the motion converges — a known receding-horizon transient).
 
 ## 6. Status and next step
 
-Payoff confirmed end-to-end (worst 0.681 / weak3 0.725 / steady 0.795, near the
-0.60/0.70/0.80 floors on 3 seeds).  Next: confirm on 20 seeds; then close the
-remaining ~0.005 steady gap and push the QoS-feasible rate.
+> **2026-08-16 修正**：§5 已完成 20-seed 确认（0.662/0.724/0.808），本节旧 3-seed
+> 数字（0.681/0.725/0.795）已作废，保留作历史。20-seed 后续见
+> [`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md)（lex L1 0.844）与
+> [`OPTIMIZATION_LOG.md`](OPTIMIZATION_LOG.md)（lex + 多候选 L3 0.975）。

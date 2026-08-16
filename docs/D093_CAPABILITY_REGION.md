@@ -1,5 +1,9 @@
 # D0.93-R：固定结构 (worst, steady) 能力区域（决定性结果）
 
+> **SUPERSEDED（2026-08-16 清理标注）**：SUPERSEDED BY D093_CAPABILITY_GAUGE：早期结论已被 GAUGE 修正（漏 bottom-3），定量数字以 GAUGE 为准。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 > 状态：完成（8/8 test20 前 3 seed）。
 > 工具：`tools/audit_d093_capability_region.py`。
 > 结论：**功率层单独就存在同时满足 worst≥0.60 且 steady≥0.80 的分配**。D0.92 的

@@ -1,5 +1,9 @@
 # 架构、数据流与张量维度
 
+> **SUPERSEDED（2026-08-16 清理标注）**：P0 时代数据流/张量映射，已被 CURRENT_SYSTEM_MODEL.md（V2）取代。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 ---
 
 ## 1. 模块职责与调用关系

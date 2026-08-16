@@ -1,5 +1,9 @@
 # 训练:MAPPO / GAE / Lagrangian / 奖励 / P0 求解器
 
+> **SUPERSEDED（2026-08-16 清理标注）**：训练代码已大幅演进（解析栈/D1.1 系列），本文件 §4/§6 奖励与内层求解器描述过时；核心 GAE/PPO/GRU 一致性章节（§2-3/§10）仍有效。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 ---
 
 ## 1. 参数共享

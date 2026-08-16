@@ -101,6 +101,12 @@ g(4,4) = 0,  g(6,6) = 1
 
 注意：第一行是正式 100 种子结论；其余 10 种子结果是机制筛选，不能与正式结果混称。
 
+> **⚠ 2026-08-16 污染披露**：下表 6/6 三行（0.543/0.645/0.635）来自
+> `architecture_v2_scale_k6q6_structure_student_adaptive_b4b8_gate10` 与
+> `..._cardinality_residual46_gate10`，其 paired_eval.csv 的 10 个种子**含全部 5 个
+> 被隔离种子**（795/747/105/860/2，980_k6q6 test split 前 10 个）——不可作为正式
+> 证据；"6/6 暂不升级"的决策需在 bank 回填后重跑确认（见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。
+
 ### 4.2 配对统计
 
 在相同的 6/6 十个种子上，基数残差相对原跨尺度 Student：

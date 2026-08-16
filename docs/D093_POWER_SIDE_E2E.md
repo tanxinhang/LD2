@@ -1,5 +1,9 @@
 # D0.93 功率侧端到端链：L0（通信余量）+ L1（功率 LP）
 
+> **SUPERSEDED（2026-08-16 清理标注）**：SUPERSEDED BY D095_JOINT_L2_L3_ALTERNATING：未完成快照，端到端表见 D095 §5。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 > 状态：L0+L1(max-min) 完成；L0+L1(bargaining) / L0+L1(reserve) 待收。
 > 这是把离线审计（D0.93-F L0 / D0.89-A L1）**真正接进 live 环境**后的端到端仿真对比。
 

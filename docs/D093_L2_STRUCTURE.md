@@ -1,5 +1,9 @@
 # D0.93 L2：结构能力扩张审计（关键重定向：瓶颈是几何，不是结构）
 
+> **SUPERSEDED（2026-08-16 清理标注）**：SUPERSEDED BY D095_JOINT_L2_L3_ALTERNATING："17% 结构可修复"定量作废，实际 44.2%/67.5% 见 D095。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 > **⚠ 已被 D0.95 修正**：本文"17% 结构可修复 / 83% 几何受限"是在 **escalate 帧
 > 12 采样 + 词典序完整任务判定 + 只重排 owner 不重排 TX 配对** 的窄口径下得到的，
 > 严重低估了结构层 headroom。D0.95 在全部 1572 个硬帧（γ=∞）上重测：

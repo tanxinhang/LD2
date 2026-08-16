@@ -1,5 +1,9 @@
 # 实验:配置、基线、指标、复现
 
+> **SUPERSEDED（2026-08-16 清理标注）**：7/19 实验协议快照；结果表已被 CURRENT_SYSTEM_STATUS / ARCHITECTURE_V2_RESULTS 取代。
+> 保留作历史参考；当前系统模型/结果以 CURRENT_SYSTEM_MODEL.md 与 CURRENT_SYSTEM_STATUS.md 为准。
+
+
 ---
 
 ## 1. 配置管理与优先级
