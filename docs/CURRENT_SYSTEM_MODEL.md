@@ -1,14 +1,14 @@
 # 当前系统模型（Architecture V2 + 认证化分布式控制）
 
-> 文档日期：2026-08-16（审计修正：§10 补 QoS 浮点口径与 lex L1/D1.0-A 新结果、
-> §11 补工程治理状态、§12 新增可复现性治理；已对照 `uav_isac/`、`config/`、
-> `tools/` 逐项校验）。
+> 文档日期：2026-08-16（更新：§10 补 6/6 干净种子重跑结果并关闭污染待办、§12
+> 补回填/清理状态与最新测试基线；已对照 `uav_isac/`、`config/`、`tools/` 逐项校验）。
 > 本文是**当前部署架构**的数学模型与代码映射总纲，覆盖 Architecture V2 与
 > D0.x 认证化控制主线的完整系统模型。基础环境与历史 P0 数学模型见
 > [`SYSTEM_MODEL.md`](SYSTEM_MODEL.md)；正式结果与版本判定以
 > [`CURRENT_SYSTEM_STATUS.md`](CURRENT_SYSTEM_STATUS.md) 为准；演进与失败实验见
 > [`ARCHITECTURE_V2_RESULTS.md`](ARCHITECTURE_V2_RESULTS.md)；性能缺口与路线见
-> [`SYSTEM_OVERVIEW_AND_ROADMAP.md`](SYSTEM_OVERVIEW_AND_ROADMAP.md)。若历史章节与本文
+> [`SYSTEM_OVERVIEW_AND_ROADMAP.md`](SYSTEM_OVERVIEW_AND_ROADMAP.md)；理论驱动优化
+> （含负结果）见 [`OPTIMIZATION_LOG.md`](OPTIMIZATION_LOG.md)。若历史章节与本文
 > 冲突，以本文为准。
 
 ---
@@ -489,11 +489,12 @@ r_team = Σ_q λ_q · U_κ(D_q) − λ_report·bits − 通信成本 − 约束�
 | 版本 | 种子 | mean-worst | QoS 可行率 | 判定 |
 |---|---:|---:|---:|---|
 | 4/4 冻结部署版 | 100 | 0.739 | 0.72 | 正式版本 |
-| 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.7303 | 严格 no-harm 证书成立 |
+| 6/6 原子控制 D0.85 | 20 | 0.6543 | 0.7303 | 严格 no-harm 证书成立（种子状态同待复核） |
 | 8/8 原子控制 D0.86 | 20 | 0.4372 | 0.50 | 严格 no-harm 证书成立 |
 | **8/8 解析栈 L0+L1+L3（D0.95，gauge）** | 20 | **0.662** | **1.0\*** | 当前部署配置（satisficing L1） |
 | 8/8 lexicographic L1（D1.1-A，live） | 20 | **0.844** | **1.0**（LCB 0.881） | 与部署同种子同 warm-start，仅 L1 目标切换 |
 | 8/8 lex + 多候选 L3（D1.1-B，live） | 20 | **0.975** | **1.0**（LCB 0.881） | 同种子，L3 视野增强 |
+| **6/6 跨尺度重跑（2026-08-16，干净 test 前 20）** | 20 | **0.293–0.344** | **0.10–0.30** | **四地板全不达标**（三变体） |
 
 > **差距分解（同 20 seed、同 warm-start、同 selection split，实测配对）**：
 > `0.662 → 0.844`（**+0.18，仅切换 `task_constrained_mode: gauge→lexicographic`**，
@@ -509,12 +510,15 @@ r_team = Σ_q λ_q · U_κ(D_q) − λ_report·bits − 通信成本 − 约束�
 `marl.qos_eval_tol=1e-6` 口径为 **QoS 1.0（20/20，Wilson LCB 0.839）**。口径修正
 见 [`D1_1A_LEXICOGRAPHIC_L1.md`](D1_1A_LEXICOGRAPHIC_L1.md) §2。
 
-> **6/6 决策数据污染提示**：`CURRENT_SYSTEM_STATUS.md` §4.1 中 6/6 三行（原跨尺度
-> Student 0.543 / 基数残差 0.645 / 集中式参考 0.635）来自 `980_k6q6` test split
-> 前 10 个种子，**含全部 5 个被隔离种子**（795/747/105/860/2）；该数据不可作为
-> 正式证据，bank 回填前不得引用（见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。本表
-> 6/6 原子控制 D0.85（20 seed）为另一机制（严格 no-harm 证书），种子状态待回填
-> 后复核。
+> **6/6 决策数据已回填重跑（2026-08-16）**：`CURRENT_SYSTEM_STATUS.md` §4.1 原 6/6
+> 三行（0.543/0.645/0.635）来自 `980_k6q6` test split 前 10 个种子，**含全部 5 个
+> 被隔离种子**（795/747/105/860/2）且该批种子系统性偏乐观（隔离种子 795/747/105
+> 的 worst 为 0.996/0.768/0.650），原"均值达标"结论被高估。已用重建的干净 test
+> bank（`config/stratified_seeds_980_k6q6_v2.json`，`tools/rebuild_seed_bank_test_split.py`）
+> 前 20 个种子重跑三个变体（`results/_6x6_reval_*_20/paired_eval.csv`）：
+> **worst 0.293–0.344、QoS 0.10–0.30，四地板全不达标**——6/6 跨尺度零样本部署
+> 明确失败。本表 6/6 原子控制 D0.85（20 seed）为另一机制（严格 no-harm 证书），
+> 种子状态待复核（见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）。
 
 **8/8 解析栈端到端**（`analytical_*_enabled`，D0.87–D0.95，20 seed）：
 
@@ -580,8 +584,8 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
 - lexicographic L1 / horizon joint oracle 为可部署执行路径（目前是离线诊断，
   需完成端点部署执行接线）；
 - 波形级或真实硬件 ISAC 性能；
-- 6/6 决策行数据（CURRENT_SYSTEM_STATUS §4.1 三行）为干净证据（含被隔离种子，
-  待 bank 回填重跑）。
+- 6/6 跨尺度零样本部署可行（干净种子重跑 worst 0.29–0.34、QoS 0.10–0.30，
+  四地板全不达标；原决策数据含隔离且偏乐观种子，已作废并替换）。
 
 ---
 
@@ -627,6 +631,10 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
    1.0（20/20，LCB 0.881）——但它是**教师几何起点的离线诊断**。下一步把
    Stage-B QoS-constrained max-min 做成逐帧可部署求解器并接入
    `task_constrained_mode` 的 live 路径。
+9. **6/6 跨尺度专项训练（2026-08-16 新增）**：干净种子重跑证明 6/6 零样本
+   迁移失败（worst 0.29–0.34、QoS 0.10–0.30，见 §10）——跨尺度不能靠迁移。
+   下一步是直接训练 6/6（`train_multiscale_structure_student.py` 等）而非依赖
+   4/4 冻结模型外推；8/8 的 0.975（同尺度训练+评估）不受此影响。
 
 ---
 
@@ -635,23 +643,26 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
 研究内容之外，本目录还记录了保证结果可信的工程治理机制（本次深度审计的修正成果，
 详见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)）：
 
-- **测试集污染种子隔离（代码强制）**：seed `795/747/105/860/2` 因 2026-07-29
-  split 漏写被误用，文档此前只有声明、代码零拦截。现注册表
+- **测试集污染种子隔离（代码强制 + 已回填）**：seed `795/747/105/860/2` 因
+  2026-07-29 split 漏写被误用，文档此前只有声明、代码零拦截。现注册表
   `config/quarantined_seeds.json` + `load_stratified_seed_split(strict=True)`
   fail-closed 拦截（含隔离种子即抛错），bank 生成自动排除并记录
-  `quarantined_excluded`。**三个 legacy bank 未回填前，相关 split 的 strict
-  加载会抛错（预期行为）**；回填后需重跑 6/6 决策行。
+  `quarantined_excluded`。**980_k6q6 已回填**（`stratified_seeds_980_k6q6_v2.json`：
+  干净 test split、无 split 重叠、selection/confirmation/stress 不变），6/6 决策
+  行已用干净 20 种子重跑（见 §10）；`800_q4` 与 `1130_k8q8` 的 selection/
+  confirmation 仍含隔离种子（795/747 等），相关 strict 加载继续 fail-closed。
 - **Gate 门槛脚本化**：`tools/assert_gate_thresholds.py`（单结果断言，从
   paired_eval.csv 重算聚合）与 `tools/assert_formal_gates.py`（批量断言正式结果，
   受污染项标 QUARANTINED 不参与判定）。4/4 正式结果经脚本复核 PASS
-  （0.9132/0.8848/0.7393/0.72）。
+  （0.9132/0.8848/0.7393/0.72）；6/6 重跑三变体经脚本判定 FAIL（四地板不达标）。
 - **协调层主/支路径立界**：`uav_isac/coordination/__init__.py` 导出主路径 API；
   14 个仅审计/研究用模块（priced_structure、certified_geometry_repair、
   owner_local_physics 等）带 `AUDIT/RESEARCH-ONLY` 标注，不代表部署行为。
-- **结果治理**：`tools/audit_results_tree.py` 只读扫描 results/（767 目录）——
-  36 个目录无任何 manifest、20 个 `_` 前缀临时目录与正式混存、summary.json 有
-  87 种 schema 变体；物理归档（移动/删除）需用户确认后执行。
+- **结果治理**：`tools/audit_results_tree.py` 只读扫描 results/——原 767 目录中
+  36 个无 manifest、20 个 `_` 前缀临时目录混存、summary.json 有 87 种 schema
+  变体；2026-08-16 清理已归档 126 个过时目录（90 个 paper-era + 11 个无引用
+  scratch + 26 个无引用无 manifest）至 `results/_archive/`，顶层现 641 个目录。
 - **工程基线**：`requirements.txt`（此前缺失，导致 sklearn 缺失测试失败）、
   `.github/workflows/ci.yml`（Linux 全量 pytest）、`pytest.ini` 排除 scripts/
   （`test_ppo_ratio_fix.py` 曾模块级执行训练被 pytest 误收集）。全量测试基线
-  **865 passed / 1 env failure**（sklearn，安装 requirements 后通过）。
+  **886 passed / 1 env failure**（sklearn，安装 requirements 后通过）。
