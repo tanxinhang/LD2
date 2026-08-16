@@ -108,6 +108,36 @@ P_D^I ≤ ε 每帧保持（跨运动/结构变化）；QoS 代价随对手强�
 | **8/8 lex + 多候选 L3** | **0.9818** | **0.9778** | **0.9753** | **1.00** | **0.839** | **PASS（含 LCB 强制）** |
 | 6/6（污染） | — | — | — | — | — | QUARANTINED |
 
+## D1.7：λ-μ 分布式列生成的理论与数值验证（2026-08-16，advice 013）
+
+**理论（Dantzig–Wolfe 精确分解）**：T3 的 DC-MM 内层 LP
+
+```text
+max t  s.t.  Σ_i a_iq p_iq ≥ t          （感知，跨 UAV 耦合）
+             Σ_i a^I[i,q] p_iq ≤ D̄^I_q  （隐蔽性，跨 UAV 耦合）
+             Σ_q p_iq ≤ b_i              （预算，每 UAV 可分离）
+             p ≥ 0
+```
+
+把耦合行（感知+隐蔽性）放主问题（master），预算行放每 UAV 的定价子问题
+（pricing）。给定主问题对偶价格（λ：感知瓶颈，μ：隐蔽性），UAV i 的定价
+子问题恰为 advice 013 的本地 bid：
+
+```text
+q_i* = argmax_q (λ_q a_iq − μ_q a^I[i,q]),   p_iq = b_i 若 q = q_i*
+```
+
+列生成（RMP + 本地 bid 加列）收敛到中央 LP 的精确最优（LP-exact 分解）。
+
+**数值验证**（20 个随机 4/4 场景，medium 对手 ε=0.1）：列生成与中央 LP 的
+t* 差距全部 ≤ 3.6e-15（机器精度），平均 |gap| = 5.8e-16；收敛列数 10–16
+（≈ K×Q 级）。**证明 T3 隐蔽性约束可分布式实现且数学精确**——advice 013
+"剩余理论环"闭合。
+
+**回归**：`tests/test_dw_column_generation.py`（列生成=中央 LP、本地 bid 解
+pricing、隐蔽性约束成立）。下一步：实现完整分布式协调器（每帧 RMP + 价格
+广播 + 本地 bid 执行）。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化
