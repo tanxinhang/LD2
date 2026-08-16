@@ -240,6 +240,25 @@ seed 认证。
 `assert_formal_gates.py` 出具正式对比（H=0 vs H=40）。辅助：`run_mappo.py
 --final-eval-seeds`（显式 seed 列表诊断评估）、`tools/smoke_d19_lookahead.py`。
 
+**全量 100-seed blind 认证（`results/_d1_9_blind100/paired_eval.csv`，~4.4 h）**：
+
+| 指标 | D1.5（H=0） | **D1.9（H=40）** | 判定 |
+|---|---:|---:|---|
+| QoS feasible rate | 0.730 | **0.950**（95/100） | 大幅过门 |
+| Wilson LCB（95%） | 0.636 | **0.888** | **过门（≥0.70）** |
+| steady 均值/中位 | 0.820 / 0.973 | **0.963 / 1.000** | 过 |
+| worst 均值/中位 | 0.808 / 0.972 | **0.962 / 1.000** | 过 |
+
+> **结论**：① 单步 trust-region 停滞是 D1.5 左尾主因——H=40 前瞻评分使
+> 100 seed 盲测 QoS 从 0.730 提升至 **0.950**（+0.22），LCB 0.636 → **0.888**
+> （+0.25，N=100 统计功效达标，`--require-lcb` 论文声明成立）；
+> ② 剩余 5 个失败 seed 中 **4 个（886/298/45/185）worst_nearest > 450 m**，
+> 在 episode 375 m 位移预算下物理不可达（D1.5 左尾分析已预告），仅 seed 615
+> （355 m）为残余策略失败——**95/100 已近该运动学下的可达性上界**；
+> ③ `tools/report_blind_certification.py` 修复：`--csv` 参数生效
+> （此前硬编码 D1.5 路径）。正式 Gate 表（`assert_formal_gates.py`）中
+> D1.9 点估计 + LCB 强化两行均 PASS。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化

@@ -68,3 +68,21 @@ def test_d1_5_blind_registry_point_estimate_passes_lcb_disclosed():
     assert report[point[0].name]["qos_feasible"] >= 0.70
     assert report[lcb[0].name]["status"] == "FAIL"
     assert report[lcb[0].name]["error"]  # non-empty failure detail
+
+
+def test_d1_9_blind_registry_passes_point_and_lcb():
+    """D1.9 bottleneck-lookahead blind 100: both the point-estimate and the
+    LCB-enforced rows must PASS (QoS 0.950 / LCB 0.888 >= 0.70), closing the
+    D1.5 statistical-power gap (docs/OPTIMIZATION_LOG.md D1.9)."""
+    point = [r for r in FORMAL_RESULTS
+             if "D1.9 bottleneck-lookahead blind (100 seeds)" in r.name
+             and not r.require_lcb]
+    lcb = [r for r in FORMAL_RESULTS
+           if "D1.9 bottleneck-lookahead blind (100 seeds)" in r.name
+           and r.require_lcb]
+    assert len(point) == 1 and len(lcb) == 1
+    report = assert_formal_gates(results=point + lcb)
+    assert report[point[0].name]["status"] == "PASS"
+    assert report[point[0].name]["qos_feasible"] >= 0.90
+    assert report[lcb[0].name]["status"] == "PASS"
+    assert report[lcb[0].name]["qos_wilson_lcb"] >= 0.70

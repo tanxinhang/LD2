@@ -95,6 +95,19 @@ FORMAL_RESULTS: List[FormalResult] = [
         note=("Wilson LCB 0.636 < 0.70：N=100 统计功效不足，须在论文中如实披露"
               "（点估计 + 置信区间口径）"),
     ),
+    FormalResult(
+        name="8/8 D1.9 bottleneck-lookahead blind (100 seeds)",
+        csv="_d1_9_blind100/paired_eval.csv",
+        note=("D1.9 H=40 前瞻 L3：QoS 0.950 / LCB 0.888 双双过门（advice 013），"
+              "docs/OPTIMIZATION_LOG.md D1.9"),
+    ),
+    FormalResult(
+        name="8/8 D1.9 bottleneck-lookahead blind (100 seeds) -- LCB enforced",
+        csv="_d1_9_blind100/paired_eval.csv",
+        require_lcb=True,
+        note=("QoS 0.950 + Wilson LCB 0.888 ≥ 0.70：统计功效达标，可作为论文"
+              "主结果（--require-lcb 成立）"),
+    ),
 ]
 
 

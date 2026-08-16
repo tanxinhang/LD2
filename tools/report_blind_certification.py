@@ -1,6 +1,11 @@
-"""D1.5 blind certification report (advice 013): QoS feasible rate + Wilson
-LCB as the PRIMARY criterion, plus mean/median/worst quantiles instead of
-only the mean.  Run after results/_d1_5_blind100/paired_eval.csv exists."""
+"""D1.5/D1.9 blind certification report (advice 013): QoS feasible rate +
+Wilson LCB as the PRIMARY criterion, plus mean/median/worst quantiles instead
+of only the mean.  Run after a blind paired_eval.csv exists.
+
+Usage:
+    python tools/report_blind_certification.py [--csv results/_d1_9_blind100/paired_eval.csv]
+"""
+import argparse
 import ast
 import csv
 import sys
@@ -13,13 +18,17 @@ from tools.assert_gate_thresholds import (
     wilson_lower,
 )
 
-PATH = "results/_d1_5_blind100/paired_eval.csv"
+DEFAULT_PATH = "results/_d1_5_blind100/paired_eval.csv"
 
 
-def main() -> int:
-    rows = list(csv.DictReader(open(PATH, encoding="utf-8")))
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--csv", default=DEFAULT_PATH)
+    args = ap.parse_args(argv)
+    path = args.csv
+    rows = list(csv.DictReader(open(path, encoding="utf-8")))
     if not rows or "eval_episode_seeds" not in rows[0]:
-        print(f"{PATH} not ready (blind run still in progress)", file=sys.stderr)
+        print(f"{path} not ready (blind run still in progress)", file=sys.stderr)
         return 2
     r = rows[0]
     seeds = ast.literal_eval(r["eval_episode_seeds"])
