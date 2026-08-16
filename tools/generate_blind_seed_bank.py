@@ -123,7 +123,13 @@ def main() -> int:
         "tier_quantiles_m": {"q25": q25, "q75": q75},
         "tier_counts": {t: counts[t] for t in counts},
         "splits": {"test": blind},
-        "seed_metadata": {str(s): metadata[s] for s in blind},
+        "seed_metadata": {
+            # Keep ALL sampled geometries: the training pool is built from
+            # this metadata minus the reserved (test/blind) seeds, so blind
+            # seeds are automatically excluded from training -- exactly the
+            # separation D1.5 requires -- while the pool stays non-empty.
+            str(s): metadata[s] for s in sorted(metadata)
+        },
     }
     out_path = os.path.join(ROOT, "config",
                             "stratified_seeds_1130_k8q8_blind.json")

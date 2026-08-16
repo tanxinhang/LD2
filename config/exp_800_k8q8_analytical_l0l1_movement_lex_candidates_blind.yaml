@@ -7,3 +7,6 @@ extends: exp_800_k8q8_analytical_l0l1_movement_lex_candidates.yaml
 marl:
   eval_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
   training_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
+  eval_seed_split: test
+  final_eval_seed_split: test
+  checkpoint_confirmation_enabled: false
