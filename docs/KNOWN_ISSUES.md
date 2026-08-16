@@ -42,12 +42,15 @@
    保留原 selection/confirmation/stress；`tools/rebuild_seed_bank_test_split.py`）；
    `800_q4` 与 `1130_k8q8` 的 selection/confirmation 仍含隔离种子（795/747 等），
    相关 split 的 strict 加载继续 fail-closed，回填可选。
-2. ~~重跑 6/6 三行决策运行~~ **已完成**：三个变体（adaptive_b4b8 /
-   cardinality_residual46 / teacher_trace）在干净 test 前 20 个种子上重跑
-   （`results/_6x6_reval_*_20/paired_eval.csv`）——**四地板全不达标**
-   （worst 0.29–0.34 < 0.60，QoS 0.10–0.30）。原数据（0.543/0.645/0.635）不仅被
-   污染，且该 10 个种子恰好偏乐观（隔离种子 795/747/105 的 worst 0.996/0.768/0.650），
-   原"均值达标"结论被严重高估。6/6 跨尺度零样本部署明确失败。
+2. ~~重跑 6/6 三行决策运行~~ **已完成（含 D1.6 分解）**：
+   - 干净 test bank（v2）前 20 种子重跑**无解析栈**基线：worst 0.293–0.344、
+     QoS 0.10–0.30（`results/_6x6_reval_*_20/`）——原 6/6 运行未启用任何
+     `analytical_*` 标志，是纯 4/4 模型零样本路径；
+   - **D1.6 分解（advice 013 情况 A）**：接上解析部署候选栈（L0 KKT + lex L1 +
+     P0-L2 + 多候选 L3）后 worst 恢复 **0.751–0.910、QoS 0.65–0.90**
+     （`results/_6x6_d1_6_analytical_*_20/`）——**6/6 失败主因是配置不匹配，非
+     跨尺度学习崩坏，无需重训 Student**；teacher 结构 oracle（0.910）优于
+     Student（0.75–0.77），残差为 Student 校准 gap ~0.15（可选后续校准）。
 3. ~~CURRENT_SYSTEM_STATUS 6/6 表需加披露或换用干净种子结果~~ **已完成**：表已用
    重跑数据替换并加披露。
 4. ~~回填后 test_quarantined_seeds.py 的 980_k6q6 哨兵断言需同步更新~~ **已完成**
