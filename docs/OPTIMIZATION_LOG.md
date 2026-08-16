@@ -201,8 +201,48 @@ seed 认证。
 - 改进方向（D1.9 候选）：初始瞬态专门优化（前 N 帧连续几何 warm start /
   瓶颈目标优先全速趋近），或场景可行性边界披露（对物理不可达 seed 标记排除）。
 
+## D1.9：瓶颈前瞻 L3（receding-horizon approach scoring，2026-08-16）
+
+**动机（由 D1.5 左尾分解驱动）**：300–450 m `worst_nearest` 的 seed（QoS
+0.4–0.69）失败机制是**单步 trust-region 停滞**——多候选 L3 的径向候选只评
+"1 步后"几何，2.5 m 步长在 R≈300–450 m 处把 1/R⁴ ceiling 移动 ~0，精确 LP
+无区分度，候选池常选 stay，UAV 不趋近瓶颈目标。而运动学预算（375 m）本可
+覆盖该区间（理想全速直线趋近 15 s 可使 97/100 seed 进入 200 m 圈，实测策略
+仅 58/100）。
+
+**方案**：`analytical_movement_lookahead_frames=H`（默认 0，H>0 启用）——
+多候选 L3 对弱目标径向候选改在 **H 帧持续趋近后**的几何（`uav + H·step·dir`）
+上评分，执行仍只走 1 步（`apply_action` clamp 到 v_max·dt=2.5 m）——
+**receding horizon**。理论支撑：
+- P_D = Q(Q⁻¹(P_FA) − √D)，D ∝ P/(R_tx²·R_rx²)；H=40 → 100 m 前瞻，把
+  300–450 m 的 ceiling 推进到 P_D 饱和区，LP 恢复区分度；
+- 物理一致：前瞻几何用精确 1/R⁴ 重标定 per-watt 张量，d_safe 保护不变，
+  stay 候选保留 → 代理分数单调不退化；
+- 创新点：把"1 步 LP 评分"升级为"执行 1 步 / 评分 H 步"的时间耦合评分，
+  显式利用 v_max·T·dt 位移预算（D1.5 发现的物理可达边界）。
+
+**数值验证**：
+- 单元测试（`test_dual_pruned_movement_candidates.py`）：H=0 与 D1.1-B 逐位
+  一致；H>0 候选集是超集 + stay 保留（单调）；执行位移 clamp ≤2.5 m；
+  远场瓶颈场景（400 m）H=40 选出趋近而非 stay。
+- 合成几何（2 UAV，弱目标 500 m，60 帧）：H=40 向瓶颈目标移动 147.5 m vs
+  基线 83.8 m（**+76%**），全速趋近语义成立。
+- **冒烟（6 个瓶颈 blind seed，worst_nearest 344–433 m，均为基线失败）**：
+  QoS **1/6 → 5/6**；worst 提升 +0.699（seed 446: 0.259→0.959）、+0.636
+  （seed 98）、+0.573（seed 696）、+0.264（seed 598）；唯一未过 seed 615
+  亦 0.085→0.455。已通过 seed 645 保持（0.973→0.990）。
+- **随机 10-seed 对照**：QoS **9/10 → 10/10，零退化**（通过 seed delta ≤
+  1e-3），左尾 seed 295 worst 0.376→0.999、seed 367/631/372 均补足到 1.0。
+- 综合 16 个验证 seed：**10/16 → 15/16 QoS**。
+
+**状态**：全量 100-seed blind 复测运行中（`results/_d1_9_blind100/`，lookahead
+40 配置 `exp_800_k8q8_..._blind_lookahead40.yaml`），完成后以
+`assert_formal_gates.py` 出具正式对比（H=0 vs H=40）。辅助：`run_mappo.py
+--final-eval-seeds`（显式 seed 列表诊断评估）、`tools/smoke_d19_lookahead.py`。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化
 新增 20 项回归（对偶剪枝 4 + 带宽 3 + intercept 原语 5 + live 5 + standoff 1 +
-Gate 批量 4 − 少量合并）。
+Gate 批量 4 − 少量合并）。D1.9 另增 2 项前瞻候选回归（单调性/趋近 + H=0
+可复现），随 D1.5 左尾分析工具 3 项（`test_analyze_blind_tail.py`）。
