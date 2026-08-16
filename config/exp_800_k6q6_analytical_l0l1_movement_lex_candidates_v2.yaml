@@ -1,0 +1,22 @@
+# D1.6 scale-failure decomposition (advice 013): 6/6 with the FULL analytical
+# stack (D1.1 candidate) instead of the plain 4/4-model zero-shot path.
+#
+# The revalidated 6/6 rows (worst 0.29-0.34) ran WITHOUT any analytical_*
+# flag: pure 4/4 frozen model (learned power head + P0 max-min pairing).
+# This config turns on the deployment candidate stack (L0 KKT bandwidth,
+# lexicographic L1, P0-L2, multi-candidate trust-region L3 + dual pruning) on
+# the clean v2 seed bank, to test whether the 6/6 collapse is a configuration
+# mismatch (case A) rather than a learning/geometry failure (cases B/C).
+extends: exp_800_k6q6_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale_v2.yaml
+
+marl:
+  analytical_sensing_power_enabled: true
+  analytical_comm_power_enabled: true
+  analytical_comm_optimal_bw: true
+  analytical_structure_ranking_enabled: true
+  task_constrained_power_enabled: true
+  task_constrained_qos_floors: [0.61, 0.71, 0.81, 3]
+  task_constrained_mode: lexicographic
+  analytical_movement_enabled: true
+  analytical_movement_candidates_enabled: true
+  analytical_movement_dual_prune: true

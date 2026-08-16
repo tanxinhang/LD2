@@ -252,24 +252,39 @@ Delta a_i,1:H = ρ·d_max·tanh f(self_i, SymmetricPool_q φ_t(t_iq),
 精确不变量：目标置换**不变**、UAV 置换**等变**、均匀区域尺度**协变**、速度圆盘
 投影保证 `‖a_i,h‖ ≤ v_max·dt`。代码：`agents/equivariant_movement_plan.py` 等。
 
-### 5.6 解析执行栈（L0→L3，D0.87–D0.95，已接入部署路径）
+### 5.6 解析执行栈（L0→L3）
 
-除上述学习 Actor 外，系统现有一条**解析控制执行路径**，用 `analytical_*_enabled`
-标志逐层接管学到的通信/功率/结构/运动决策（D0.87–D0.95 闭环）：
+除上述学习 Actor 外，系统有一条**解析控制执行路径**，用 `analytical_*_enabled`
+标志逐层接管学到的通信/功率/结构/运动决策。**分两代**：
+
+#### 5.6.1 Legacy deployed baseline：D0.95（gauge L1 + 单步 L3）
 
 | 层 | 标志 | 作用 | 关键代码 |
 |---|---|---|---|
 | L0 通信余量 | `analytical_comm_power_enabled` | 解析最小通信功率，回收链路余量进感知预算 `b_i = 1 − P_comm^min` | `env_core._compute_analytical_min_comm_power` |
 | L1 功率 | `analytical_sensing_power_enabled` + `task_constrained_power_enabled` | 固定结构 max-min LP，或 capability gauge（三地板硬约束） | `maxmin_power.py`、`capability.py` |
 | L2 结构 | `analytical_structure_ranking_enabled` | 功率无关排名（per-watt gain）+ 上一帧 max-min 对偶价格 λ* 的瓶颈优先级 | `env_core._per_watt_coefficient_from_entries`（P0 排名） |
-| L3 几何 | `analytical_movement_enabled` | 价格驱动赤字→能力下降 + 达标悬停 | `env_core._analytical_movement_delta`（D0.95） |
+| L3 几何 | `analytical_movement_enabled` | 价格驱动赤字→能力下降 + 达标悬停（单步梯度） | `env_core._analytical_movement_delta`（D0.95） |
 
-这套栈把 D0.87–D0.95 的离线审计结果**接进 live 环境**：20 seed 上 worst 0.662 /
-weak3 0.724 / steady 0.808（三地板全达标，§10）。各层数学见 §6，闭环证据见
-[`D095_JOINT_L2_L3_ALTERNATING.md`](D095_JOINT_L2_L3_ALTERNATING.md)。
-注：`priced_structure.py` 的逐帧 owner+TX 重分配是 D0.95 L2×L3 交替下降里的**离线
-结构修复 oracle**（`tools/audit_l3_l2_alternating.py`），尚未逐帧接入 live 部署路径；
-live 的逐帧 L2 是上表的功率无关 P0 排名。
+D0.95 栈 20 seed 上 worst 0.662 / weak3 0.724 / steady 0.808（三地板全达标，§10）。
+
+#### 5.6.2 Candidate deployment：D1.1（lex L1 + 多候选 L3 + 对偶剪枝 + 最优带宽）
+
+在 D0.95 基础上，D1.1 系列升级为**当前部署候选**（`OPTIMIZATION_LOG.md`）：
+
+| 层 | 升级 | 关键代码/标志 |
+|---|---|---|
+| L0 | 最优正交带宽分配（D1.1-C，KKT 凸解，no-waste） | `analytical_comm_optimal_bw` |
+| L1 | **lexicographic QoS 约束 max-min**（D1.1-A，Stage-A 可行性 + Stage-B worst 最大化，已 live） | `task_constrained_mode: lexicographic` |
+| L2 | 不变（headroom 已量化 <1%，冻结） | P0 排名 + hold-5 |
+| L3 | **多候选 trust-region**（D1.1-B，5–7 个整队候选 LP 打分）+ **对偶上界剪枝**（D1.1-B+，弱对偶精确剪枝） | `analytical_movement_candidates_enabled`、`analytical_movement_dual_prune` |
+| 隐蔽性 | 反检测硬约束（D1.1-D/E，`P_D^I ≤ ε`，QoS×隐蔽性联合 LP） | `intercept_constrained_power_enabled`（默认关） |
+
+**D1.1 候选 20 seed 上 worst 0.975 / weak3 0.978 / steady 0.982 / QoS 1.0**
+（live eval，同种子同 warm-start；`_d095_lexcand20`）。这是当前最强部署配置，
+论文主结果应以它为准；**D1.5 盲测（≥100 全新 seed）前不继续调参**（advice 013）。
+`priced_structure.py` 的逐帧 owner+TX 重分配是离线结构修复 oracle，尚未接入 live
+（L2 headroom <1%，已冻结，见 §6.2 注）。
 
 ---
 
@@ -626,11 +641,11 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
    必须静默"的 oracle 结论在 live 路径复现**。下一步是把新的攻防对偶价格
    `s_iq = λ_q a_iq − μ_w a^I[i,q]` 接入分布式协调（列生成），exposure 正式降级
    为 baseline。
-8. **lexicographic L1 部署化（D1.1-A 后）**：D1.1-A 已证明 lex L1（QoS 优先 ≻
-   worst 最大化）在 oracle 级把 20-seed mean worst 从 0.671 推到 0.844、QoS
-   1.0（20/20，LCB 0.881）——但它是**教师几何起点的离线诊断**。下一步把
-   Stage-B QoS-constrained max-min 做成逐帧可部署求解器并接入
-   `task_constrained_mode` 的 live 路径。
+8. ~~**lexicographic L1 部署化**~~（已闭合，D1.1-A）：lex L1 已是 live 配置
+   （`task_constrained_mode: lexicographic`，20 seed worst 0.844→0.975 与多候选
+   L3 组合），不再是"待部署求解器"。下一步是 **D1.5 盲测**：冻结算法
+   （L0-KKT + Lex-L1 + P0-L2 + 多候选 L3），在 ≥100 全新 blind seed 上以
+   `QoS feasible rate + Wilson LCB` 为主判据认证（advice 013）。
 9. **6/6 跨尺度专项训练（2026-08-16 新增）**：干净种子重跑证明 6/6 零样本
    迁移失败（worst 0.29–0.34、QoS 0.10–0.30，见 §10）——跨尺度不能靠迁移。
    下一步是直接训练 6/6（`train_multiscale_structure_student.py` 等）而非依赖
