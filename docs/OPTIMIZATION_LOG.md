@@ -154,6 +154,27 @@ reset 后用**当前几何**预计算 deflection entries + 最小单 owner 结�
 ~1 帧（seed 503：帧 0 worst 0.5029→0.5165）；3 项回归（帧 0 移动、结构可行性、
 多 seed 不退化）。早期瞬态从"滚动收敛"变为"帧 0 即修复"。
 
+## D1.5：blind certification 资产与协议（2026-08-16，advice 013 §1）
+
+**动机**：部署候选（L0-KKT + Lex-L1 + P0-L2 + 多候选 L3）的 0.975 来自已多轮复用的
+20 个 selection seed，不能作最终证据。D1.5 用**从未在任何运行中出现过**的 blind
+seed 认证。
+
+**资产**：
+- `tools/generate_blind_seed_bank.py`：从 1130_k8q8 的 1000 个采样几何排除
+  ①隔离种子 ②全部已暴露 seed（扫描 174 个 paired_eval.csv，457 个）③所有 bank
+  split 种子——剩 249 个候选，tier 均衡（1:2:1）抽 100，冻结抽签种子 20260827。
+- `config/stratified_seeds_1130_k8q8_blind.json`：100 blind seed，strict 加载通过，
+  **训练池 522 个种子与盲测 0 重叠**（盲性保持）。
+- `config/exp_800_k8q8_..._blind.yaml`：冻结候选 + blind bank + test split 固定 +
+  禁用 confirmation。
+
+**冒烟（10 blind seed）**：steady 0.907 / weak3 0.900 / worst 0.900 / QoS 0.90——
+盲测 seed 上性能保持（worst 0.90 vs 开发 selection 的 0.975 同量级）；Wilson LCB
+0.596（10 seed 分辨率不足，正是 N=100 的必要性）。**全量 100 seed 盲测运行中**，
+完成后以 `assert_formal_gates.py --require-lcb`（QoS feasible + Wilson LCB 主判据）
+出具正式报告。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化
