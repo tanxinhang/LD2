@@ -108,6 +108,19 @@ FORMAL_RESULTS: List[FormalResult] = [
         note=("QoS 0.950 + Wilson LCB 0.888 ≥ 0.70：统计功效达标，可作为论文"
               "主结果（--require-lcb 成立）"),
     ),
+    FormalResult(
+        name="8/8 D1.10 indep-env blind (100 seeds, independent sampling)",
+        csv="_d1_10_blind100_indep/paired_eval.csv",
+        note=("D1.10-A 独立 env 协议：每 seed 独立采样（消除共享实例 RNG "
+              "漂移），QoS 0.940 / LCB 0.875 双双过门——统计正确的认证值"),
+    ),
+    FormalResult(
+        name="8/8 D1.10 indep-env blind (100 seeds) -- LCB enforced",
+        csv="_d1_10_blind100_indep/paired_eval.csv",
+        require_lcb=True,
+        note=("QoS 0.940 + Wilson LCB 0.875 ≥ 0.70：独立采样协议下论文主结果"
+              "仍成立"),
+    ),
 ]
 
 

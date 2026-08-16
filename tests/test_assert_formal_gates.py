@@ -86,3 +86,22 @@ def test_d1_9_blind_registry_passes_point_and_lcb():
     assert report[point[0].name]["qos_feasible"] >= 0.90
     assert report[lcb[0].name]["status"] == "PASS"
     assert report[lcb[0].name]["qos_wilson_lcb"] >= 0.70
+
+
+def test_d1_10_indep_blind_registry_passes_point_and_lcb():
+    """D1.10-A independent-env blind 100: both rows PASS under the
+    statistically correct per-seed independent sampling (QoS 0.940 / LCB
+    0.875 >= 0.70), confirming the certification is protocol-robust
+    (docs/OPTIMIZATION_LOG.md D1.10)."""
+    point = [r for r in FORMAL_RESULTS
+             if "D1.10 indep-env blind (100 seeds" in r.name
+             and not r.require_lcb]
+    lcb = [r for r in FORMAL_RESULTS
+           if "D1.10 indep-env blind (100 seeds" in r.name
+           and r.require_lcb]
+    assert len(point) == 1 and len(lcb) == 1
+    report = assert_formal_gates(results=point + lcb)
+    assert report[point[0].name]["status"] == "PASS"
+    assert report[point[0].name]["qos_feasible"] >= 0.90
+    assert report[lcb[0].name]["status"] == "PASS"
+    assert report[lcb[0].name]["qos_wilson_lcb"] >= 0.70
