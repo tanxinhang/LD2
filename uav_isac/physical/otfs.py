@@ -12,37 +12,6 @@ fall between grid bins suffer degraded detection performance.
 import numpy as np
 
 
-def compute_dd_bins(
-    tau: float,
-    nu: float,
-    delta_f: float,
-    T_sym: float,
-    M: int,
-    N: int
-) -> tuple:
-    """Compute delay-Doppler bin indices for given (tau, nu).
-
-    Delay bin: l = round(tau * M * delta_f)
-    Doppler bin: k = round(nu * N * T_sym)
-
-    Args:
-        tau: Propagation delay (s)
-        nu: Doppler shift (Hz)
-        delta_f: Subcarrier spacing (Hz)
-        T_sym: Symbol period (s)
-        M: Number of delay bins
-        N: Number of Doppler bins
-
-    Returns:
-        (l, k) bin indices (clipped to valid range)
-    """
-    l = int(np.round(tau * M * delta_f))
-    k = int(np.round(nu * N * T_sym))
-    l = max(0, min(l, M - 1))
-    k = max(-N // 2, min(k, N // 2 - 1))
-    return l, k
-
-
 def compute_dd_misalignment(
     tau: float,
     nu: float,
@@ -110,28 +79,3 @@ def compute_dd_effectiveness(
     alignment = compute_dd_misalignment(tau, nu, delta_f, T_sym, M, N)
     g_dd = abs(alignment)  # in [0, 1]
     return float(g_dd)
-
-
-def compute_otfs_snr(
-    d_raw: float,
-    g_dd: float,
-    g_min: float = 0.5
-) -> float:
-    """Compute effective SNR after OTFS DD processing.
-
-    SNR_eff = d_raw * g_dd if g_dd >= g_min else 0
-
-    This represents the post-processing SNR that feeds into the
-    detection statistic.
-
-    Args:
-        d_raw: Raw Deflection (pre-processing SNR)
-        g_dd: DD effectiveness [0, 1]
-        g_min: Threshold below which the observation is discarded
-
-    Returns:
-        Effective SNR for detection
-    """
-    if g_dd < g_min:
-        return 0.0
-    return float(d_raw * g_dd)

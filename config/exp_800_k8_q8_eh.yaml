@@ -1,16 +1,16 @@
-# Experiment config: large-area, 8-UAV, 8-target scenario.
+﻿# Experiment config: large-area, 8-UAV, 8-target scenario.
 #
 # This is the PRIMARY config for all K=8, Q=8 experiments documented in
-# docs/审计报告_逐层失效定位.md and docs/TC-SP-MAPPO_差距分析.md.
+# docs/瀹¤鎶ュ憡_閫愬眰澶辨晥瀹氫綅.md and docs/TC-SP-MAPPO_宸窛鍒嗘瀽.md.
 #
 # Key differences from exp_800_q4.yaml:
-#   K: 4 → 8 (UAVs)
-#   Q: 4 → 8 (targets)
+#   K: 4 鈫?8 (UAVs)
+#   Q: 4 鈫?8 (targets)
 #   omega_q: equal weights for all 8 targets
-#   num_envs: 8 → 4 (more agents → fewer parallel envs for memory)
+#   num_envs: 8 鈫?4 (more agents 鈫?fewer parallel envs for memory)
 #
-# All 8×8 experiments MUST use this config (or explicitly reference it
-# as a base). Do NOT rely on script-level overrides — they are not
+# All 8脳8 experiments MUST use this config (or explicitly reference it
+# as a base). Do NOT rely on script-level overrides 鈥?they are not
 # tracked and make results irreproducible.
 
 scenario:
@@ -66,7 +66,6 @@ detection:
   K_q_max: 3
   B_q: 64
   P_D_min: 0.2
-  T_report: 0.005
 
 p0_solver:
   capacity_per_rx: 256
@@ -87,7 +86,7 @@ marl:
   eta_mc: 0.5
   use_distance_shaping: false
   shape_w: 0.01
-  lambda_report: 1.0e-5       # lower: 8 UAVs → comm cost adds up faster
+  lambda_report: 1.0e-5       # lower: 8 UAVs 鈫?comm cost adds up faster
   alpha_pd: 0.5
   lambda_report_comm: 1.0e-5
   bc_beta_init: 0.05
@@ -97,7 +96,7 @@ marl:
   lagrangian_max: 1.0
   target_kl: 0.02
   num_episodes: 1000
-  num_envs: 4                  # reduced: 8 agents × 4 envs = 32 agents/batch
+  num_envs: 4                  # reduced: 8 agents 脳 4 envs = 32 agents/batch
   learn_roles: false
   assignment_hold_frames: 5
   actor_decision_interval: 5

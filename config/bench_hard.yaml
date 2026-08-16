@@ -1,4 +1,4 @@
-# Hard benchmark: CA targets, CV Kalman ¡ª model mismatch (gap ~0.04-0.16)
+ï»¿# Hard benchmark: CA targets, CV Kalman â€” model mismatch (gap ~0.04-0.16)
 # Purpose: robustness under severe model mismatch
 channel:
   NF: 4.0
@@ -15,7 +15,6 @@ detection:
   K_q_max: 3
   P_D_min: 0.2
   P_FA: 0.001
-  T_report: 0.005
   g_min: 0.5
 marl:
   actor_decision_interval: 5

@@ -1,9 +1,9 @@
-# Phase 1: Minimum System (No Federation, C=1)
-# All simulation parameters — single source of truth
+﻿# Phase 1: Minimum System (No Federation, C=1)
+# All simulation parameters 鈥?single source of truth
 
 scenario:
-  region_size: [400, 400]     # m — anchored to Device-free MARL ISAC (IEEE TVT 2024): 400x400 m
-  height: 20                   # m UAV altitude — Device-free MARL (TVT 2024): H=20 m
+  region_size: [400, 400]     # m 鈥?anchored to Device-free MARL ISAC (IEEE TVT 2024): 400x400 m
+  height: 20                   # m UAV altitude 鈥?Device-free MARL (TVT 2024): H=20 m
   K: 4                         # number of UAVs
   Q: 2                         # number of moving targets
   T: 150                       # frames per episode (targets are fixed in the default tracking-free study)
@@ -13,12 +13,12 @@ scenario:
 uav:
   v_max: 25                    # m/s max flight speed
   d_safe: 20                   # m safe separation distance
-  P_sense: 0.0251              # W = 14 dBm sensing power — Device-free MARL (TVT 2024): P^(r)=14 dBm
-  P_report: 0.25               # W reporting power — Device-free MARL comm power set {0.25..1 W}
+  P_sense: 0.0251              # W = 14 dBm sensing power 鈥?Device-free MARL (TVT 2024): P^(r)=14 dBm
+  P_report: 0.25               # W reporting power 鈥?Device-free MARL comm power set {0.25..1 W}
   P_isac_total: 1.0            # W per-UAV hard RF budget: P_comm + sum_q P_sense,q
   B_max: 50000                 # J initial battery energy
   P_fly_static: 80             # W hover power (rotorcraft)
-  P_fly_coeff: 0.05            # speed-dependent coefficient (P_fly ∝ v^2)
+  P_fly_coeff: 0.05            # speed-dependent coefficient (P_fly 鈭?v^2)
 
 target:
   motion_model: "CV"           # used only when marl.tracking_enabled=true
@@ -28,8 +28,8 @@ target:
   omega_q: [0.5, 0.5]          # target priorities (equal by default)
 
 otfs:
-  fc: 2.8e+10                  # carrier frequency (Hz, mmWave 28 GHz) — Low-Latency ISAC V2X (28 GHz)
-  B: 1.0e+6                    # bandwidth (Hz) — Device-free MARL (TVT 2024): B=1 MHz
+  fc: 2.8e+10                  # carrier frequency (Hz, mmWave 28 GHz) 鈥?Low-Latency ISAC V2X (28 GHz)
+  B: 1.0e+6                    # bandwidth (Hz) 鈥?Device-free MARL (TVT 2024): B=1 MHz
   delta_f: 1.5625e+4           # subcarrier spacing = B/M = 1e6/64
   M: 64                        # delay-dimension bins
   N: 16                        # Doppler-dimension bins
@@ -44,7 +44,7 @@ channel:
   los_a: 4.88                  # suburban Al-Hourani param
   los_b: 0.43                  # suburban Al-Hourani param
   eta_los_dB: 0.1              # LoS excess loss (dB)
-  eta_nlos_dB: 21.0            # NLoS excess loss (dB) — suburban
+  eta_nlos_dB: 21.0            # NLoS excess loss (dB) 鈥?suburban
   use_swerling: false          # optional Swerling-II RCS fading on sensing (default OFF)
   kT: 4.0e-21                  # thermal noise density (W/Hz) at 290K
   ric_K: 6.0                   # Rician K-factor (dB) for reporting link
@@ -56,7 +56,6 @@ detection:
   B_q: 64                      # soft info bits per report
   P_D_min: 0.2                 # fairness floor (D4); 0.8 was unreachable -> Lagrangian blowup.
                                # re-tune from run_baselines.py 'steady_P_D' (reachable & binding)
-  T_report: 0.005              # max reporting latency (s)
 
 p0_solver:
   capacity_per_rx: 256         # bits per frame per receiving UAV
@@ -301,8 +300,8 @@ marl:
   capacity_matching_anneal_frames: 100000
   lr: 0.0003                   # Adam learning rate
   gamma: 0.99                  # discount factor
-  gae_lambda: 0.95             # GAE λ
-  ppo_clip: 0.2                # PPO clip ε
+  gae_lambda: 0.95             # GAE 位
+  ppo_clip: 0.2                # PPO clip 蔚
   ppo_epochs: 4                # 10 -> 4: fewer epochs/rollout -> less overfit -> no policy collapse
   rollout_steps: 2048          # tuned (stable MAPPO); single source of truth
   minibatch_size: 256          # SGD minibatch size
@@ -348,8 +347,8 @@ marl:
   causal_ccp_min_effect: 1.0e-5
   vf_coef: 0.5                 # value function loss coefficient
   max_grad_norm: 0.5           # gradient clipping max norm
-  lagrangian_lr: 0.002         # lowered: avoids monotonic λ climb -> non-stationary returns
-  lagrangian_max: 1.0          # cap so λ can't dominate the reward
+  lagrangian_lr: 0.002         # lowered: avoids monotonic 位 climb -> non-stationary returns
+  lagrangian_max: 1.0          # cap so 位 can't dominate the reward
   target_kl: 0.02              # 0.03 -> 0.02: tighter per-rollout policy drift bound
   num_episodes: 1000           # max episodes (hard cap; early-stop usually stops sooner)
   num_envs: 8                  # parallel envs (tuned; stable MAPPO)

@@ -1,7 +1,7 @@
-# Experiment config: large-area, 4-target scenario with learnable headroom.
+﻿# Experiment config: large-area, 4-target scenario with learnable headroom.
 #
 # Rationale: after the P0-assigns-roles fix, the anchored 400x400 / Q=2 scenario
-# became trivial — stationary/random already reach steady_P_D ~0.98 because the
+# became trivial 鈥?stationary/random already reach steady_P_D ~0.98 because the
 # ~120 m sensing radius (n_cpi=128) covers most of a 400 m box, so positioning is
 # irrelevant and a trained policy shows no gain over random (null result).
 #
@@ -67,7 +67,6 @@ detection:
   K_q_max: 3
   B_q: 64
   P_D_min: 0.2
-  T_report: 0.005
 
 p0_solver:
   capacity_per_rx: 256

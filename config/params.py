@@ -82,7 +82,6 @@ class DetectionParams:
     # Lagrangian multiplier and biased training. Set to a reachable-but-binding
     # value; re-tune from run_baselines.py 'steady_P_D' output.
     P_D_min: float = 0.2
-    T_report: float = 0.005
 
 
 @dataclass

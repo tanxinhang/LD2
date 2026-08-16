@@ -1,4 +1,4 @@
-# Medium benchmark: CV sigma=3.0, moderate belief mismatch (gap ~0.05)
+﻿# Medium benchmark: CV sigma=3.0, moderate belief mismatch (gap ~0.05)
 # Purpose: primary performance experiment
 channel:
   NF: 4.0
@@ -15,7 +15,6 @@ detection:
   K_q_max: 3
   P_D_min: 0.2
   P_FA: 0.001
-  T_report: 0.005
   g_min: 0.5
 marl:
   actor_decision_interval: 5

@@ -1,4 +1,4 @@
-# Full PPO: learned-message-free long-term PPO comparison (K=4, Q=4).
+﻿# Full PPO: learned-message-free long-term PPO comparison (K=4, Q=4).
 # Scenario: 800 m x 800 m, 4 UAVs, 4 targets.
 # Only differs from exp_800_q4_eh.yaml in freeze_attention.
 # Usage: python scripts/run_mappo.py --config config/exp_800_q4_full.yaml --warm-start results/dagger_variants/dagger_D1.pt --warm-start-mode direct --seed 42
@@ -56,7 +56,6 @@ detection:
   K_q_max: 3
   B_q: 64
   P_D_min: 0.2
-  T_report: 0.005
 
 p0_solver:
   capacity_per_rx: 256
@@ -77,7 +76,7 @@ marl:
   eta_mc: 0.5
   use_distance_shaping: false
   shape_w: 0.01
-  lambda_report: 1.0e-5       # lower: 4 UAVs → comm cost adds up faster
+  lambda_report: 1.0e-5       # lower: 4 UAVs 鈫?comm cost adds up faster
   alpha_pd: 0.5
   lambda_report_comm: 1.0e-5
   bc_beta_init: 0.05
@@ -87,7 +86,7 @@ marl:
   lagrangian_max: 1.0
   target_kl: 0.02
   num_episodes: 300
-  num_envs: 8                  # 8 parallel envs × 4 envs = 32 agents/batch
+  num_envs: 8                  # 8 parallel envs 脳 4 envs = 32 agents/batch
   learn_roles: false
   assignment_hold_frames: 5
   actor_decision_interval: 5

@@ -48,11 +48,6 @@ def compute_PD(D_q: np.ndarray, P_FA: float, eps: float = 1e-10) -> np.ndarray:
     return Q_function(q_inv - sqrt_D)
 
 
-def safe_sqrt(x: np.ndarray, eps: float = 1e-10) -> np.ndarray:
-    """Safe square root: sqrt(max(x, eps))."""
-    return np.sqrt(np.maximum(np.asarray(x, dtype=np.float64), eps))
-
-
 def utility_from_D(D_q: np.ndarray, P_FA: float) -> np.ndarray:
     """Monotone increasing utility function from Deflection.
 

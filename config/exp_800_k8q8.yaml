@@ -1,4 +1,4 @@
-# Experiment config: large-area, 8-UAV 8-target scenario for genuine MARL.
+﻿# Experiment config: large-area, 8-UAV 8-target scenario for genuine MARL.
 # K=8 Q=8: Greedy=0.80 ceiling, Random=0.43 floor, 0.37 learning gap.
 #"
 # irrelevant and a trained policy shows no gain over random (null result).
@@ -65,7 +65,6 @@ detection:
   K_q_max: 3
   B_q: 64
   P_D_min: 0.2
-  T_report: 0.005
 
 p0_solver:
   capacity_per_rx: 256

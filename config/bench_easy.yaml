@@ -1,5 +1,5 @@
-# Easy benchmark: CV sigma=0.5, near-saturated (gap <0.01)
-# Purpose: safety gate ¡ª verify no degradation
+ï»¿# Easy benchmark: CV sigma=0.5, near-saturated (gap <0.01)
+# Purpose: safety gate â€” verify no degradation
 channel:
   NF: 4.0
   eta_los_dB: 0.1
@@ -15,7 +15,6 @@ detection:
   K_q_max: 3
   P_D_min: 0.2
   P_FA: 0.001
-  T_report: 0.005
   g_min: 0.5
 marl:
   actor_decision_interval: 5

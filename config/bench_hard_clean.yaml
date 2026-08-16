@@ -13,7 +13,6 @@ detection:
   K_q_max: 3
   P_D_min: 0.2
   P_FA: 0.001
-  T_report: 0.005
   g_min: 0.5
 marl:
   active_probe_aoi_weight: 0.5

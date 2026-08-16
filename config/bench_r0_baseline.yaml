@@ -1,4 +1,4 @@
-# R0: CI fusion + B3 scoring, NO safety (current B4 equivalent)
+﻿# R0: CI fusion + B3 scoring, NO safety (current B4 equivalent)
 # Expected: worst-case performance (0.401/0.315 benchmark)
 # Purpose: baseline for measuring safety system improvement
 
@@ -18,7 +18,6 @@ detection:
   K_q_max: 3
   P_D_min: 0.2
   P_FA: 0.001
-  T_report: 0.005
   g_min: 0.5
 marl:
   actor_decision_interval: 5
@@ -71,7 +70,7 @@ marl:
   use_distance_shaping: false
   use_per_module_lr: true
   vf_coef: 0.5
-  # ── R0: CI fusion + B3, NO safety ──
+  # 鈹€鈹€ R0: CI fusion + B3, NO safety 鈹€鈹€
   neighbor_belief_fusion: true
   p0_beta_uncertainty: 0.0
   p0_eta_aoi: 0.0
