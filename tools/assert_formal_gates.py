@@ -82,6 +82,19 @@ FORMAL_RESULTS: List[FormalResult] = [
         quarantined=True,
         note="同 980_k6q6 test split 污染；不可作为正式证据",
     ),
+    FormalResult(
+        name="8/8 frozen deployment candidate D1.5 blind (100 seeds)",
+        csv="_d1_5_blind100/paired_eval.csv",
+        note=("100 全新 blind seed 认证：QoS 点估计 0.730 过门（advice 013），"
+              "docs/OPTIMIZATION_LOG.md D1.5"),
+    ),
+    FormalResult(
+        name="8/8 frozen deployment candidate D1.5 blind (100 seeds) -- LCB enforced",
+        csv="_d1_5_blind100/paired_eval.csv",
+        require_lcb=True,
+        note=("Wilson LCB 0.636 < 0.70：N=100 统计功效不足，须在论文中如实披露"
+              "（点估计 + 置信区间口径）"),
+    ),
 ]
 
 
