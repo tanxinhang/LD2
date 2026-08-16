@@ -3130,10 +3130,60 @@ class EnvironmentCore:
             np.asarray([0.80]), p_fa)[0])
         ceiling = np.sum(gain * budget[:, None], axis=0)
 
+        # D1.10-B (2026-08-16): the Phase-1 trigger previously used only
+        # ``ceiling = sum_k gain[k,q] * budget[k]`` -- each UAV's power treated
+        # as independently available to every target.  Under the real 1 W/UAV
+        # coupling (one UAV's watt serves all its owner targets), the max-min
+        # LP value t* can sit far below d_min while every ceiling is above it
+        # (blind100 seed 615: ceilings all >= 11.18, t* = 6.44, P_D stuck at
+        # 0.29).  In that regime Phase 1 never fires, the L3 pool picks stay
+        # and the geometry stalls at a power-coupling bottleneck.  Resolve the
+        # fixed-structure max-min LP once here and drive the deficit descent
+        # from the REAL achievable worst deflection instead of the optimistic
+        # ceiling.  This is exact: t* is the deflection the executed L1 power
+        # path will actually deliver at this geometry.
+        try:
+            res_trigger = solve_fixed_structure_maxmin_power_lp(gain, budget)
+            t_star = float(res_trigger.worst_deflection)
+        except ValueError:
+            res_trigger = None
+            t_star = float(np.inf)
+        phase1_deficit = (
+            np.any(ceiling < d_min - 1e-9)
+            or (bool(getattr(self.cfg.marl,
+                             'analytical_movement_tstar_trigger', True))
+                and t_star < d_min - 1e-9))
+
         grads: dict = {}
-        if np.any(ceiling < d_min - 1e-9):
+        if phase1_deficit:
             # Phase 1: deficit gradient (steepest descent of the violation).
-            deficit = np.maximum(0.0, d_min - ceiling)
+            # Deficit weights use the REAL max-min shortfall when the ceiling
+            # test passes but coupling still binds (t* < d_min); fall back to
+            # the ceiling deficit otherwise.
+            if (t_star < d_min - 1e-9
+                    and not np.any(ceiling < d_min - 1e-9)
+                    and bool(getattr(self.cfg.marl,
+                                     'analytical_movement_tstar_trigger',
+                                     True))):
+                # D1.10-B (rev 2): weight the deficit by the max-min DUAL
+                # price lambda* (concentrated on the bottleneck targets that
+                # actually bind the coupling) instead of a uniform
+                # ``d_min - t_star`` on every target.  A uniform deficit made
+                # every UAV pull toward ALL targets and diluted the gradient
+                # (20-seed indep A/B: QoS 14/20 vs 15/20, seed 615 0.710 ->
+                # 0.331).  lambda* is exactly the marginal that a 1 W/UAV
+                # power reallocation cannot fix by itself, so geometry must
+                # move to raise the ceiling of the bottleneck targets.
+                lam_trigger, _ = optimal_maxmin_dual_prices(gain, budget)
+                lam_abs = np.abs(np.asarray(lam_trigger, dtype=np.float64))
+                lam_sum = float(np.sum(lam_abs))
+                if lam_sum > 1e-12:
+                    deficit = (d_min - t_star) * (lam_abs / lam_sum)
+                else:
+                    deficit = np.full(self.Q, d_min - t_star)
+                deficit = np.maximum(0.0, deficit)
+            else:
+                deficit = np.maximum(0.0, d_min - ceiling)
             for k in range(self.K):
                 gk = np.zeros(2, dtype=np.float64)
                 for q in range(self.Q):
@@ -3158,7 +3208,9 @@ class EnvironmentCore:
             # Phase 2: max-min dual price gradient (cheap LP, no PWL).  The
             # max-min dual lambda* concentrates on the bottleneck target, which
             # is exactly the price that drags the steady (temporal-mean worst).
-            res = solve_fixed_structure_maxmin_power_lp(gain, budget)
+            # Reuse the D1.10-B trigger LP result when available (same inputs).
+            res = res_trigger if res_trigger is not None else (
+                solve_fixed_structure_maxmin_power_lp(gain, budget))
             if (not self._analytical_movement_candidates_enabled
                     and res.worst_deflection >= d_steady - 1e-9):
                 # Already at/above the steady floor: hover (preserve the good
@@ -3178,7 +3230,32 @@ class EnvironmentCore:
         # few whole-fleet movement candidates, evaluate each at the moved
         # geometry with the exact max-min LP, and execute the best.  ``stay`` is
         # always a candidate, so the proxy score is monotone (never degrades).
+        # D1.10-B (rev 3): when the t*-triggered coupling-scarce Phase 1 fired
+        # (t* < d_min while every ceiling >= d_min), bypass the candidate
+        # scorer and execute the lambda*-weighted deficit gradient directly.
+        # RATIONALE: the candidate scorer scores by the max-min LP at the moved
+        # geometry, but under power coupling moving a UAV toward the bottleneck
+        # target makes ANOTHER target the new bottleneck, so t* does not rise
+        # and the pool picks stay -- the scorer cannot see the structural
+        # reallocation value (blind100 seed 615).  The deficit gradient is the
+        # steepest descent of the feasibility violation itself, so it is the
+        # correct repair direction in exactly this regime; the candidate pool
+        # remains the gatekeeper everywhere else.
         if self._analytical_movement_candidates_enabled:
+            if (phase1_deficit
+                    and bool(getattr(self.cfg.marl,
+                                     'analytical_movement_phase1_force',
+                                     True))):
+                delta: dict = {}
+                for k in range(self.K):
+                    gk = grads.get(k)
+                    if gk is None:
+                        continue
+                    n = float(np.linalg.norm(gk))
+                    if n > 1e-12:
+                        delta[k] = -step * gk / n
+                if delta:
+                    return delta
             return self._select_best_movement_candidate(
                 coefficient, selected, budget, uav, tgt, grads, step)
 

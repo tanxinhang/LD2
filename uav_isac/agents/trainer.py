@@ -4901,44 +4901,19 @@ class MAPPTrainer:
                     for pg in agent.critic_optimizer.param_groups: pg['lr'] = lr * 5.0
         return metrics
 
-    def _evaluate(self, n_episodes: int = 5, steady_window: int = 20,
-                  dp_deterministic: bool = True, role_deterministic: bool = True,
-                  eval_seeds: Optional[List[int]] = None,
-                  target_choice_audit_stride: int = 0,
-                  sensing_choice_audit_stride: int = 0,
-                  sensing_residual_blend: float = 0.25,
-                  sensing_audit_horizon: int = 0,
-                  sensing_oracle_control: bool = False,
-                  joint_sensing_pair_audit_stride: int = 0,
-                  physical_oracle_stride: int = 0,
-                  evidence_trace_output: Optional[str] = None,
-                  structure_teacher_trace_output: Optional[str] = None,
-                  n5_counterfactual_output: Optional[str] = None,
-                  n5_counterfactual_max_events: int = 0,
-                  n5_counterfactual_target_mode: str = "both",
-                  n5_counterfactual_seed_filter: Optional[List[int]] = None,
-                  n5_counterfactual_max_candidates: int = 0,
-                  n5_counterfactual_require_proxy_positive: bool = False,
-                  ) -> Dict[str, float]:
-        """Evaluation on fixed replayable scenarios (no exploration noise).
+    def _build_eval_env(self, seed: int) -> "UAVISACEnv":
+        """Build an evaluation env for one seed (D1.10-A).
 
-        All fairness metrics (worst, weak3, tstd) are computed from the STEADY
-        WINDOW (last W frames) per episode, then averaged across episodes.
-        This prevents early-transient frames from contaminating convergence metrics.
-
-        Returns:
-          eval_steady_P_D:   mean over episodes of mean over last-W frames
-          eval_worst_P_D:    mean over episodes of MIN_q P_D in last-W frames
-          eval_weak3_P_D:    mean over episodes of bottom-3 avg in last-W frames
-          eval_target_std:   mean over episodes of std_q in last-W frames
-          eval_full_P_D:     mean over episodes of full-episode mean P_D
+        Constructs a fresh ``UAVISACEnv`` (constructor seed = the episode seed)
+        and applies the same dynamic-local-search / structure-student channel
+        configuration the shared-instance protocol applies once.  With
+        ``eval_independent_env=True`` the caller creates one env per episode,
+        so every stochastic stream (including deflection_computer's Rician/LoS
+        rng, which ``wrapper.reset`` does NOT replace) starts from the episode
+        seed -- each seed is an independent draw rather than the k-th draw of a
+        drifting shared stream.
         """
-        actor = self.agents[0].actor
-        aspace = self.agents[0].action_space
-        K, Q = self.K, self.Q
-        if eval_seeds is None:
-            eval_seeds = self.eval_seeds[:n_episodes]
-        eval_env = UAVISACEnv(config=self.cfg, seed=12345)
+        eval_env = UAVISACEnv(config=self.cfg, seed=int(seed))
         if self._dynamic_local_search_config is not None:
             from uav_isac.coordination.dynamic_local_search import (
                 DynamicLocalSearchCoordinator,
@@ -4980,6 +4955,54 @@ class MAPPTrainer:
                 allow_cardinality_mismatch=(
                     self._structure_student_allow_scale_migration),
             )
+        return eval_env
+
+    def _evaluate(self, n_episodes: int = 5, steady_window: int = 20,
+                  dp_deterministic: bool = True, role_deterministic: bool = True,
+                  eval_seeds: Optional[List[int]] = None,
+                  target_choice_audit_stride: int = 0,
+                  sensing_choice_audit_stride: int = 0,
+                  sensing_residual_blend: float = 0.25,
+                  sensing_audit_horizon: int = 0,
+                  sensing_oracle_control: bool = False,
+                  joint_sensing_pair_audit_stride: int = 0,
+                  physical_oracle_stride: int = 0,
+                  evidence_trace_output: Optional[str] = None,
+                  structure_teacher_trace_output: Optional[str] = None,
+                  n5_counterfactual_output: Optional[str] = None,
+                  n5_counterfactual_max_events: int = 0,
+                  n5_counterfactual_target_mode: str = "both",
+                  n5_counterfactual_seed_filter: Optional[List[int]] = None,
+                  n5_counterfactual_max_candidates: int = 0,
+                  n5_counterfactual_require_proxy_positive: bool = False,
+                  ) -> Dict[str, float]:
+        """Evaluation on fixed replayable scenarios (no exploration noise).
+
+        All fairness metrics (worst, weak3, tstd) are computed from the STEADY
+        WINDOW (last W frames) per episode, then averaged across episodes.
+        This prevents early-transient frames from contaminating convergence metrics.
+
+        Returns:
+          eval_steady_P_D:   mean over episodes of mean over last-W frames
+          eval_worst_P_D:    mean over episodes of MIN_q P_D in last-W frames
+          eval_weak3_P_D:    mean over episodes of bottom-3 avg in last-W frames
+          eval_target_std:   mean over episodes of std_q in last-W frames
+          eval_full_P_D:     mean over episodes of full-episode mean P_D
+        """
+        actor = self.agents[0].actor
+        aspace = self.agents[0].action_space
+        K, Q = self.K, self.Q
+        if eval_seeds is None:
+            eval_seeds = self.eval_seeds[:n_episodes]
+        independent = bool(getattr(
+            self.cfg.marl, 'eval_independent_env', False))
+        if independent:
+            # D1.10-A: one fresh env per episode seed -> every stochastic
+            # stream (incl. deflection_computer's persistent rng) is seeded
+            # by the episode, so results are sequence-independent.
+            eval_env = None
+        else:
+            eval_env = self._build_eval_env(seed=12345)
 
         ep_full_means = []        # full-episode mean P_D per episode
         ep_steady_means = []      # steady-window mean P_D per episode
@@ -5125,6 +5148,9 @@ class MAPPTrainer:
         W = steady_window
 
         for ep_seed in eval_seeds:
+            if independent:
+                # D1.10-A: fresh env per episode seed.
+                eval_env = self._build_eval_env(seed=int(ep_seed))
             obs, _ = eval_env.reset(seed=int(ep_seed))
             pd_hist = []   # list of mean P_D_q per frame
             pd_per_target = []  # list of (Q,) per frame

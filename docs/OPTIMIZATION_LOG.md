@@ -259,6 +259,34 @@ seed 认证。
 > （此前硬编码 D1.5 路径）。正式 Gate 表（`assert_formal_gates.py`）中
 > D1.9 点估计 + LCB 强化两行均 PASS。
 
+## D1.10：残余失败 seed 修正尝试（2026-08-16，审计驱动）
+
+**动机**：D1.9 盲测 95/100 的 5 个残余失败 seed 经审计（`D1_9_TAIL_AUDIT.md`）
+分类为 3 物理不可达 + 1 RNG 序列效应（298）+ 1 功率耦合（615）。D1.10 针对
+后两类实施修正。
+
+**D1.10-A：评估协议独立 env 实例（有效，`eval_independent_env`，默认 OFF）**
+- 机制：共享 env 协议下 `deflection_computer` 的 Rician/LoS rng（`__init__`
+  构造，`wrapper.reset` 不替换）跨 episode 漂移，第 k 个 seed 的随机实现
+  依赖其前跑了多少 episode。`_build_eval_env(seed=ep_seed)` 每 episode 新建
+  env，使每个 seed 独立采样。
+- 20-seed A/B：indep vs shared 均 14/20（无系统性方向），但独立协议是
+  **统计正确的采样**。**indep + lookahead40（无 tstar）在 20-seed 上
+  15/20（steady 0.886）**，优于共享序列值。默认 OFF 保持历史结果数值
+  不变；认证复跑应启用。
+
+**D1.10-B：L3 Phase-1 触发改 max-min t\*（负结果，默认 OFF）**
+- rev1 均匀 deficit 退化（15→14/20）；rev2 λ\* 加权 deficit 聚合持平但
+  具体 seed 退化（615: 0.71→0.29、298: 0.80→0.30）。任何 Phase-1 deficit
+  梯度都改变候选池输入，而 Phase-2 对偶价格梯度（lookahead40）实际物理
+  上更优。**默认 OFF**，耦合稀缺修复属 D1.10-C（per-UAV 结构重分配候选，
+  未实现）。
+
+**状态**：indep + lookahead40 全量 100-seed blind 复跑认证运行中
+（`results/_d1_10_blind100_indep/`，配置
+`exp_800_k8q8_..._blind_lookahead40_indep.yaml`），完成后出具独立采样
+协议下的 QoS/LCB 正式值。
+
 ## 测试基线
 
 全量测试 885 passed / 1 env failure（sklearn，requirements.txt 已声明）；本轮优化

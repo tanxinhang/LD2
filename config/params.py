@@ -322,6 +322,40 @@ class MARLParams:
     # d_safe, and stay remains a candidate so the score is monotone.  H = 0
     # reproduces the D1.1-B single-step scoring.
     analytical_movement_lookahead_frames: int = 0
+    # D1.10-B (2026-08-16, NEGATIVE RESULT -- default OFF): drive the L3
+    # Phase-1 deficit trigger from the REAL fixed-structure max-min LP value t*
+    # in addition to the optimistic per-UAV ceiling.  The motivation was the
+    # coupling-scarce regime (blind100 seed 615: ceilings all >= d_min while
+    # t* = 6.44 < d_min, P_D stuck at 0.29).  rev1 (uniform deficit) degraded
+    # 20-seed QoS 15->14; rev2 (lambda*-weighted deficit) still degraded
+    # specific seeds (615 0.71->0.29, 298 0.80->0.30, 886 0.50->0.39) despite
+    # the same aggregate QoS, because any Phase-1 deficit gradient changes the
+    # candidate-pool input and the Phase-2 dual-price gradient (lookahead40)
+    # is the better direction on the actual physics.  The coupling-scarce fix
+    # belongs in a per-UAV structural-reallocation candidate (D1.10-C), not a
+    # global trigger.  Kept for A/B reuse; OFF is the certified configuration.
+    analytical_movement_tstar_trigger: bool = False
+    # D1.10-B (rev 3, 2026-08-16): when the t*-triggered Phase 1 fires (max-min
+    # t* < d_min under power coupling), execute the lambda*-weighted deficit
+    # gradient DIRECTLY, bypassing the multi-candidate scorer.  The scorer
+    # judges moves by the max-min LP at the moved geometry, but under coupling
+    # moving a UAV toward the bottleneck makes another target the new
+    # bottleneck, so t* never rises and the pool picks stay -- the scorer
+    # cannot see structural-reallocation value.  The deficit gradient is the
+    # steepest descent of the violation itself.  The candidate pool stays the
+    # gatekeeper in every other regime.
+    #
+    # NEGATIVE RESULT (2026-08-16, recorded honestly, default OFF): on the
+    # blind100 residual seeds it fixes seed 615 (steady 0.29 -> 0.81, a true
+    # coupling-scarce case) but DEGRADES seed 298 (0.33 -> 0.22) and 185
+    # (0.75 -> 0.47) -- the deficit gradient pushes UAVs more spread (spread
+    # +10-60%) in every case, which helps only when the bottleneck is
+    # "isolated target lacking UAV supply" and hurts when the geometry is
+    # already near-optimal.  No simple observable (t*/ceiling ratio, window,
+    # spread) separates the two regimes, so forcing is not safe as a default.
+    # Kept OFF; the seed-615 success motivates a per-UAV structural-reallocation
+    # candidate (D1.10-C) designed for the coupling-scarce regime only.
+    analytical_movement_phase1_force: bool = False
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.
@@ -493,6 +527,15 @@ class MARLParams:
     checkpoint_cvar_fraction: float = 0.20
     checkpoint_confirmation_enabled: bool = False
     checkpoint_confirmation_split: str = "confirmation"
+    # D1.10-A (2026-08-16): build a FRESH env instance per evaluation episode
+    # instead of reusing one shared env across seeds.  The shared-instance
+    # protocol leaves deflection_computer's Rician/LoS rng stream (constructed
+    # in __init__, NOT replaced by wrapper.reset) drifting across episodes, so
+    # the k-th seed's stochastic draws depend on how many episodes ran before
+    # it (blind100 audit: seed 298 0.326 in-sequence vs 0.856 solo).  Default
+    # False keeps every historical result numerically identical; enable for
+    # fresh certification runs where each seed must be an independent draw.
+    eval_independent_env: bool = False
     # Training-only prioritized replay over the geometry seed bank. Evaluation
     # splits are excluded automatically to prevent selection/test leakage.
     training_seed_replay_enabled: bool = False
