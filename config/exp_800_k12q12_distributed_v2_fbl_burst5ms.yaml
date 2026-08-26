@@ -1,0 +1,12 @@
+# Gate D: finite-blocklength plus a Gilbert-Elliott blockage process.  The
+# stationary bad-state fraction is about 3.2%; bad runs last 3.3 frames on
+# average, which explicitly exercises AoI and stale-cache fail-closed behavior.
+extends: exp_800_k12q12_distributed_v2_fbl5ms.yaml
+
+marl:
+  comm_burst_loss_enabled: true
+  comm_burst_good_to_bad_probability: 0.01
+  comm_burst_bad_to_good_probability: 0.30
+  comm_burst_good_drop_probability: 0.001
+  comm_burst_bad_drop_probability: 0.95
+

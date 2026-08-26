@@ -21,10 +21,13 @@ class ScenarioParams:
 class UAVParams:
     v_max: float = 25.0
     d_safe: float = 20.0
-    P_sense: float = 0.0251   # 14 dBm — Device-free MARL ISAC (TVT 2024)
+    P_sense: float = 0.0251   # W nominal sensing waveform power
+    # G2-0.7: hardware/waveform cap anchored at 14 dBm.  The 1 W joint RF cap
+    # is an upper bound, not permission to silently amplify the sensing PA.
+    P_sense_max: float = 0.0251
     P_report: float = 0.25    # W — TVT 2024 comm power set {0.25..1 W}
     # Per-UAV RF budget for joint U2U-ISAC allocation.  When enabled:
-    # P_comm[k] + sum_q P_sense[k,q] = P_isac_total in every frame.
+    # P_comm[k] + sum_q P_sense[k,q] <= P_isac_total in every frame.
     P_isac_total: float = 1.0
     B_max: float = 50000.0
     P_fly_static: float = 80.0
@@ -53,7 +56,9 @@ class OTFSParams:
     T_sym: float = 6.4e-5    # 1/delta_f
     g_tx_dBi: float = 16.0   # 64-elem UAV phased array (lit: 8 dBi single / "large arrays")
     g_rx_dBi: float = 16.0   # rx array gain
-    n_cpi: int = 128         # coherent integration -> sensing radius ~120 m (matches 400x400)
+    # G2-0.6: one control action emits one explicit OTFS sensing frame. Values
+    # above one require a separately certified multi-look execution model.
+    n_cpi: int = 1
 
 
 @dataclass
@@ -74,6 +79,8 @@ class ChannelParams:
 @dataclass
 class DetectionParams:
     P_FA: float = 0.001
+    # G2-0.5: H0 Z~N(0,1), H1 Z~N(sqrt(D),1), so D=c_det*Es/En.
+    c_det: float = 1.0
     g_min: float = 0.5
     K_q_max: int = 3
     B_q: int = 64
@@ -113,7 +120,41 @@ class MARLParams:
     # Structured receiver-evidence packet. Calibration values are deliberately
     # unset by default; a u2u_distributed experiment must name an explicit
     # calibration profile rather than inherit hidden stress-set constants.
+    # A selected sensing waveform is a wireless broadcast: every currently
+    # reserved Rx endpoint may form a local statistic.  Only its later U2U
+    # evidence report consumes additional RF resources.
+    passive_multireceiver_evidence_enabled: bool = False
+    # Physically local tracking and cross-frame posterior feedback.  Feedback
+    # is piggybacked on delivered structured evidence broadcasts; no ACK or
+    # free neighbour-belief channel is introduced.
+    passive_multireceiver_belief_update_enabled: bool = False
+    u2u_belief_feedback_enabled: bool = False
+    u2u_belief_feedback_mean_bits: int = 12
+    u2u_belief_feedback_cov_bits: int = 8
+    u2u_belief_feedback_aoi_bits: int = 8
+    u2u_belief_feedback_max_age_frames: int = 5
+    # Posterior broadcast schedule.  evidence_topk (legacy) rides the belief on
+    # the evidence top-k selection; freshness decouples the belief schedule and
+    # ranks each source's own posteriors by the joint AoI / uncertainty /
+    # task-loss score, broadcasting its top-k entries (audit priority #3).
+    u2u_belief_feedback_schedule: str = "evidence_topk"
+    u2u_belief_feedback_topk: int = 2
+    # Global posterior payload budget (bits/frame) shared with the coordination
+    # and evidence broadcasts; the freshness schedule must fit the frame
+    # deadline (unified-MAC).  0 disables the cap.
+    u2u_belief_feedback_bit_budget: int = 800
+    # Per-source union cap (evidence entries + freshness top-ups).  Bounds the
+    # per-packet payload so a decoupled schedule cannot silently blow the
+    # per-class deadline by growing individual broadcasts.
+    u2u_belief_feedback_max_union_per_source: int = 2
+    u2u_belief_feedback_aoi_weight: float = 1.0 / 3.0
+    u2u_belief_feedback_uncertainty_weight: float = 1.0 / 3.0
+    u2u_belief_feedback_task_weight: float = 1.0 / 3.0
+    u2u_belief_feedback_owner_aware: bool = True
     evidence_packet_topk: int = 1
+    evidence_packet_ambiguity_top2_enabled: bool = False
+    evidence_packet_ambiguity_ratio: float = 0.5
+    evidence_packet_ambiguity_min_deflection: float = 0.0
     evidence_packet_owner_aware: bool = True
     evidence_packet_llr_bits: int = 8
     evidence_packet_confidence_bits: int = 2
@@ -155,6 +196,23 @@ class MARLParams:
     # reserve-first per-target floor derived from that detection probability.
     analytical_sensing_power_enabled: bool = False
     analytical_sensing_power_reserve_pd: float = 0.0
+    # Certificate-light distributed L1. Each UAV solves from its own delivered
+    # public-state cache and executes only its own power row. No primal/dual
+    # gap or ACK certificate is exchanged. Common views recover the
+    # deterministic LP optimum; partial views preserve the local RF budget.
+    distributed_replicated_power_enabled: bool = False
+    distributed_replicated_power_inertia: float = 0.0
+    # Under an incomplete local public graph, reserve this fraction for a
+    # uniform unknown-target floor and optimize the remainder over targets
+    # reachable in that cache. One preserves the legacy all-uniform fallback.
+    distributed_replicated_power_unknown_target_reserve: float = 1.0
+    # Robust public-gain reconstruction: add this many local posterior
+    # position standard deviations to each target-endpoint range.
+    distributed_target_position_uncertainty_sigma: float = 0.0
+    # When the public graph is incomplete, use the row-separable minimax
+    # transmitter-range prior p_kq proportional to R_kq^2 for the non-uniform
+    # share. It needs only self position and the common target map.
+    distributed_replicated_power_local_range_fallback_enabled: bool = False
     # D0.92: reference-normalized bargaining objective for the inner power
     # layer.  When enabled (requires analytical_sensing_power_enabled), the
     # fixed-owner power LP maximizes the common normalized headroom gain
@@ -171,6 +229,9 @@ class MARLParams:
     # evaluated.  Transport semantics (active set, token bits, receiver set,
     # deadline) are unchanged.
     analytical_comm_power_enabled: bool = False
+    # One-sided design fade subtracted from the nominal link budget.  The L0
+    # power inversion multiplies required receive SNR by 10^(margin/10).
+    analytical_comm_snr_margin_db: float = 0.0
     # D1.1-C (2026-08-16): optimal orthogonal-bandwidth allocation for the L0
     # minimum comm power.  The original L0 splits the U2U bandwidth equally
     # among active senders (b_eff = B/n_active).  When a sender's rate demand
@@ -243,6 +304,39 @@ class MARLParams:
     # structure<-power<-structure circular dependency.  The bottleneck target
     # priority uses the previous frame's max-min LP dual price lambda*.
     analytical_structure_ranking_enabled: bool = False
+    # Scale-safe P0 structure/power co-design for local fusion.  The legacy P0
+    # ranks a structure at fictitious unit power and imposes the actual
+    # per-UAV RF budget only in L1; at K=Q=6/8 this can select one transmitter
+    # for every target and strand 5/6 or 7/8 of the available fleet power.
+    # This option jointly optimizes binary roles/owners/edges and continuous
+    # edge power under the physical per-UAV budgets.  It is explicit and OFF
+    # by default so frozen baseline configurations retain their semantics.
+    p0_budget_coupled_structure_enabled: bool = False
+    p0_budget_coupled_time_limit_s: float = 5.0
+    # Stage 2 preserves the Stage-1 max-min optimum and improves capped
+    # priority-weighted target quality.  Disable it for the lower-latency
+    # primary-only variant; all physical constraints remain unchanged.
+    p0_budget_coupled_secondary_enabled: bool = True
+    # "milp" solves the joint mixed-integer model; "enumerated_role_ceiling"
+    # enumerates Tx/Rx partitions and certifies each feasible support with the
+    # exact fixed-structure power LP (fast primal lower-bound controller);
+    # "satisficing_legacy_then_enumerated" retains a legacy structure only if
+    # its current-budget LP already meets the worst-target task floor.
+    p0_budget_coupled_solver_mode: str = "milp"
+    # Optional robust task gate for the satisficing legacy portfolio.  Empty
+    # means reuse task_constrained_qos_floors.  Non-empty values are a
+    # development/calibration margin, not a universal physical constant.
+    p0_legacy_guard_qos_floors: List[float] = field(default_factory=list)
+    # Event-trigger decomposition: graph invalidity is always a hard trigger;
+    # this switch controls the additional soft current-worst-P_D trigger.
+    # Keeping it separate avoids conflating physical support loss with a
+    # myopic performance trigger that can cause harmful L2/L3 churn.
+    p0_maxmin_event_qos_enabled: bool = True
+    # If a cached edge leaves the physical graph between P0 updates, preserve
+    # all Tx/Rx roles and target owners and search only one-for-one replacement
+    # edges.  Each candidate is certified by the current-budget exact LP;
+    # impossible repairs fall back to the full event-triggered P0 solve.
+    p0_topology_min_change_repair_enabled: bool = False
     # D0.95: analytical capability-guided movement (L3 geometry layer).  When
     # enabled (requires analytical_sensing_power_enabled and
     # analytical_structure_ranking_enabled), the learned trajectory increment is
@@ -253,6 +347,126 @@ class MARLParams:
     # violation, then of gamma*).  This is the distributed L3 hook; structure
     # (L2) is re-optimised by P0 at the moved geometry each frame.
     analytical_movement_enabled: bool = False
+    distributed_id_movement_enabled: bool = False
+    distributed_id_movement_standoff_m: float = 0.0
+    distributed_greedy_matching_movement_enabled: bool = False
+    distributed_greedy_matching_hold_frames: int = 150
+    # Low-rate, ACK-free second-level movement beacon. At the configured
+    # period each node multiplexes one absolute local target-belief anchor into
+    # the already charged three-dimensional near-field header.
+    distributed_movement_anchor_broadcast_enabled: bool = False
+    distributed_movement_anchor_broadcast_period_frames: int = 5
+    distributed_movement_anchor_max_age_frames: int = 10
+    distributed_bottleneck_matching_movement_enabled: bool = False
+    distributed_bistatic_bottleneck_movement_enabled: bool = False
+    distributed_bistatic_complement_exponent: float = 1.0
+    # Optional distributed block-coordinate movement.  Range infeasibility is
+    # repaired in every frame; once an assigned UAV lies inside the engineering
+    # annulus, a common frame clock alternates between radial hold and a
+    # radius-preserving Tx/Rx angular-separation step.  This feature is
+    # deliberately default-off because the inner radius is an engineering
+    # constraint until an adversarial intercept model has calibrated it.
+    distributed_alternating_optimization_enabled: bool = False
+    distributed_ao_inner_radius_m: float = 0.0
+    distributed_ao_outer_radius_m: float = 225.0
+    distributed_ao_range_frames: int = 2
+    distributed_ao_strategy_frames: int = 3
+    distributed_ao_desired_bistatic_angle_deg: float = 90.0
+    # Safe Gauss--Southwell block-coordinate movement. On geometry frames each
+    # public view selects the single UAV-target radial step with the largest
+    # predicted reduction of the worst nearest-Tx/nearest-Rx range product;
+    # intervening frames hold geometry so L1/L2 can update. The selected action
+    # is still executed only after the public d_safe projection.
+    distributed_gain_scheduled_movement_enabled: bool = False
+    distributed_gain_scheduled_period_frames: int = 2
+    distributed_gain_scheduled_min_log_improvement: float = 0.0
+    # 0 means one distinct coordinate per UAV at most (a full greedy sweep).
+    distributed_gain_scheduled_max_selected_nodes: int = 0
+    # Positive values give reachability lexicographic priority: until every
+    # public-belief target has both a Tx and an Rx within this horizontal
+    # radius, execute the full assignment-based range block every frame.
+    distributed_gain_scheduled_far_range_gate_m: float = 0.0
+    # local_matching keeps each viewer's cache-derived bottleneck assignment;
+    # fixed_id is an ACK/certificate-free bijection for K=Q diagnostics.
+    distributed_gain_scheduled_far_assignment_mode: str = "local_matching"
+    # Optional episode-latched severe-tail gate.  A positive value activates
+    # role-aware movement only when the public nearest-Tx/nearest-Rx squared
+    # range-product has max/median at least this threshold; otherwise the
+    # ordinary distance-bottleneck assignment is retained.
+    distributed_bistatic_tail_gate_ratio: float = 0.0
+    # Role-capacitated dual-role geometric responsibility (audit priority #2).
+    # Each target owns exactly one Tx and one Rx responsibility; within each
+    # public role the assignment minimizes the worst-case squared range subject
+    # to a per-node capacity of ceil(Q/|K_r|).  No viewer matching row is
+    # stitched into a fleet action.  Range phase moves toward the planar
+    # midpoint of the responsibility set; strategy phase holds geometry while
+    # P0 refreshes hyperedges/power.  Reassignment requires a relative
+    # bottleneck improvement after a hold period (hysteresis).
+    distributed_role_capacity_movement_enabled: bool = False
+    distributed_role_capacity_standoff_m: float = 0.0
+    distributed_role_capacity_reassign_threshold: float = 0.05
+    distributed_role_capacity_hold_frames: int = 20
+    distributed_role_capacity_range_frames: int = 12
+    distributed_role_capacity_strategy_frames: int = 3
+    # Gap-coverage movement (three-phase policy, Phase A/B): coverage
+    # invariant C1 requires every target to have a Tx and an Rx endpoint
+    # within ``critical_radius_m`` (the P_D >= 0.6 operational radius).
+    # Uncovered targets receive deterministic Tx/Rx responsibilities every
+    # frame (safety net against missed targets); each node pursues the
+    # responsibility with the largest remaining gap at full speed.
+    distributed_gap_coverage_movement_enabled: bool = False
+    distributed_gap_critical_radius_m: float = 320.0
+    distributed_gap_capacity: int = 2
+    distributed_gap_standoff_m: float = 0.0
+    # Saturation-protection pursuit radius.  When > 0, a node whose every
+    # responsibility target is within this radius holds (prevents pulling
+    # endpoints off saturated targets); 0 disables the hold (always pursue to
+    # the standoff clamp).  The 25-seed ablation showed the hold regresses
+    # more seeds than it protects (18/25 vs 21/25 without), so the default is
+    # 0 (disabled); the parameter is kept for the ablation.
+    distributed_gap_pursuit_radius_m: float = 0.0
+    # Phase B: order the responsibility assignment by local target deficit
+    # (1 - local P_D) so weaker targets receive their Tx/Rx endpoints first
+    # and saturated targets release endpoints when capacity is exhausted.
+    distributed_gap_deficit_priority: bool = True
+    # Phase C: at the standoff boundary, apply a radius-preserving
+    # tangential step (safety invariant S1 preserved exactly) to improve the
+    # near-field bistatic geometry / DD-gate margin.  Default off until the
+    # Phase A/B validation is complete.
+    distributed_gap_tangential_phase: bool = False
+    distributed_gap_tangential_step_rad: float = 0.02
+    # Phase B near-field focus (weighted-product form): a target whose
+    # equivalent radius R_eq = (min_tx^2 * min_rx^2)^0.25 exceeds
+    # ``complete_radius`` while its near endpoint is within
+    # ``nearfield_radius`` is critical; the responsible product is multiplied
+    # by ``focus_weight`` in the pursuit order -- a soft bias, not a hard
+    # lock (hard-lock ablation regressed saturated seeds; soft bias preserves
+    # other responsibilities).  Fastest 1/R^4 product descent, dP_D/dR ~ -4/R^5.
+    distributed_gap_nearfield_focus: bool = True
+    distributed_gap_nearfield_radius_m: float = 300.0
+    distributed_gap_complete_radius_m: float = 350.0
+    distributed_gap_focus_weight: float = 4.0
+    # Dynamic-target coordination must be computed from each viewer's own
+    # tracker state.  When enabled, no target ground truth is used to create
+    # hyperedge offers, reconstruct pair coefficients, or plan movement.
+    distributed_coordination_use_local_belief_targets: bool = False
+    distributed_movement_safety_projection_enabled: bool = False
+    distributed_movement_safety_margin_m: float = 0.0
+    # Additional two-endpoint motion uncertainty per public-cache age frame.
+    distributed_movement_safety_margin_per_age_m: float = 0.0
+    # ACK-free self-stabilizing movement. Every viewer stores only the full
+    # assignment reconstructed from its own delivered public-state cache.
+    distributed_movement_local_assignment_cache_enabled: bool = False
+    distributed_movement_public_max_age_frames: int = 5
+    distributed_movement_stale_fail_closed: bool = False
+    # Execute exactly the public action checked by the robust projection,
+    # including its non-intervention branch.
+    distributed_movement_execute_projected_public_action: bool = False
+    distributed_movement_outside_invariant_recovery_enabled: bool = False
+    distributed_movement_outside_invariant_recovery_gain: float = 1.0
+    # Endpoint-split CBF constraints remain valid when independently computed
+    # per-UAV action rows are assembled after packet loss.
+    distributed_movement_independently_composable_safety: bool = False
     # D1.1-B (advice 010): bounded multi-candidate trust-region L3.  Instead of
     # one normalized gradient step per frame, generate ~6 whole-fleet movement
     # candidates (stay, dual-price step, half step, capability-price step, and
@@ -356,6 +570,8 @@ class MARLParams:
     # Kept OFF; the seed-615 success motivates a per-UAV structural-reallocation
     # candidate (D1.10-C) designed for the coupling-scarce regime only.
     analytical_movement_phase1_force: bool = False
+    # D1.10-C (advice 014 §4/§5, 2026-08-17): coupling-aware structure repair.
+    # When the fixed-structure max-min LP value t_fix is below the worst QoS
     # Stage-wise, auditable coordination shaping. Stage 0 is diagnostic-only;
     # 1 adds worst progress; 2 adds avoidable duplicate penalty; 3 adds weak3
     # progress; 4 adds steady progress. Historical configs remain unchanged.
@@ -428,6 +644,18 @@ class MARLParams:
     # role argmax -> 95% frames single role -> zero tx-rx pairing -> P_D collapse).
     # learn_roles=True restores the original learned-role behavior (for comparison).
     learn_roles: bool = False
+    # B5 / advice 014 (2026-08-17): movement-action parameterization.
+    #   radial_clip (default, backward compatible): Gaussian -> tanh box -> scale ->
+    #     radial projection onto the disk. The projection is a many-to-one map, so
+    #     log pi(executed action) is NOT the true density of the executed action
+    #     (~21% of the box lies outside the inscribed circle and triggers it) ->
+    #     the PPO importance ratio is not mathematically exact.
+    #   smooth_disk: bijection R^2 -> open disk  dp = d_max * z / sqrt(1+|z|^2),
+    #     Jacobian |det d(dp)/dz| = d_max^2/(1+|z|^2)^2, so the exact log-prob
+    #     correction is +2*log(1+|z|^2) - 2*log(d_max). PPO ratio becomes exact.
+    #     New training runs should use this; existing checkpoints/results were
+    #     produced under radial_clip and keep their numbers.
+    dp_parameterization: str = "radial_clip"
     # Time-slotted multistatic endpoint scheduling.  When enabled together with
     # learn_roles=False, a UAV may transmit a sensing waveform in one sub-slot
     # and receive a peer echo in another sub-slot of the same simulator frame.
@@ -491,7 +719,25 @@ class MARLParams:
     hyperedge_deficit_gain: float = 2.0
     hyperedge_proxy_floor: float = 0.25
     hyperedge_pair_score_mode: str = "endpoint_proxy"
+    # replicated_global requires matching whole-graph snapshots;
+    # reserved_endpoint uses stable ID roles/owners and two-endpoint consent.
+    hyperedge_coordination_mode: str = "replicated_global"
     hyperedge_state_stream_enabled: bool = False
+    hyperedge_protocol_only_enabled: bool = False
+    hyperedge_state_bits_per_dim: int = 0
+    # Optional common near-field position refinement. The beacon appends the
+    # nearest static target ID and a bounded (dx,dy) residual; this is physical
+    # state, not an optimizer certificate. Absolute state remains the fallback.
+    hyperedge_nearfield_residual_enabled: bool = False
+    hyperedge_nearfield_residual_range_m: float = 32.0
+    hyperedge_nearfield_residual_companding_mu: float = 0.0
+    # Optional store-and-forward dissemination of one cached peer physical
+    # state per beacon. The relay record is source ID + the same state fields;
+    # it contains no optimizer solution, dual price, gap, or ACK certificate.
+    hyperedge_state_relay_enabled: bool = False
+    hyperedge_tx_coalition_max: int = 2
+    hyperedge_robust_quantization_enabled: bool = False
+    hyperedge_reserved_tx_nodes: Tuple[int, ...] = ()
     hyperedge_consensus_rounds: int = 2
     hyperedge_assignment_hold_frames: int = 1
     hyperedge_min_target_coverage: float = 1.0
@@ -585,6 +831,27 @@ class MARLParams:
     comm_processing_delay_s: float = 2.0e-4
     comm_snr_threshold_db: float = 0.0
     comm_antenna_gain_dbi: float = 0.0
+    # Optional Polyanskiy-style second-order normal approximation for a
+    # complex AWGN block.  Disabled by default to preserve historical Shannon
+    # traces.  When enabled, packet serialization must meet both deadline and
+    # target BLER; this remains an analytical approximation, not a code-level
+    # reliability guarantee.
+    comm_finite_blocklength_enabled: bool = False
+    comm_finite_blocklength_target_bler: float = 1.0e-5
+    comm_finite_blocklength_max_channel_uses: int = 100_000_000
+    comm_finite_blocklength_sample_errors: bool = True
+    # Code blocklength is selected at nominal SNR minus this design fade.
+    comm_finite_blocklength_coding_snr_margin_db: float = 0.0
+    # Actual (not threshold-only) correlated U2U SNR shadowing.
+    comm_snr_shadowing_std_db: float = 0.0
+    comm_snr_shadowing_correlation: float = 0.0
+    # Gilbert-Elliott directed-link erasures.  The Markov channel evolves once
+    # per simulator frame and applies to the complete physical broadcast.
+    comm_burst_loss_enabled: bool = False
+    comm_burst_good_to_bad_probability: float = 0.0
+    comm_burst_bad_to_good_probability: float = 1.0
+    comm_burst_good_drop_probability: float = 0.0
+    comm_burst_bad_drop_probability: float = 1.0
     # Optional episode-level channel-domain randomization.  The two lists
     # define paired (SNR threshold, deadline) profiles and must have equal
     # length.  Sampling happens only at reset and is reproducible from the
@@ -891,6 +1158,10 @@ class MARLParams:
     # Bottleneck-risk mode uses the current bottom target tail to route
     # per-target GAE, while retaining a scalar-advantage mixture for stability.
     risk_tail_fraction: float = 0.50
+    # Legacy CVaR constraint used by the trainer. These fields previously
+    # existed only in YAML and were silently discarded by the dataclass loader.
+    cvar_tau: float = 0.0
+    cvar_epsilon: float = 0.05
     risk_target_temperature: float = 0.10
     risk_target_floor: float = 0.60
     risk_scalar_mix: float = 0.25
@@ -979,22 +1250,27 @@ class MasterConfig:
         return small
 
 
-def _dict_to_dataclass(cls, d: dict):
-    """Recursively convert dict to dataclass instance."""
+def _dict_to_dataclass(cls, d: dict, path: str = "config"):
+    """Recursively convert a mapping and reject unknown configuration keys.
+
+    Silent key dropping is unsafe for experiments: a misspelled switch can
+    otherwise produce a valid-looking run under a different controller.
+    """
     import dataclasses
     field_types = {f.name: f.type for f in dataclasses.fields(cls)}
     kwargs = {}
     for key, value in d.items():
-        if key in field_types:
-            ft = field_types[key]
-            if dataclasses.is_dataclass(ft) and isinstance(value, dict):
-                kwargs[key] = _dict_to_dataclass(ft, value)
-            elif hasattr(ft, '__origin__') and ft.__origin__ in (list, List):
-                kwargs[key] = value
-            elif hasattr(ft, '__origin__') and ft.__origin__ in (tuple, Tuple):
-                kwargs[key] = tuple(value)
-            else:
-                kwargs[key] = value
+        if key not in field_types:
+            raise ValueError(f"unknown configuration key: {path}.{key}")
+        ft = field_types[key]
+        if dataclasses.is_dataclass(ft) and isinstance(value, dict):
+            kwargs[key] = _dict_to_dataclass(ft, value, f"{path}.{key}")
+        elif hasattr(ft, '__origin__') and ft.__origin__ in (list, List):
+            kwargs[key] = value
+        elif hasattr(ft, '__origin__') and ft.__origin__ in (tuple, Tuple):
+            kwargs[key] = tuple(value)
+        else:
+            kwargs[key] = value
     return cls(**kwargs)
 
 

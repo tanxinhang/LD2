@@ -1,4 +1,4 @@
-﻿"""Bounded digest rendezvous for set-valued structure consensus.
+"""Bounded digest rendezvous for set-valued structure consensus.
 
 The digest is only a screening key.  It never authorizes a transition: the
 winning owner sends the bounded atomic proposal descriptor and the coordinator

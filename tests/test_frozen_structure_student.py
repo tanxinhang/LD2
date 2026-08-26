@@ -226,11 +226,13 @@ def test_structure_student_endpoint_stream_uses_physical_u2u_packet(
     assert env.core._external_structure_edge_values is not None
     assert np.allclose(
         env.core._current_comm_power_w, 0.25 * config.uav.P_isac_total)
-    assert np.max(np.abs(
+    combined = (
         env.core._current_comm_power_w
-        + env.core._current_sensing_power_w.sum(axis=1)
-        - config.uav.P_isac_total
-    )) < 1.0e-12
+        + env.core._current_sensing_power_w.sum(axis=1))
+    assert np.all(combined <= config.uav.P_isac_total + 1.0e-12)
+    assert np.all(
+        env.core._current_sensing_power_w.sum(axis=1)
+        <= config.uav.P_sense_max + 1.0e-12)
 
 
 def test_structure_student_adaptive_precision_selects_highest_feasible_rate(

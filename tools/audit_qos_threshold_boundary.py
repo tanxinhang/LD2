@@ -118,6 +118,7 @@ def audit(
         raise ValueError("trace dimensions do not match the supplied config")
 
     rows: list[dict[str, object]] = []
+    skipped: list[tuple[int, int, str]] = []
     selection = str(frame_selection).strip().lower()
     if selection not in {"worst_recorded_resolved", "final_resolved"}:
         raise ValueError(
@@ -146,18 +147,25 @@ def audit(
         fixed = solve_fixed_structure_maxmin_power_lp(
             fixed_gain, sensing_budget)
         fixed_pd = compute_detection_probabilities(fixed.deflection, p_fa)
-        boundary = solve_maxmin_qos_boundary_bisection(
-            coefficient,
-            sensing_budget,
-            p_fa=p_fa,
-            target_pair_limit=pair_limit,
-            reports_per_receiver=reports_per_receiver,
-            initial_feasible_pd=max(
-                p_fa, float(np.min(fixed_pd)) - 1.0e-8),
-            probability_tolerance=float(probability_tolerance),
-            max_iterations=int(max_iterations),
-            time_limit_s=float(time_limit_s),
-        )
+        try:
+            boundary = solve_maxmin_qos_boundary_bisection(
+                coefficient,
+                sensing_budget,
+                p_fa=p_fa,
+                target_pair_limit=pair_limit,
+                reports_per_receiver=reports_per_receiver,
+                initial_feasible_pd=max(
+                    p_fa, float(np.min(fixed_pd)) - 1.0e-8),
+                probability_tolerance=float(probability_tolerance),
+                max_iterations=int(max_iterations),
+                time_limit_s=float(time_limit_s),
+            )
+        except RuntimeError as exc:
+            # Degenerate frame (e.g. a target with no coverage at the recorded
+            # geometry): the exact MILP cannot certify even the initial floor.
+            # Record and skip rather than aborting the whole audit.
+            skipped.append((int(seed), int(frames[row]), str(exc)))
+            continue
         witness = boundary.best_feasible
         rows.append({
             "seed": int(seed),
@@ -208,6 +216,8 @@ def audit(
         "config": str(config_path),
         "seed_count": int(len(rows)),
         "seed_order": [int(seed) for seed in seed_order],
+        "skipped_seed_count": len(skipped),
+        "skipped_seeds": skipped,
         "num_uavs": K,
         "num_targets": Q,
         "p_fa": p_fa,

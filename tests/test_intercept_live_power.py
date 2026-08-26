@@ -4,8 +4,8 @@ power path, 2026-08-16).
 When intercept_constrained_power_enabled is on, the executed sensing power
 must satisfy the per-target counter-detection hard bound P_{D,w}^I <= eps
 (opponent = target observer with capability theta_w), the 1 W per-UAV
-budget must hold, and an infeasible strong-opponent configuration must fall
-back without crashing while recording the violation.
+budget must hold. Solver failures fail closed rather than executing an
+unconstrained sensing allocation.
 """
 
 import numpy as np
@@ -68,6 +68,16 @@ def test_intercept_off_has_no_constraint():
     _step(env)
     # With the constraint off there is no intercept bookkeeping.
     assert env.core._last_intercept_mu is None
+    env.close()
+
+
+def test_intercept_solver_failure_refuses_unconstrained_fallback(monkeypatch):
+    env = _env(intercept_on=True)
+    monkeypatch.setattr(env.core, "_solve_intercept_power", lambda *_: None)
+    actions = {str(k): {"delta_p": np.zeros(2), "role": 0}
+               for k in range(env.core.K)}
+    with pytest.raises(RuntimeError, match="refusing unconstrained fallback"):
+        env.step(actions)
     env.close()
 
 

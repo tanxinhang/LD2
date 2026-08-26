@@ -1,0 +1,22 @@
+# K=Q=12 same-recipe recalibration variant for the scale curve (audit #7).
+# The frozen K12 profile (threshold 3.3501, clip 46.9266) was hand-tuned on
+# the audit trace; this variant replaces the four detector constants with the
+# deployed-statistic recipe from tools/calibrate_dynamic_evidence.py so the
+# K12 point of the scale curve shares the exact calibration rule used at
+# K6/K8 (PFA 0.001 at every scale).  The frozen hybrid candidate and its
+# confirmation numbers are unchanged.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_freshness_pilot.yaml
+
+marl:
+  evidence_packet_calibration_profile: k12-passiverx-rawllr-recal-seed1019466100-engineering
+  evidence_packet_clip_max: 46.3658691062264
+  evidence_packet_standardized_threshold: 5.216988848532336
+  evidence_packet_confidence_log_boundaries:
+    - 0.5072801398818568
+    - 2.1483379283367716
+    - 3.4975903161964745
+  evidence_packet_confidence_representatives:
+    - 0.1548524711921262
+    - 2.173105137641447
+    - 15.883958950146207
+    - 88.20443690068409

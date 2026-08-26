@@ -1,0 +1,15 @@
+# Experimental distributed alternating-geometry pilot.  The 75 m inner radius
+# is an explicit engineering guard, not a calibrated intercept-probability
+# guarantee.  Outside [75,225] m every frame repairs range; inside the annulus
+# a common 2/3-frame clock alternates radial hold and radius-preserving
+# opposite-role angular separation.  The existing public-view CBF projection
+# remains the only executed movement action.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  distributed_alternating_optimization_enabled: true
+  distributed_ao_inner_radius_m: 75.0
+  distributed_ao_outer_radius_m: 225.0
+  distributed_ao_range_frames: 2
+  distributed_ao_strategy_frames: 3
+  distributed_ao_desired_bistatic_angle_deg: 90.0

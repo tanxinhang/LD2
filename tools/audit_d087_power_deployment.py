@@ -120,7 +120,10 @@ def _wilson_lcb(successes: int, n: int, alpha: float = 0.05) -> float:
     if n == 0:
         return 0.0
     p_hat = successes / n
-    z = NormalDist().inv_cdf(1.0 - alpha)
+    # Audit 2026-08-25: align with the project's documented 95% two-sided
+    # Wilson lower endpoint (z = 1.96); the previous one-sided
+    # inv_cdf(1-alpha) = 1.645 could flip a 0.70 gate vs the formal tools.
+    z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
     denom = 1.0 + z * z / n
     center = p_hat + z * z / (2.0 * n)
     radius = z * np.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n))

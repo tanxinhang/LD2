@@ -1,0 +1,33 @@
+# Dynamic-target U2U evidence and posterior-feedback pilot.  Local detection
+# evidence and conservative quantized CV posteriors share the same physically
+# charged U2U packet; there is no ground link, ACK, or free neighbour fusion.
+# The detector calibration is bound to an independent K=12 passive-Rx trace
+# and remains an engineering calibration because it contains one episode/seed.
+extends: exp_800_k12q12_distributed_v2_dynamic_localonly_pilot.yaml
+
+marl:
+  detection_fusion_mode: u2u_distributed
+  u2u_belief_feedback_enabled: true
+  u2u_belief_feedback_mean_bits: 12
+  u2u_belief_feedback_cov_bits: 8
+  u2u_belief_feedback_aoi_bits: 8
+  u2u_belief_feedback_max_age_frames: 3
+  evidence_packet_topk: 1
+  evidence_packet_owner_aware: true
+  evidence_packet_llr_bits: 8
+  evidence_packet_confidence_bits: 2
+  evidence_packet_clip_max: 46.926640798928354
+  evidence_packet_standardized_threshold: 3.350053106162944
+  evidence_packet_confidence_log_boundaries:
+    - 0.33449875837161547
+    - 1.826398998113782
+    - 3.2577991180749635
+  evidence_packet_confidence_representatives:
+    - 0.04502506824536463
+    - 1.2584506066104937
+    - 12.317491520659877
+    - 53.09712990523423
+  evidence_packet_mc_draws: 2048
+  evidence_packet_mc_seed: 20260725
+  evidence_packet_content_mode: normal
+  evidence_packet_calibration_profile: k12-passiverx-rawllr-h0-seed1019466100-500k-engineering

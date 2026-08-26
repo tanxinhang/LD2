@@ -76,6 +76,19 @@ def test_constrained_maxmin_lp_enforces_covertness_bound():
     assert np.all(mu >= -1e-12)
 
 
+def test_binding_covertness_constraint_can_require_power_underuse():
+    """The RF budget is a cap; a hard exposure bound may preclude equality."""
+    gain = np.ones((1, 1), dtype=np.float64)
+    budget = np.ones(1, dtype=np.float64)
+    coefficient = np.ones((1, 1), dtype=np.float64)
+    out = constrained_maxmin_lp(
+        gain, budget, coefficient, np.asarray([0.2]))
+    assert out is not None
+    _t, power, _lam, _beta, _mu = out
+    assert power[0, 0] == pytest.approx(0.2, abs=1e-9)
+    assert float(np.sum(power[0])) < float(budget[0])
+
+
 def test_constrained_maxmin_lp_reduces_to_pure_maxmin_when_bounds_do_not_bind():
     rng = np.random.default_rng(11)
     K, Q = 3, 3

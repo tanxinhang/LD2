@@ -1,0 +1,25 @@
+# Decoupled belief-feedback freshness scheduling (audit priority #3).
+#
+# The legacy schedule rides every quantized posterior on the evidence top-1
+# selection, whose objective is detection-evidence quality, not information
+# freshness.  This variant decouples the posterior broadcast: each source ranks
+# its own local posteriors by the joint AoI / position-uncertainty / task-loss
+# score and broadcasts its top-2 entries (owner-aware), while the evidence
+# selection stays quality-based.  The packet carries the union of evidence and
+# belief entries; only belief entries pay the 88-bit posterior payload.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  u2u_belief_feedback_schedule: freshness
+  u2u_belief_feedback_topk: 2
+  # Hybrid free-ride + top-up schedule: evidence-selected entries carry the
+  # posterior at zero extra cost; ~400 posterior bits/frame (4-5 top-ups)
+  # add fresh beliefs for the highest-need targets.  The per-source union cap
+  # (evidence + top-ups <= 2) bounds every packet so the evidence broadcast
+  # stays inside the 4 ms per-class deadline at baseline delivery.
+  u2u_belief_feedback_bit_budget: 400
+  u2u_belief_feedback_max_union_per_source: 2
+  u2u_belief_feedback_aoi_weight: 0.3333333333333333
+  u2u_belief_feedback_uncertainty_weight: 0.3333333333333333
+  u2u_belief_feedback_task_weight: 0.3333333333333333
+  u2u_belief_feedback_owner_aware: true

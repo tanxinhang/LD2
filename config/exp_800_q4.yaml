@@ -1,11 +1,10 @@
 ﻿# Experiment config: large-area, 4-target scenario with learnable headroom.
 #
-# Rationale: after the P0-assigns-roles fix, the anchored 400x400 / Q=2 scenario
-# became trivial 鈥?stationary/random already reach steady_P_D ~0.98 because the
-# ~120 m sensing radius (n_cpi=128) covers most of a 400 m box, so positioning is
-# irrelevant and a trained policy shows no gain over random (null result).
+# Historical pre-G2 rationale: after the P0 role fix, the 400x400 / Q=2 case
+# appeared saturated.  Post-G2 uses one explicit OTFS look per action, so the
+# old stationary/random values are not current performance claims.
 #
-# Enlarging to 800x800 with Q=4 restores headroom (measured on eval_seeds):
+# The original 800x800/Q=4 headroom measurements were pre-G2:
 #   stationary ~0.20, random ~0.18, greedy(true-pos) ~0.73  -> ~0.55 gap to climb.
 # Now UAVs MUST fly within ~120 m of targets AND the 4 UAVs must be allocated
 # across 4 targets (only ~2 bistatic pairs/frame under the single-role rule),
@@ -48,7 +47,7 @@ otfs:
   T_sym: 6.4e-5
   g_tx_dBi: 16.0
   g_rx_dBi: 16.0
-  n_cpi: 128                   # sensing radius ~120 m (kept; this is what makes 800 m non-trivial)
+  n_cpi: 1                     # post-G2 single executed OTFS-frame baseline
 
 channel:
   NF: 4.0
@@ -89,7 +88,6 @@ marl:
   shape_w: 0.01
   lambda_report: 1.0e-3           # 100x increase: make comm cost matter
   alpha_pd: 0.5                   # 0.5=hybrid (50% direct P_D + 50% utility)
-  lambda_report_comm: 1.0e-3      # explicit comm cost coefficient
   bc_beta_init: 0.05              # weak MSE BC anchor: prevents catastrophic divergence only
   vf_coef: 0.5
   max_grad_norm: 0.5

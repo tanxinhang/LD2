@@ -13,6 +13,8 @@ from uav_isac.physical.evidence import (
     DeflectionConfidenceQuantizer,
     EvidencePacketLayout,
     estimate_quantized_evidence_detection,
+    quantize_belief_feedback,
+    receiver_deflection_from_broadcast_waveforms,
     receiver_deflection_from_selected,
     route_structured_evidence,
     select_detection_deflection,
@@ -35,8 +37,8 @@ def _zero_actions(K):
     }
 
 
-def _link_model(message_dim=1):
-    return InterUAVCommunicationModel(
+def _link_model(message_dim=1, **overrides):
+    params = dict(
         rate_bits_per_dim=[0, 8],
         header_bits=64,
         bandwidth_hz=1.0e5,
@@ -51,6 +53,8 @@ def _link_model(message_dim=1):
         dt=0.1,
         message_dim=message_dim,
     )
+    params.update(overrides)
+    return InterUAVCommunicationModel(**params)
 
 
 def test_pure_local_and_central_fusion_are_distinct():
@@ -71,6 +75,25 @@ def test_pure_local_and_central_fusion_are_distinct():
         select_detection_deflection("central_oracle", receiver_d),
         [4.0, 2.0],
     )
+
+
+def test_selected_waveform_is_observed_by_all_reserved_receivers():
+    entries = [
+        _entry(0, 1, 0, 4.0),
+        _entry(0, 3, 0, 2.0),
+        _entry(2, 1, 1, 3.0),
+        _entry(2, 3, 1, 1.0),
+        _entry(1, 3, 0, 99.0),  # transmitter-target waveform not selected
+    ]
+    selected = [(0, 1, 0), (2, 3, 1)]
+    receiver_d = receiver_deflection_from_broadcast_waveforms(
+        selected, entries, num_agents=4, num_targets=2)
+    np.testing.assert_allclose(receiver_d, [
+        [0.0, 0.0],
+        [4.0, 3.0],
+        [0.0, 0.0],
+        [2.0, 1.0],
+    ])
 
 
 def test_distributed_mode_cannot_fall_back_to_oracle():
@@ -155,6 +178,7 @@ def test_online_quantized_frame_matches_offline_gate_core():
         llr_bits=8,
         layout=layout,
         link_model=_link_model(),
+        fusion_owner=np.asarray([0, 1]),
         owner_aware=True,
     )
     quantizer = DeflectionConfidenceQuantizer(
@@ -175,6 +199,7 @@ def test_online_quantized_frame_matches_offline_gate_core():
     )
     offline = simulate_quantized_detection(
         receiver_d[None],
+        fusion_owner=transport.owner[None],
         topk=1,
         bits=8,
         clip_max=20.0,
@@ -192,6 +217,103 @@ def test_online_quantized_frame_matches_offline_gate_core():
         online["pd"], offline["pd"][0])
     np.testing.assert_array_equal(
         online["pfa"], offline["pfa_by_frame_target"][0])
+
+    online_standardized = estimate_quantized_evidence_detection(
+        receiver_d,
+        transport,
+        llr_bits=8,
+        clip_max=5.0,
+        standardized_threshold=3.05,
+        p_fa=0.001,
+        confidence_quantizer=quantizer,
+        draws=4096,
+        seed=1234,
+        content_mode="standardized_score",
+    )
+    offline_standardized = simulate_quantized_detection(
+        receiver_d[None],
+        fusion_owner=transport.owner[None],
+        topk=1,
+        bits=8,
+        clip_max=5.0,
+        standardized_threshold=3.05,
+        p_fa=0.001,
+        owner_aware=True,
+        delivery_matrix=transport.delivery_matrix[None],
+        peer_deflection_estimate=quantizer.quantize(receiver_d)[None],
+        draws_per_frame=4096,
+        batch_frames=1,
+        seed=1234,
+        content_mode="standardized_score",
+    )
+    np.testing.assert_array_equal(
+        online_standardized["pd"], offline_standardized["pd"][0])
+    np.testing.assert_array_equal(
+        online_standardized["pfa"],
+        offline_standardized["pfa_by_frame_target"][0],
+    )
+
+
+def test_evidence_route_obeys_scheduled_owner_even_when_not_quality_argmax():
+    receiver_d = np.asarray([[9.0], [4.0], [1.0]])
+    positions = np.asarray([
+        [0.0, 0.0, 20.0],
+        [20.0, 0.0, 20.0],
+        [0.0, 20.0, 20.0],
+    ])
+    transport = route_structured_evidence(
+        receiver_d,
+        positions,
+        np.full(3, 0.25),
+        observation_frame=8,
+        topk=1,
+        llr_bits=8,
+        layout=EvidencePacketLayout(3, 1, confidence_bits=2),
+        link_model=_link_model(),
+        fusion_owner=np.asarray([2]),
+        owner_aware=True,
+    )
+    assert transport.owner[0] == 2
+    assert transport.owner_mask[2, 0]
+    assert not transport.owner_mask[0, 0]
+    assert transport.as_dict()["evidence_owner_incremental_bits"] == 0.0
+
+
+def test_evidence_transport_uses_same_burst_channel_as_coordination():
+    receiver_d = np.asarray([
+        [4.0, 1.0],
+        [2.0, 3.0],
+        [1.0, 2.0],
+    ])
+    positions = np.asarray([
+        [0.0, 0.0, 20.0],
+        [20.0, 0.0, 20.0],
+        [0.0, 20.0, 20.0],
+    ])
+    transport = route_structured_evidence(
+        receiver_d,
+        positions,
+        np.full(3, 0.25),
+        observation_frame=9,
+        topk=1,
+        llr_bits=8,
+        layout=EvidencePacketLayout(
+            num_agents=3, num_targets=2, confidence_bits=2),
+        link_model=_link_model(
+            burst_loss_enabled=True,
+            burst_good_to_bad_probability=1.0,
+            burst_bad_to_good_probability=0.0,
+            burst_bad_drop_probability=1.0,
+        ),
+        fusion_owner=np.asarray([0, 1]),
+        owner_aware=True,
+    )
+    assert transport.total_bits > 0.0
+    assert transport.attempted_links > 0
+    assert transport.delivered_links == 0
+    assert transport.delivery_failure_rate == pytest.approx(1.0)
+    assert transport.burst_failed_links == transport.attempted_links
+    assert transport.deadline_failed_links == 0
 
 
 def test_u2u_environment_consumes_delivered_evidence_packets():
@@ -218,4 +340,54 @@ def test_u2u_environment_consumes_delivered_evidence_packets():
         ),
         atol=1e-12,
     )
+    env.close()
+
+
+def test_belief_feedback_quantization_is_conservative_and_charged():
+    mean = np.asarray([321.25, 678.75, 4.2, -3.7])
+    covariance = np.asarray([
+        [40.0, 18.0, 2.0, 0.0],
+        [18.0, 55.0, 0.0, -3.0],
+        [2.0, 0.0, 5.0, 1.5],
+        [0.0, -3.0, 1.5, 7.0],
+    ])
+    decoded_mean, decoded_covariance = quantize_belief_feedback(
+        mean,
+        covariance,
+        area_size_xy=(1200.0, 1200.0),
+        velocity_bound_mps=25.0,
+        mean_bits=12,
+        covariance_bits=8,
+    )
+    steps = np.asarray([1200.0, 1200.0, 50.0, 50.0]) / (2**12 - 1)
+    assert np.all(np.abs(decoded_mean - mean) <= 0.5 * steps + 1.0e-12)
+    # The decoded diagonal covariance must dominate the transmitted full
+    # covariance in PSD order despite omitted cross-covariances.
+    assert np.min(np.linalg.eigvalsh(
+        decoded_covariance - covariance)) >= -1.0e-9
+
+    base = EvidencePacketLayout(
+        num_agents=12, num_targets=12, confidence_bits=2)
+    feedback = EvidencePacketLayout(
+        num_agents=12,
+        num_targets=12,
+        confidence_bits=2,
+        feedback_bits_per_entry=4 * 12 + 4 * 8 + 8,
+    )
+    assert feedback.broadcast_bits(3, 8) - base.broadcast_bits(3, 8) == 3 * 88
+
+
+def test_dynamic_u2u_feedback_is_enabled_and_payload_is_physically_charged():
+    cfg = load_config(
+        'config/exp_800_k12q12_distributed_v2_dynamic_u2u_pilot.yaml')
+    cfg.marl.evidence_packet_mc_draws = 64
+    env = UAVISACEnv(config=cfg, seed=29)
+    env.reset(seed=29)
+    _, _, _, _, info = env.step(_zero_actions(env.K))
+
+    assert info['belief_feedback_enabled'] == 1.0
+    assert env.core._evidence_packet_layout.feedback_bits_per_entry == 88
+    assert info['belief_feedback_fused_entries'] >= 0.0
+    assert np.isfinite(info['belief_feedback_contraction_ratio'])
+    assert np.isfinite(info['belief_position_rmse_m'])
     env.close()

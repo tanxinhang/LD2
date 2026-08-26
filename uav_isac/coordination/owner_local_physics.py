@@ -1,4 +1,4 @@
-﻿"""Owner-local physical sufficient statistics for bistatic repair proposals.
+"""Owner-local physical sufficient statistics for bistatic repair proposals.
 
 The functions in this module deliberately consume local beliefs and actually
 delivered Token masks.  Privileged path gains and DD labels are accepted only
@@ -149,6 +149,12 @@ def advance_owner_local_kinematics(
             2.0 * bound - projected_position[above, axis])
     projected_velocity = np.zeros_like(velocity)
     projected_velocity[:, :2] = applied / dt
+    for axis, bound in ((0, width), (1, height)):
+        crossed = (
+            (position[:, axis] + applied[:, axis] < 0.0)
+            | (position[:, axis] + applied[:, axis] > bound)
+        )
+        projected_velocity[crossed, axis] *= -1.0
 
     projected_target = target.copy()
     projected_aoi = aoi.copy()

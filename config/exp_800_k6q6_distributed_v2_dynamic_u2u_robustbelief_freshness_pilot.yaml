@@ -1,0 +1,30 @@
+# Dynamic-stack K=Q=6 same-caliber scale variant of the frozen dynamic K12
+# hybrid candidate (audit priority #7: 6x6-12x12 same-caliber scale curve).
+# Scenario and per-scale fields are overridden; the evidence calibration is
+# filled from the K6 passive-Rx trace by tools/calibrate_dynamic_evidence.py.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_freshness_pilot.yaml
+
+scenario:
+  K: 6
+  Q: 6
+  region_size: [980, 980]
+
+target:
+  omega_q: [0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667]
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_980_k6q6_v2.json
+  # K6 calibration from tools/calibrate_dynamic_evidence.py on the K6
+  # passive-Rx trace (seed 1019466100, deployed-statistic recipe, PFA 0.001).
+  evidence_packet_calibration_profile: k6-passiverx-rawllr-seed1019466100-engineering
+  evidence_packet_clip_max: 46.3658691062264
+  evidence_packet_standardized_threshold: 15.670904728936874
+  evidence_packet_confidence_log_boundaries:
+    - 3.3033380642710752
+    - 4.591577598621301
+    - 5.593089994929902
+  evidence_packet_confidence_representatives:
+    - 7.124520742645702
+    - 50.39136164551002
+    - 151.5472078873666
+    - 663.8700125447582

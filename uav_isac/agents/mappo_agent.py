@@ -347,43 +347,6 @@ class MAPPOAgent(BaseAgent):
 
         return action, log_prob, 0.0
 
-    def act_batch(
-        self,
-        obs_batch: np.ndarray,  # (batch, obs_dim)
-        deterministic: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Select actions for a batch of observations.
-
-        Args:
-            obs_batch: (N, obs_dim)
-            deterministic: If True, use mean/mode
-
-        Returns:
-            (actions_dp (N,2), actions_role (N,), log_probs (N,), values (N,), entropies (N,))
-        """
-        with torch.no_grad():
-            obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device)
-            dp_mean, dp_log_std, role_logits, _, _, _ = self.actor(obs_t)
-
-        dp_mean_np = dp_mean.detach().cpu().numpy()
-        dp_std_np = dp_log_std.detach().cpu().numpy()
-        role_logits_np = role_logits.detach().cpu().numpy()
-
-        N = obs_batch.shape[0]
-        actions_dp = np.zeros((N, 2), dtype=np.float64)
-        actions_role = np.zeros(N, dtype=np.int32)
-        log_probs = np.zeros(N, dtype=np.float64)
-
-        for i in range(N):
-            action, lp = self.action_space.decode(
-                dp_mean_np[i], dp_std_np, role_logits_np[i], deterministic=deterministic
-            )
-            actions_dp[i] = action.delta_p
-            actions_role[i] = action.role
-            log_probs[i] = lp
-
-        return actions_dp, actions_role, log_probs, np.zeros(N), np.zeros(N)
-
     def sample_communication(
         self,
         comm_mean: torch.Tensor,
@@ -462,6 +425,167 @@ class MAPPOAgent(BaseAgent):
         return (power_raw, sensing_raw, comm_fraction, sensing_weights,
                 log_prob, entropy)
 
+    def _movement_message_resource_log_probs(
+        self,
+        dp_mean: torch.Tensor,
+        dp_log_std: torch.Tensor,
+        role_logits: torch.Tensor,
+        comm_msgs: torch.Tensor,
+        actions_dp: torch.Tensor,
+        actions_role: torch.Tensor,
+        movement_action_mask: Optional[torch.Tensor],
+        actions_comm: Optional[torch.Tensor],
+        actions_comm_rate: Optional[torch.Tensor],
+        actions_isac_power_raw: Optional[torch.Tensor],
+        actions_sensing_raw: Optional[torch.Tensor],
+        detach_head_context: bool = False,
+        return_components: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Single source of the movement+message+resource log-prob math.
+
+        P2-1 (CODE_STRUCTURE_MAP 2026-08-25): this is the exact body that was
+        previously duplicated byte-for-byte between ``evaluate_actions`` and
+        ``verify_old_log_prob_consistency``.  The PPO ratio guard only holds
+        while both consumers agree, so the math now lives in exactly one
+        place; the verify path calls this under ``no_grad`` and evaluates with
+        the graph when training.
+
+        Returns ``(new_log_probs, entropies)``.
+        """
+        N = dp_mean.shape[0]
+        new_log_probs = torch.zeros(N, device=self.device)
+        entropies = torch.zeros(N, device=self.device)
+
+        # Tanh-squashed Gaussian log prob for delta_p
+        # Inverse through tanh: atanh(y) where y = dp / dp_scale
+        # (MUST use the same dp_scale as ActionSpace.decode/compute_log_prob,
+        #  otherwise old_log_prob (sampling) != new_log_prob (update) -> broken ratio)
+        # Under dp_parameterization="smooth_disk" (B5, advice 014) the inverse is
+        # z = dp / sqrt(d_max^2 - |dp|^2) and the exact change-of-variables
+        # correction +2*log(1+|z|^2) - 2*log(d_max) is added, so the PPO ratio is
+        # exact for every executed action (no many-to-one radial projection).
+        if self.action_space.dp_parameterization == "smooth_disk":
+            # float64 intermediates and the SAME formula as ActionSpace.
+            # compute_log_prob (numpy): standardized = (z-mu)/max(sigma,1e-12),
+            # log N = -0.5*std^2 - log(sigma) - 0.5*log(2pi).  A var+eps form
+            # would perturb the quadratic term by ~1e-6 relative, which is
+            # amplified to ~1e-4 for the rare large-|z| near-rim actions.
+            d_max = self.action_space.max_dp
+            dp64 = actions_dp.double()
+            norm_sq = (dp64 ** 2).sum(dim=-1)
+            denom_sq = (d_max ** 2 - norm_sq).clamp(min=1e-30)
+            dp_raw = dp64 / denom_sq.sqrt().unsqueeze(-1)
+            dp_std_pos = torch.exp(torch.clamp(
+                dp_log_std.double(), -20, 2))
+            var = dp_std_pos ** 2  # also used by the entropy term below
+            std_safe = dp_std_pos.clamp(min=1e-12)
+            standardized = (dp_raw - dp_mean.double()) / std_safe
+            log_prob_dp = (
+                -0.5 * (standardized ** 2).sum(dim=-1)
+                - torch.log(std_safe).sum(dim=-1)
+                - dp_raw.shape[-1] * 0.5 * np.log(2.0 * np.pi)
+                + 2.0 * torch.log1p((dp_raw ** 2).sum(dim=-1))
+                - 2.0 * np.log(d_max)
+            ).float()
+        else:
+            dp_norm = actions_dp / self.action_space.dp_scale
+            dp_norm = torch.clamp(dp_norm, -0.999, 0.999)
+            dp_raw = torch.atanh(dp_norm)
+            dp_std_pos = torch.exp(torch.clamp(dp_log_std, -20, 2))
+            var = dp_std_pos ** 2
+            log_prob_dp = -0.5 * (
+                ((dp_raw - dp_mean) ** 2) / (var + 1e-6)
+                + torch.log(2 * np.pi * var + 1e-6)
+            ).sum(dim=-1)
+            log_prob_dp -= torch.log(1.0 - dp_norm ** 2 + 1e-6).sum(dim=-1)
+
+        # Gaussian (delta_p) entropy
+        entropy_dp = 0.5 * torch.log(2 * np.pi * np.e * var + 1e-6).sum(dim=-1)
+
+        movement_mask = (
+            torch.ones(N, dtype=log_prob_dp.dtype, device=self.device)
+            if movement_action_mask is None
+            else movement_action_mask.to(
+                device=self.device, dtype=log_prob_dp.dtype).reshape(-1)
+        )
+
+        if not getattr(self.action_space, 'learn_roles', True):
+            # Role is assigned by the env's P0 solver, not the policy -> drop the
+            # role term from BOTH log-prob and entropy so the role head carries no
+            # gradient. MUST match ActionSpace.compute_log_prob (which also drops
+            # it) to keep old_log_prob == new_log_prob in the PPO ratio.
+            new_log_probs = log_prob_dp * movement_mask
+            entropies = entropy_dp * movement_mask
+        else:
+            # Categorical log prob for role
+            log_probs_role = torch.log_softmax(role_logits, dim=-1)
+            log_prob_role = log_probs_role.gather(1, actions_role.unsqueeze(-1)).squeeze(-1)
+            new_log_probs = (log_prob_dp + log_prob_role) * movement_mask
+
+            # Role (categorical) entropy
+            probs = torch.softmax(role_logits, dim=-1)
+            entropy_role = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
+            entropies = (entropy_dp + entropy_role) * movement_mask
+
+        # Per-head log-prob components (audit/headwise-credit consumers; zeros
+        # when the corresponding head is not executed this frame).
+        movement_lp = new_log_probs
+        message_lp = torch.zeros_like(new_log_probs)
+        rate_lp = torch.zeros_like(new_log_probs)
+        resource_lp = torch.zeros_like(new_log_probs)
+
+        # Optional cost-aware communication action. Legacy/off modes omit these
+        # tensors and therefore retain the historical action distribution.
+        if actions_comm is not None and actions_comm_rate is not None:
+            # In headwise-credit mode the rate/resource policies may condition
+            # numerically on the current token mean, but their losses must not
+            # rewrite the token encoder. Movement and message still share the
+            # actor representation; only cross-head output leakage is stopped.
+            head_context = (
+                comm_msgs.detach()
+                if detach_head_context else comm_msgs)
+            comm_log_std, rate_logits = self.actor.communication_parameters(
+                head_context)
+            comm_std = torch.exp(comm_log_std).expand_as(comm_msgs)
+            msg_dist = torch.distributions.Normal(comm_msgs, comm_std)
+            rate_dist = torch.distributions.Categorical(logits=rate_logits)
+            active = (actions_comm_rate > 0).to(comm_msgs.dtype)
+            message_lp = msg_dist.log_prob(actions_comm).sum(dim=-1) * active
+            rate_lp = rate_dist.log_prob(actions_comm_rate)
+            new_log_probs = new_log_probs + message_lp + rate_lp
+            comm_entropy = rate_dist.entropy() + msg_dist.entropy().mean(dim=-1) * active
+            entropies = entropies + self.comm_entropy_scale * comm_entropy
+
+            if (actions_isac_power_raw is not None
+                    and actions_sensing_raw is not None):
+                p_mean, p_log_std, s_mean, s_log_std = (
+                    self.actor.isac_resource_parameters(head_context))
+                p_dist = torch.distributions.Normal(
+                    p_mean, torch.exp(p_log_std).expand_as(p_mean))
+                s_dist = torch.distributions.Normal(
+                    s_mean, torch.exp(s_log_std).expand_as(s_mean))
+                active = (actions_comm_rate > 0).to(comm_msgs.dtype)
+                resource_lp = (
+                    p_dist.log_prob(actions_isac_power_raw) * active
+                    + s_dist.log_prob(actions_sensing_raw).sum(dim=-1)
+                )
+                new_log_probs = new_log_probs + resource_lp
+                resource_entropy = (
+                    p_dist.entropy() * active
+                    + s_dist.entropy().mean(dim=-1)
+                )
+                entropies = (
+                    entropies + self.comm_entropy_scale * resource_entropy)
+
+        if return_components:
+            return (new_log_probs, entropies, {
+                'movement_lp': movement_lp,
+                'message_lp': message_lp,
+                'rate_lp': rate_lp,
+                'resource_lp': resource_lp,
+            })
+        return new_log_probs, entropies
+
     def evaluate_actions(
         self,
         obs: torch.Tensor,               # (batch, obs_dim) or (batch, L, obs_dim)
@@ -517,115 +641,30 @@ class MAPPOAgent(BaseAgent):
         else:
             values = self.critic(global_state)
 
-        # Compute log probs and entropy
-        N = obs.shape[0]
-        new_log_probs = torch.zeros(N, device=self.device)
-        entropies = torch.zeros(N, device=self.device)
-
-        # Tanh-squashed Gaussian log prob for delta_p
-        # Inverse through tanh: atanh(y) where y = dp / dp_scale
-        # (MUST use the same dp_scale as ActionSpace.decode/compute_log_prob,
-        #  otherwise old_log_prob (sampling) != new_log_prob (update) -> broken ratio)
-        dp_norm = actions_dp / self.action_space.dp_scale
-        dp_norm = torch.clamp(dp_norm, -0.999, 0.999)
-        dp_raw = torch.atanh(dp_norm)
-
-        dp_std_pos = torch.exp(torch.clamp(dp_log_std, -20, 2))
-
-        # Log prob: log N(dp_raw | dp_mean, std) - sum log(1 - tanh^2(dp_raw))
-        var = dp_std_pos ** 2
-        log_prob_dp = -0.5 * (
-            ((dp_raw - dp_mean) ** 2) / (var + 1e-6)
-            + torch.log(2 * np.pi * var + 1e-6)
-        ).sum(dim=-1)
-        log_prob_dp -= torch.log(1.0 - dp_norm ** 2 + 1e-6).sum(dim=-1)
-
-        # Gaussian (delta_p) entropy
-        entropy_dp = 0.5 * torch.log(2 * np.pi * np.e * var + 1e-6).sum(dim=-1)
-
-        movement_mask = (
-            torch.ones(N, dtype=log_prob_dp.dtype, device=self.device)
-            if movement_action_mask is None
-            else movement_action_mask.to(
-                device=self.device, dtype=log_prob_dp.dtype).reshape(-1)
-        )
-
-        if not getattr(self.action_space, 'learn_roles', True):
-            # Role is assigned by the env's P0 solver, not the policy -> drop the
-            # role term from BOTH log-prob and entropy so the role head carries no
-            # gradient. MUST match ActionSpace.compute_log_prob (which also drops
-            # it) to keep old_log_prob == new_log_prob in the PPO ratio.
-            new_log_probs = log_prob_dp * movement_mask
-            entropies = entropy_dp * movement_mask
-        else:
-            # Categorical log prob for role
-            log_probs_role = torch.log_softmax(role_logits, dim=-1)
-            log_prob_role = log_probs_role.gather(1, actions_role.unsqueeze(-1)).squeeze(-1)
-            new_log_probs = (log_prob_dp + log_prob_role) * movement_mask
-
-            # Role (categorical) entropy
-            probs = torch.softmax(role_logits, dim=-1)
-            entropy_role = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
-            entropies = (entropy_dp + entropy_role) * movement_mask
-
-        movement_lp = new_log_probs
-        message_lp = torch.zeros_like(new_log_probs)
-        rate_lp = torch.zeros_like(new_log_probs)
-        resource_lp = torch.zeros_like(new_log_probs)
-
-        # Optional cost-aware communication action. Legacy/off modes omit these
-        # tensors and therefore retain the historical action distribution.
-        if actions_comm is not None and actions_comm_rate is not None:
-            # In headwise-credit mode the rate/resource policies may condition
-            # numerically on the current token mean, but their losses must not
-            # rewrite the token encoder. Movement and message still share the
-            # actor representation; only cross-head output leakage is stopped.
-            head_context = (
-                comm_msgs.detach()
-                if return_log_prob_components else comm_msgs)
-            comm_log_std, rate_logits = self.actor.communication_parameters(
-                head_context)
-            comm_std = torch.exp(comm_log_std).expand_as(comm_msgs)
-            msg_dist = torch.distributions.Normal(comm_msgs, comm_std)
-            rate_dist = torch.distributions.Categorical(logits=rate_logits)
-            active = (actions_comm_rate > 0).to(comm_msgs.dtype)
-            message_lp = msg_dist.log_prob(actions_comm).sum(dim=-1) * active
-            rate_lp = rate_dist.log_prob(actions_comm_rate)
-            comm_lp = message_lp + rate_lp
-            comm_entropy = rate_dist.entropy() + msg_dist.entropy().mean(dim=-1) * active
-            new_log_probs = new_log_probs + comm_lp
-            entropies = entropies + self.comm_entropy_scale * comm_entropy
-
-            if (actions_isac_power_raw is not None
-                    and actions_sensing_raw is not None):
-                p_mean, p_log_std, s_mean, s_log_std = (
-                    self.actor.isac_resource_parameters(head_context))
-                p_dist = torch.distributions.Normal(
-                    p_mean, torch.exp(p_log_std).expand_as(p_mean))
-                s_dist = torch.distributions.Normal(
-                    s_mean, torch.exp(s_log_std).expand_as(s_mean))
-                active = (actions_comm_rate > 0).to(comm_msgs.dtype)
-                resource_lp = (
-                    p_dist.log_prob(actions_isac_power_raw) * active
-                    + s_dist.log_prob(actions_sensing_raw).sum(dim=-1)
-                )
-                resource_entropy = (
-                    p_dist.entropy() * active
-                    + s_dist.entropy().mean(dim=-1)
-                )
-                new_log_probs = new_log_probs + resource_lp
-                entropies = (
-                    entropies + self.comm_entropy_scale * resource_entropy)
-
         if return_log_prob_components:
+            new_log_probs, entropies, components = (
+                self._movement_message_resource_log_probs(
+                    dp_mean, dp_log_std, role_logits, comm_msgs,
+                    actions_dp, actions_role, movement_action_mask,
+                    actions_comm, actions_comm_rate,
+                    actions_isac_power_raw, actions_sensing_raw,
+                    return_components=True))
             head_outputs = {
                 'log_probs': torch.stack([
-                    movement_lp, message_lp, rate_lp, resource_lp
+                    components['movement_lp'],
+                    components['message_lp'],
+                    components['rate_lp'],
+                    components['resource_lp'],
                 ], dim=-1),
                 'credit_values': credit_values,
             }
             return (new_log_probs, values, entropies, dp_mean, pd_pred,
                     comm_msgs, head_outputs)
+        new_log_probs, entropies = self._movement_message_resource_log_probs(
+            dp_mean, dp_log_std, role_logits, comm_msgs,
+            actions_dp, actions_role, movement_action_mask,
+            actions_comm, actions_comm_rate,
+            actions_isac_power_raw, actions_sensing_raw)
         return new_log_probs, values, entropies, dp_mean, pd_pred, comm_msgs
 
     def verify_old_log_prob_consistency(
@@ -669,62 +708,14 @@ class MAPPOAgent(BaseAgent):
                 comm_round_phase=comm_round_phase,
                 agent_identity=agent_identity)
 
-            N = obs.shape[0]
-            new_log_probs = torch.zeros(N, device=self.device)
-
-            dp_norm = actions_dp / self.action_space.dp_scale
-            dp_norm = torch.clamp(dp_norm, -0.999, 0.999)
-            dp_raw = torch.atanh(dp_norm)
-            dp_std_pos = torch.exp(torch.clamp(dp_log_std, -20, 2))
-            var = dp_std_pos ** 2
-            log_prob_dp = -0.5 * (
-                ((dp_raw - dp_mean) ** 2) / (var + 1e-6)
-                + torch.log(2 * np.pi * var + 1e-6)
-            ).sum(dim=-1)
-            log_prob_dp -= torch.log(1.0 - dp_norm ** 2 + 1e-6).sum(dim=-1)
-
-            movement_mask = (
-                torch.ones(N, dtype=log_prob_dp.dtype, device=self.device)
-                if movement_action_mask is None
-                else movement_action_mask.to(
-                    device=self.device, dtype=log_prob_dp.dtype).reshape(-1)
-            )
-
-            if getattr(self.action_space, 'learn_roles', True):
-                log_probs_role = torch.log_softmax(role_logits, dim=-1)
-                log_prob_role = log_probs_role.gather(1, actions_role.unsqueeze(-1)).squeeze(-1)
-                new_log_probs = (
-                    log_prob_dp + log_prob_role) * movement_mask
-            else:
-                new_log_probs = log_prob_dp * movement_mask
-
-            if actions_comm is not None and actions_comm_rate is not None:
-                comm_log_std, rate_logits = self.actor.communication_parameters(comm_mean)
-                comm_std = torch.exp(comm_log_std).expand_as(comm_mean)
-                msg_dist = torch.distributions.Normal(comm_mean, comm_std)
-                rate_dist = torch.distributions.Categorical(logits=rate_logits)
-                active = (actions_comm_rate > 0).to(comm_mean.dtype)
-                comm_lp = msg_dist.log_prob(actions_comm).sum(dim=-1) * active
-                comm_lp = comm_lp + rate_dist.log_prob(actions_comm_rate)
-                new_log_probs = new_log_probs + comm_lp
-                if (actions_isac_power_raw is not None
-                        and actions_sensing_raw is not None):
-                    p_mean, p_log_std, s_mean, s_log_std = (
-                        self.actor.isac_resource_parameters(comm_mean))
-                    p_dist = torch.distributions.Normal(
-                        p_mean, torch.exp(p_log_std).expand_as(p_mean))
-                    s_dist = torch.distributions.Normal(
-                        s_mean, torch.exp(s_log_std).expand_as(s_mean))
-                    active = (actions_comm_rate > 0).to(comm_mean.dtype)
-                    resource_lp = (
-                        p_dist.log_prob(actions_isac_power_raw) * active
-                        + s_dist.log_prob(actions_sensing_raw).sum(dim=-1)
-                    )
-                    new_log_probs = new_log_probs + resource_lp
-
-        diff = (old_log_probs - new_log_probs).abs()
-        max_diff = diff.max().item()
-        passed = max_diff < tolerance
+            new_log_probs, _ = (
+                self._movement_message_resource_log_probs(
+                    dp_mean, dp_log_std, role_logits, comm_mean,
+                    actions_dp, actions_role, movement_action_mask,
+                    actions_comm, actions_comm_rate,
+                    actions_isac_power_raw, actions_sensing_raw))
+            max_diff = (old_log_probs - new_log_probs).abs().max().item()
+            passed = max_diff < tolerance
         return passed, max_diff
 
     def update(self, rollout_data: Dict) -> Dict[str, float]:

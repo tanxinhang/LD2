@@ -61,6 +61,11 @@ def test_analytical_sensing_power_env_integration():
         }
         _, _, _, _, info = env.step(actions)
         max_balance = max(max_balance, float(env.core._last_analytical_power_balance_error))
+        assert info["isac_max_power_budget_violation_w"] < 1e-12
+        assert info["isac_unused_power_w"] >= 0.0
+        assert np.all(
+            info["isac_per_uav_sensing_power_w"]
+            <= cfg.uav.P_sense_max + 1e-12)
         assert np.isfinite(float(info["team_reward"]))
     assert max_balance < 1e-12, f"power balance error {max_balance}"
     env.close()

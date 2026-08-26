@@ -21,8 +21,13 @@ def _trace():
     ])
 
 
+def _owners(frames):
+    return np.tile(np.asarray([[0, 1]], dtype=np.int64), (frames, 1))
+
+
 def test_evidence_inclusion_keeps_owner_and_selected_peers():
-    routing = evidence_inclusion(_trace(), topk=1)
+    routing = evidence_inclusion(
+        _trace(), topk=1, fusion_owner=_owners(2))
     np.testing.assert_allclose(
         routing["fused_deflection"],
         np.asarray([[4.0, 5.0], [5.0, 4.0]]),
@@ -36,9 +41,11 @@ def test_owner_aware_selection_does_not_spend_slots_on_local_owner_evidence():
         [1.0, 2.0, 80.0],
     ]])
     naive = evidence_inclusion(
-        receiver_d, topk=1, owner_aware=False)
+        receiver_d, topk=1, fusion_owner=np.asarray([[0, 1, 2]]),
+        owner_aware=False)
     aware = evidence_inclusion(
-        receiver_d, topk=1, owner_aware=True)
+        receiver_d, topk=1, fusion_owner=np.asarray([[0, 1, 2]]),
+        owner_aware=True)
     assert np.sum(naive["peer_mask"]) == 0
     assert np.sum(aware["peer_mask"]) == 3
     assert np.sum(
@@ -54,6 +61,7 @@ def test_threshold_deflection_uses_finite_peer_confidence_only():
     routing = evidence_inclusion(
         receiver_d,
         topk=1,
+        fusion_owner=np.asarray([[0, 1]]),
         owner_aware=True,
         peer_deflection_estimate=estimate,
     )
@@ -67,6 +75,7 @@ def test_quantized_detection_calibrates_and_improves_over_local():
     calibration = np.tile(_trace(), (20, 1, 1))
     threshold = calibrate_standardized_threshold(
         calibration,
+        fusion_owner=_owners(calibration.shape[0]),
         topk=2,
         bits=8,
         clip_max=20.0,
@@ -76,6 +85,7 @@ def test_quantized_detection_calibrates_and_improves_over_local():
     )
     result = simulate_quantized_detection(
         calibration,
+        fusion_owner=_owners(calibration.shape[0]),
         topk=2,
         bits=8,
         clip_max=20.0,
@@ -94,6 +104,7 @@ def test_global_llr_threshold_needs_no_per_frame_deflection_at_decision():
     calibration = np.tile(_trace(), (20, 1, 1))
     threshold = calibrate_standardized_threshold(
         calibration,
+        fusion_owner=_owners(calibration.shape[0]),
         topk=1,
         bits=8,
         clip_max=20.0,
@@ -104,6 +115,7 @@ def test_global_llr_threshold_needs_no_per_frame_deflection_at_decision():
     )
     result = simulate_quantized_detection(
         calibration,
+        fusion_owner=_owners(calibration.shape[0]),
         topk=1,
         bits=8,
         clip_max=20.0,

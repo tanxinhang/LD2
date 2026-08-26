@@ -55,11 +55,17 @@ def compute_dd_effectiveness(
     T_sym: float,
     M: int,
     N: int,
-    g_min: float = 0.5
+    g_min: float = 0.5,
 ) -> float:
     """Compute DD effectiveness g^DD.
 
-    g^DD = misalignment_factor, thresholded by g_min.
+    g^DD = misalignment_factor, thresholded by g_min at the CALLER
+    (``deflection.py`` / coefficient reconstruction): this function returns the
+    continuous DD alignment factor in [0, 1] and does NOT apply the threshold
+    itself.  The ``g_min`` parameter is retained only for call-signature
+    compatibility; the actual `1[g_dd >= g_min]` gate lives at the call sites
+    (audit 2026-08-17 P2-2: the parameter was previously unused inside the
+    body, so the docstring's "thresholded by g_min" was misleading).
 
     This represents how effectively the bistatic observation contributes
     to detection after DD domain processing.
@@ -71,10 +77,10 @@ def compute_dd_effectiveness(
         T_sym: Symbol period (s)
         M: Delay bins
         N: Doppler bins
-        g_min: Effectiveness threshold
+        g_min: Effectiveness threshold (applied by the caller)
 
     Returns:
-        g^DD in [0, 1]
+        g^DD in [0, 1] (continuous alignment factor, not yet thresholded)
     """
     alignment = compute_dd_misalignment(tau, nu, delta_f, T_sym, M, N)
     g_dd = abs(alignment)  # in [0, 1]

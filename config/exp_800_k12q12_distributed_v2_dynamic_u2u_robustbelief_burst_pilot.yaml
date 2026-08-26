@@ -1,0 +1,11 @@
+# Stress-only extension of the robust dynamic feedback candidate with a
+# Gilbert-Elliott erasure process.  This is not a training distribution or a
+# reliability certificate.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  comm_burst_loss_enabled: true
+  comm_burst_good_to_bad_probability: 0.01
+  comm_burst_bad_to_good_probability: 0.30
+  comm_burst_good_drop_probability: 0.001
+  comm_burst_bad_drop_probability: 0.95

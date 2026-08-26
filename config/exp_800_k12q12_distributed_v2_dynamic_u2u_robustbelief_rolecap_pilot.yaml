@@ -1,0 +1,35 @@
+# Role-capacitated dual-role geometric responsibility pilot (audit priority #2).
+#
+# Each target owns exactly one Tx and one Rx geometric responsibility.  The
+# public Tx/Rx partition is fixed and deterministic; within each role the
+# responsibility assignment minimizes the worst-case squared range
+# (H^2 + ||x - z||^2) subject to a per-node capacity of ceil(Q/|K_r|) = 2 at
+# K=Q=12.  No viewer's local matching row is stitched into a fleet action, so
+# the executed responsibility set cannot silently duplicate targets.
+#
+# Range phase: move toward the planar midpoint of the two responsibility
+# targets (the minimax centre), clamped to the target standoff disks.
+# Strategy phase: hold geometry while P0 refreshes hyperedges/sensing power.
+# Reassignment uses a relative-improvement threshold plus a hold period to
+# avoid target-motion chattering.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  # Role-capacity movement is a separate ablation: disable every legacy
+  # distributed/analytical movement mode inherited from the base chain.
+  distributed_bistatic_bottleneck_movement_enabled: false
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_greedy_matching_movement_enabled: false
+  distributed_id_movement_enabled: false
+  distributed_role_capacity_movement_enabled: true
+  distributed_role_capacity_standoff_m: 0.0
+  distributed_role_capacity_reassign_threshold: 0.05
+  distributed_role_capacity_hold_frames: 20
+  distributed_role_capacity_range_frames: 12
+  # Far-field reachability is the binding constraint (T=150, max 375 m travel);
+  # hold geometry only briefly so the limited travel budget is not diluted.
+  distributed_role_capacity_strategy_frames: 0
+  # Role-capacity movement requires the public-view safety projection and
+  # execution of the projected action (validated in env_core).
+  distributed_movement_safety_projection_enabled: true
+  distributed_movement_execute_projected_public_action: true

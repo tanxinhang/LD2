@@ -1,0 +1,12 @@
+# Constant-density K=Q=12 scale audit: 800*sqrt(12/4) ~= 1386 m.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+scenario:
+  region_size: [1386, 1386]
+  K: 12
+  Q: 12
+
+target:
+  omega_q: [0.0833333333, 0.0833333333, 0.0833333333, 0.0833333333,
+            0.0833333333, 0.0833333333, 0.0833333333, 0.0833333333,
+            0.0833333333, 0.0833333333, 0.0833333333, 0.0833333333]

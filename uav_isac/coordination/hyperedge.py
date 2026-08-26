@@ -8,13 +8,983 @@ functions never inspect global simulator state.
 """
 
 from dataclasses import dataclass
-from itertools import product
-from typing import Dict, Iterable, Tuple
+from itertools import combinations, product
+from typing import Dict, Iterable, Tuple, Union
 
 import numpy as np
 
+from uav_isac.physical.geometry import compute_all_bistatic_params
+from uav_isac.physical.otfs import compute_dd_effectiveness
+
 
 Hyperedge = Tuple[int, int, int]
+
+
+def deterministic_bottleneck_cost_assignment(
+    cost_matrix: np.ndarray,
+) -> np.ndarray:
+    """Return a deterministic assignment minimizing the largest finite cost."""
+    from scipy.optimize import linear_sum_assignment
+
+    cost = np.asarray(cost_matrix, dtype=np.float64)
+    if cost.ndim != 2:
+        raise ValueError("cost_matrix must have shape (K,Q)")
+    if np.any(np.isnan(cost)) or np.any(cost < 0.0):
+        raise ValueError("assignment costs must be non-negative and not NaN")
+    K, Q = cost.shape
+    assignment = np.full(K, -1, dtype=np.int64)
+    if K == 0 or Q == 0:
+        return assignment
+    finite = cost[np.isfinite(cost)]
+    if finite.size == 0:
+        return assignment
+    thresholds = np.unique(finite)
+    required = min(K, Q)
+    lo, hi = 0, len(thresholds) - 1
+    best = float(thresholds[-1])
+    found = False
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        threshold = float(thresholds[mid])
+        blocked = (~np.isfinite(cost) | (cost > threshold)).astype(np.float64)
+        rows, cols = linear_sum_assignment(blocked)
+        feasible = bool(
+            len(rows) == required
+            and np.all(np.isfinite(cost[rows, cols]))
+            and np.all(cost[rows, cols] <= threshold + 1.0e-12)
+        )
+        if feasible:
+            best = threshold
+            found = True
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    if not found:
+        return assignment
+    scale = max(float(np.max(finite)), 1.0)
+    penalty = scale * (required + 1)
+    restricted = np.where(
+        np.isfinite(cost) & (cost <= best + 1.0e-12), cost, penalty)
+    tie = 1.0e-12 * (
+        np.arange(K, dtype=np.float64)[:, None] * max(Q, 1)
+        + np.arange(Q, dtype=np.float64)[None, :]
+    )
+    rows, cols = linear_sum_assignment(restricted + tie)
+    assignment[rows] = cols
+    return assignment
+
+
+def deterministic_bottleneck_matching(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+) -> np.ndarray:
+    """Return a deterministic minimum-bottleneck node-target assignment.
+
+    The primary objective minimizes the maximum travel distance.  A binary
+    search over the finite distance thresholds uses bipartite feasibility;
+    within the smallest feasible threshold a second assignment minimizes total
+    distance.  This matches worst-target sensing geometry better than a greedy
+    minimum-edge rule while remaining polynomial-time.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    if (nodes.ndim != 2 or targets.ndim != 2
+            or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)):
+        raise ValueError("node/target positions must have shape (N,2)")
+    if not (np.all(np.isfinite(nodes)) and np.all(np.isfinite(targets))):
+        raise ValueError("matching positions must be finite")
+    distance = np.linalg.norm(
+        nodes[:, None, :] - targets[None, :, :], axis=-1)
+    return deterministic_bottleneck_cost_assignment(distance)
+
+
+def role_capacity_bottleneck_assignment(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    role_mask: np.ndarray,
+    *,
+    height_m: float,
+    capacity: Union[int, Tuple[int, int]],
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Capacitated Tx/Rx geometric responsibility assignment.
+
+    For each role (the public Tx partition and its Rx complement), solve
+
+        min_{pi_r}  max_q (H^2 + ||x_{pi_r(q)} - z_q||^2)
+        s.t.        sum_q 1{pi_r(q) = k} <= c_r
+
+    where ``c_r`` is the per-node capacity of role ``r`` (a single int applies
+    to both roles; a ``(tx_capacity, rx_capacity)`` tuple gives per-role
+    bounds).  Every target receives exactly one Tx responsibility and one Rx
+    responsibility; a node may serve up to its role capacity targets within its
+    own role.  Each role subproblem is a bipartite b-matching: rows are
+    node-duplicated ``c_r`` times, and a binary search over the finite
+    squared-range thresholds tests feasibility with ``linear_sum_assignment``,
+    followed by a total-range refinement at the smallest feasible threshold.  A
+    deterministic row-major index tie-break makes identical public views
+    reproduce identical responsibilities without any global optimizer
+    certificate.
+
+    Returns ``(tx_responsibility, rx_responsibility, bottleneck_cost)`` where
+    each responsibility array has shape ``(K, Q)`` with 1 marking that node
+    ``k`` holds the geometric responsibility for target ``q`` in that role, and
+    ``bottleneck_cost`` is the worst-case squared range ``H^2 + ||x - z||^2``
+    over both roles after the assignment.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    roles = np.asarray(role_mask, dtype=bool).reshape(-1)
+    from scipy.optimize import linear_sum_assignment
+    if (
+        nodes.ndim != 2 or targets.ndim != 2
+        or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)
+        or roles.shape != (nodes.shape[0],)
+        or np.any(~np.isfinite(nodes)) or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError("invalid role-capacity assignment inputs")
+    height = max(float(height_m), 0.0)
+    if isinstance(capacity, (tuple, list)):
+        tx_cap = max(1, int(capacity[0]))
+        rx_cap = max(1, int(capacity[1]))
+    else:
+        tx_cap = max(1, int(capacity))
+        rx_cap = tx_cap
+    K = int(nodes.shape[0])
+    Q = int(targets.shape[0])
+    if K == 0 or Q == 0:
+        empty = np.zeros((K, Q), dtype=np.int8)
+        return empty, empty, 0.0
+    if np.all(roles) or not np.any(roles):
+        raise ValueError("role-capacity assignment requires both Tx and Rx")
+
+    horizontal_sq = np.sum(
+        (nodes[:, None, :] - targets[None, :, :]) ** 2, axis=-1)
+    range_sq = height * height + horizontal_sq
+
+    tx_resp = np.zeros((K, Q), dtype=np.int8)
+    rx_resp = np.zeros((K, Q), dtype=np.int8)
+    worst = 0.0
+
+    def solve_role(role_nodes: np.ndarray, is_tx: bool) -> None:
+        nonlocal worst
+        count = int(role_nodes.size)
+        if count == 0:
+            return
+        cap = tx_cap if is_tx else rx_cap
+        rows = np.repeat(role_nodes, cap)
+        if rows.size < Q:
+            # Not enough duplicated rows to cover every target: the requested
+            # capacity is below ceil(Q/|K_r|).  Fail closed (no responsibility
+            # for this role) rather than silently dropping targets.
+            return
+        role_cost = range_sq[rows]  # (rows, Q)
+        finite = role_cost[np.isfinite(role_cost)]
+        if finite.size == 0:
+            return
+        thresholds = np.unique(finite)
+        lo, hi = 0, len(thresholds) - 1
+        best = float(thresholds[-1])
+        found = False
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            threshold = float(thresholds[mid])
+            blocked = (~np.isfinite(role_cost)
+                       | (role_cost > threshold)).astype(np.float64)
+            assigned_rows, assigned_cols = linear_sum_assignment(blocked)
+            feasible = bool(
+                assigned_cols.size == Q
+                and np.all(role_cost[assigned_rows, assigned_cols]
+                           <= threshold + 1.0e-12)
+            )
+            if feasible:
+                best = threshold
+                found = True
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        if not found:
+            return
+        scale = max(float(np.max(finite)), 1.0)
+        penalty = scale * (rows.size + 1)
+        restricted = np.where(
+            np.isfinite(role_cost) & (role_cost <= best + 1.0e-12),
+            role_cost,
+            penalty,
+        )
+        tie = 1.0e-12 * (
+            np.arange(rows.size, dtype=np.float64)[:, None] * max(Q, 1)
+            + np.arange(Q, dtype=np.float64)[None, :]
+        )
+        assigned_rows, assigned_cols = linear_sum_assignment(
+            restricted + tie)
+        for row, col in zip(assigned_rows, assigned_cols):
+            node = int(rows[row])
+            if is_tx:
+                tx_resp[node, col] = 1
+            else:
+                rx_resp[node, col] = 1
+            worst = max(worst, float(role_cost[row, col]))
+
+    tx_nodes = np.flatnonzero(roles)
+    rx_nodes = np.flatnonzero(~roles)
+    solve_role(tx_nodes, is_tx=True)
+    solve_role(rx_nodes, is_tx=False)
+    return tx_resp, rx_resp, worst
+
+
+def gap_coverage_bottleneck_assignment(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    tx_role_mask: np.ndarray,
+    *,
+    critical_radius_m: float,
+    capacity: int,
+    target_deficit: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Deterministic gap-coverage Tx/Rx responsibility assignment.
+
+    The coverage invariant C1 requires every target to have at least one Tx
+    endpoint and one Rx endpoint within ``critical_radius_m`` (the P_D >= 0.6
+    operational radius).  Targets violating C1 form the uncovered set U; each
+    uncovered target receives a responsibility from the closest endpoint of
+    the missing role (Tx first when both are missing), subject to a per-node
+    ``capacity``.  Greedy order is fully deterministic (target id ascending;
+    endpoint distance ascending; endpoint id ascending), and a previously
+    assigned endpoint is retained when it is still available and still the
+    closest -- so identical public views reproduce identical responsibilities
+    without any optimizer certificate and without per-frame churn.
+
+    ``target_deficit`` (optional, length Q, larger = weaker) orders the
+    assignment so weaker targets receive their Tx and Rx responsibilities
+    first (Phase B reinforcement: weak targets are reinforced, saturated
+    targets release endpoints when the node capacity is exhausted).
+
+    Returns ``(tx_responsibility, rx_responsibility, uncovered)`` where each
+    responsibility array has shape ``(K, Q)`` (1 = node k is responsible for
+    target q in that role) and ``uncovered`` is the boolean (Q,) set of
+    targets violating C1 under the current public geometry.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    roles = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    if (
+        nodes.ndim != 2 or targets.ndim != 2
+        or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)
+        or roles.shape != (nodes.shape[0],)
+        or np.any(~np.isfinite(nodes)) or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError("invalid gap-coverage assignment inputs")
+    r_crit = max(float(critical_radius_m), 1.0e-9)
+    cap = max(1, int(capacity))
+    K = int(nodes.shape[0])
+    Q = int(targets.shape[0])
+    if K == 0 or Q == 0:
+        empty = np.zeros((K, Q), dtype=np.int8)
+        return empty, empty, np.zeros(Q, dtype=bool)
+    if np.all(roles) or not np.any(roles):
+        raise ValueError("gap-coverage assignment requires both Tx and Rx")
+
+    horizontal = np.linalg.norm(
+        nodes[:, None, :] - targets[None, :, :], axis=-1)  # (K, Q)
+    tx_nodes = np.flatnonzero(roles)
+    rx_nodes = np.flatnonzero(~roles)
+    nearest_tx = np.full(Q, np.inf)
+    nearest_rx = np.full(Q, np.inf)
+    if tx_nodes.size:
+        nearest_tx = np.min(horizontal[tx_nodes], axis=0)
+    if rx_nodes.size:
+        nearest_rx = np.min(horizontal[rx_nodes], axis=0)
+    uncovered = (nearest_tx > r_crit) | (nearest_rx > r_crit)
+
+    if target_deficit is not None:
+        deficit = np.asarray(target_deficit, dtype=np.float64).reshape(-1)
+        if deficit.shape != (Q,):
+            raise ValueError("target_deficit must have shape (Q,)")
+        order = np.argsort(-deficit, kind="stable")
+    else:
+        order = np.arange(Q)
+
+    tx_resp = np.zeros((K, Q), dtype=np.int8)
+    rx_resp = np.zeros((K, Q), dtype=np.int8)
+    node_load = np.zeros(K, dtype=np.int64)
+
+    def assign(target: int, want_tx: bool) -> bool:
+        nonlocal node_load
+        pool = tx_nodes if want_tx else rx_nodes
+        if pool.size == 0:
+            return False
+        distance = horizontal[pool, target]
+        order_pool = pool[np.argsort(distance, kind="stable")]
+        for node in order_pool:
+            if node_load[int(node)] >= cap:
+                continue
+            if want_tx:
+                tx_resp[int(node), target] = 1
+            else:
+                rx_resp[int(node), target] = 1
+            node_load[int(node)] += 1
+            return True
+        return False
+
+    # 1) Safety net first (weakest targets first): every uncovered target
+    #    receives the missing role(s) so C1 is re-established immediately.
+    for target in order:
+        target = int(target)
+        if not uncovered[target]:
+            continue
+        missing_tx = nearest_tx[target] > r_crit
+        missing_rx = nearest_rx[target] > r_crit
+        if missing_tx:
+            assign(target, want_tx=True)
+        if missing_rx:
+            assign(target, want_tx=False)
+    # 2) Then complete the assignment (weakest first) so no UAV is idle:
+    #    each target keeps its nearest Tx and Rx endpoint within the
+    #    capacity limits.
+    for target in order:
+        target = int(target)
+        if tx_resp[:, target].sum() == 0:
+            assign(target, want_tx=True)
+        if rx_resp[:, target].sum() == 0:
+            assign(target, want_tx=False)
+    return tx_resp, rx_resp, uncovered
+
+
+def role_aware_bistatic_movement_cost(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    tx_role_mask: np.ndarray,
+    *,
+    height_m: float,
+    movement_step_m: float,
+    standoff_m: float = 0.0,
+    complement_exponent: float = 1.0,
+) -> np.ndarray:
+    """One-step bistatic range-product cost using the nearest opposite role.
+
+    For mover ``k`` and target ``q``, the cost is
+    ``R_kq,next^2 * min_{l: role_l != role_k} R_lq^2``. Since free-space
+    bistatic gain is proportional to the inverse of this product, minimizing
+    the maximum assigned cost aligns L3 responsibility with worst-target
+    sensing geometry. Every row uses only public positions, fixed public roles
+    and the common target map; no optimizer certificate is required.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    roles = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    if (
+        nodes.ndim != 2 or targets.ndim != 2
+        or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)
+        or roles.shape != (nodes.shape[0],)
+        or np.any(~np.isfinite(nodes)) or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError("invalid role-aware movement inputs")
+    if nodes.shape[0] > 0 and (np.all(roles) or not np.any(roles)):
+        raise ValueError("role-aware bistatic movement requires both Tx and Rx")
+    height = max(float(height_m), 0.0)
+    step = max(float(movement_step_m), 0.0)
+    standoff = max(float(standoff_m), 0.0)
+    exponent = float(complement_exponent)
+    if not np.isfinite(exponent) or not 0.0 <= exponent <= 1.0:
+        raise ValueError("complement_exponent must lie in [0,1]")
+    horizontal = np.linalg.norm(
+        nodes[:, None, :] - targets[None, :, :], axis=-1)
+    next_horizontal = np.maximum(horizontal - step, standoff)
+    own_range_sq = height * height + next_horizontal * next_horizontal
+    current_range_sq = height * height + horizontal * horizontal
+    complement_range_sq = np.zeros_like(current_range_sq)
+    for node in range(nodes.shape[0]):
+        complement = np.flatnonzero(roles != roles[node])
+        complement_range_sq[node] = np.min(
+            current_range_sq[complement], axis=0)
+    return own_range_sq * np.power(complement_range_sq, exponent)
+
+
+def gauss_southwell_bistatic_geometry_step(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    tx_role_mask: np.ndarray,
+    *,
+    height_m: float,
+    maximum_step_m: float,
+    standoff_m: float = 0.0,
+    minimum_log_improvement: float = 0.0,
+    eligible_node_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, tuple[int, int] | None, float, float, float]:
+    """Choose the single UAV-target radial step with largest tail gain.
+
+    The public range-product potential is
+
+    ``Phi(X)=max_q min_Tx R_iq^2 * min_Rx R_jq^2``.
+
+    Every admissible coordinate ``(node,target)`` moves that node at most one
+    step toward the target.  The Gauss--Southwell rule selects the coordinate
+    with the largest positive ``log(Phi_before/Phi_after)``; deterministic
+    node/target iteration resolves ties.  The function does not inspect target
+    truth, power certificates, or optimizer state.  Collision safety is a
+    lexicographically higher layer and must project the returned action before
+    execution.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    roles = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    eligible = (
+        np.ones(nodes.shape[0], dtype=bool)
+        if eligible_node_mask is None
+        else np.asarray(eligible_node_mask, dtype=bool).reshape(-1)
+    )
+    if (
+        nodes.ndim != 2 or targets.ndim != 2
+        or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)
+        or roles.shape != (nodes.shape[0],)
+        or eligible.shape != (nodes.shape[0],)
+        or np.any(~np.isfinite(nodes)) or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError('invalid Gauss-Southwell geometry inputs')
+    if nodes.shape[0] == 0 or targets.shape[0] == 0:
+        return np.zeros_like(nodes), None, 0.0, 0.0, 0.0
+    if np.all(roles) or not np.any(roles):
+        raise ValueError('Gauss-Southwell geometry requires Tx and Rx roles')
+    height = float(height_m)
+    step = float(maximum_step_m)
+    standoff = float(standoff_m)
+    threshold = float(minimum_log_improvement)
+    if not (
+        np.isfinite(height) and height >= 0.0
+        and np.isfinite(step) and step >= 0.0
+        and np.isfinite(standoff) and standoff >= 0.0
+        and np.isfinite(threshold) and threshold >= 0.0
+    ):
+        raise ValueError('invalid Gauss-Southwell scalar parameter')
+
+    def potential(positions: np.ndarray) -> float:
+        horizontal_sq = np.sum(
+            (positions[:, None, :] - targets[None, :, :]) ** 2,
+            axis=-1,
+        )
+        range_sq = height * height + horizontal_sq
+        nearest_tx = np.min(range_sq[roles], axis=0)
+        nearest_rx = np.min(range_sq[~roles], axis=0)
+        return float(np.max(nearest_tx * nearest_rx))
+
+    base = potential(nodes)
+    desired = np.zeros_like(nodes)
+    best_coordinate = None
+    best_improvement = threshold
+    best_potential = base
+    for node in range(nodes.shape[0]):
+        if not eligible[node]:
+            continue
+        for target in range(targets.shape[0]):
+            radial = targets[target] - nodes[node]
+            distance = float(np.linalg.norm(radial))
+            travel = min(step, max(distance - standoff, 0.0))
+            if travel <= 1.0e-12:
+                continue
+            delta = travel * radial / max(distance, 1.0e-12)
+            candidate = nodes.copy()
+            candidate[node] += delta
+            candidate_potential = potential(candidate)
+            improvement = float(np.log(
+                max(base, 1.0e-300)
+                / max(candidate_potential, 1.0e-300)))
+            if improvement > best_improvement + 1.0e-12:
+                best_coordinate = (int(node), int(target))
+                best_improvement = improvement
+                best_potential = candidate_potential
+                desired[:] = 0.0
+                desired[node] = delta
+    if best_coordinate is None:
+        return desired, None, 0.0, base, base
+    return desired, best_coordinate, best_improvement, base, best_potential
+
+
+def gauss_southwell_bistatic_geometry_sweep(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    tx_role_mask: np.ndarray,
+    *,
+    height_m: float,
+    maximum_step_m: float,
+    standoff_m: float = 0.0,
+    minimum_log_improvement: float = 0.0,
+    maximum_selected_nodes: int | None = None,
+) -> tuple[np.ndarray, tuple[tuple[int, int], ...], float, float, float]:
+    """Greedily sweep distinct UAV coordinates in one geometry block.
+
+    Each inner iteration applies the one-coordinate Gauss--Southwell rule to
+    the updated public geometry while excluding UAVs already selected in this
+    frame. Thus every accepted inner step strictly decreases the same public
+    tail potential, every UAV moves at most once, and a K-UAV fleet does not
+    suffer the 1/K movement-bandwidth collapse of a single-coordinate frame.
+    The returned whole-view action still requires the external d_safe shield.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    if nodes.ndim != 2 or nodes.shape[1:] != (2,):
+        raise ValueError('invalid Gauss-Southwell sweep node positions')
+    limit = (
+        int(nodes.shape[0])
+        if maximum_selected_nodes is None
+        else int(maximum_selected_nodes)
+    )
+    if limit < 0:
+        raise ValueError('maximum_selected_nodes must be nonnegative')
+    limit = min(limit, int(nodes.shape[0]))
+    working = nodes.copy()
+    desired = np.zeros_like(nodes)
+    eligible = np.ones(nodes.shape[0], dtype=bool)
+    coordinates = []
+    total_gain = 0.0
+    initial_potential = None
+    final_potential = None
+    for _ in range(limit):
+        delta, coordinate, gain, before, after = (
+            gauss_southwell_bistatic_geometry_step(
+                working,
+                target_positions_xy,
+                tx_role_mask,
+                height_m=height_m,
+                maximum_step_m=maximum_step_m,
+                standoff_m=standoff_m,
+                minimum_log_improvement=minimum_log_improvement,
+                eligible_node_mask=eligible,
+            ))
+        if initial_potential is None:
+            initial_potential = float(before)
+            final_potential = float(before)
+        if coordinate is None:
+            break
+        node, _target = coordinate
+        desired[node] = delta[node]
+        working[node] += delta[node]
+        eligible[node] = False
+        coordinates.append(coordinate)
+        total_gain += float(gain)
+        final_potential = float(after)
+    if initial_potential is None:
+        # limit=0 still validates the physical inputs and exposes its potential.
+        _, _, _, initial_potential, final_potential = (
+            gauss_southwell_bistatic_geometry_step(
+                working,
+                target_positions_xy,
+                tx_role_mask,
+                height_m=height_m,
+                maximum_step_m=maximum_step_m,
+                standoff_m=standoff_m,
+                minimum_log_improvement=minimum_log_improvement,
+                eligible_node_mask=np.zeros(nodes.shape[0], dtype=bool),
+            ))
+    return (
+        desired,
+        tuple(coordinates),
+        float(total_gain),
+        float(initial_potential),
+        float(final_potential),
+    )
+
+
+def annular_alternating_movement_delta(
+    node_position_xy: np.ndarray,
+    target_position_xy: np.ndarray,
+    complement_position_xy: np.ndarray,
+    *,
+    phase: str,
+    inner_radius_m: float,
+    outer_radius_m: float,
+    maximum_step_m: float,
+    desired_bistatic_angle_deg: float = 90.0,
+    orientation_sign: int = 1,
+) -> tuple[np.ndarray, str]:
+    """One local block-coordinate step on an annular bistatic geometry.
+
+    Range infeasibility has lexicographic priority in both phases: a node
+    outside the annulus moves toward its nearest boundary.  Inside the
+    annulus, the range phase holds radius while the strategy phase rotates the
+    node about the target toward a desired signed bistatic angle relative to
+    its nearest opposite-role complement.  The rotation preserves range
+    exactly, so strategy improvement cannot silently become further radial
+    approach.
+
+    The function consumes one node, one target and one public complement only;
+    it never reads a fleet-wide target-quality vector.
+    """
+    node = np.asarray(node_position_xy, dtype=np.float64).reshape(-1)
+    target = np.asarray(target_position_xy, dtype=np.float64).reshape(-1)
+    complement = np.asarray(
+        complement_position_xy, dtype=np.float64).reshape(-1)
+    if node.shape != (2,) or target.shape != (2,) or complement.shape != (2,):
+        raise ValueError("annular movement inputs must be planar vectors")
+    if not (
+        np.all(np.isfinite(node))
+        and np.all(np.isfinite(target))
+        and np.all(np.isfinite(complement))
+    ):
+        raise ValueError("annular movement inputs must be finite")
+    inner = float(inner_radius_m)
+    outer = float(outer_radius_m)
+    step = float(maximum_step_m)
+    angle = float(desired_bistatic_angle_deg)
+    normalized_phase = str(phase).strip().lower()
+    if not (0.0 <= inner < outer and step >= 0.0):
+        raise ValueError("annular radii require 0 <= inner < outer")
+    if not 0.0 < angle < 180.0:
+        raise ValueError("desired bistatic angle must lie in (0,180) degrees")
+    if normalized_phase not in {"range", "strategy"}:
+        raise ValueError("phase must be range or strategy")
+
+    radial = node - target
+    radius = float(np.linalg.norm(radial))
+    if radius <= 1.0e-12 or step <= 0.0:
+        return np.zeros(2, dtype=np.float64), "degenerate_hold"
+    radial_unit = radial / radius
+    if radius > outer + 1.0e-12:
+        travel = min(step, radius - outer)
+        return -travel * radial_unit, "far_recovery"
+    if radius < inner - 1.0e-12:
+        travel = min(step, inner - radius)
+        return travel * radial_unit, "near_recovery"
+    if normalized_phase == "range":
+        return np.zeros(2, dtype=np.float64), "range_hold"
+
+    complement_radial = complement - target
+    complement_radius = float(np.linalg.norm(complement_radial))
+    if complement_radius <= 1.0e-12:
+        return np.zeros(2, dtype=np.float64), "strategy_hold"
+    cross = float(
+        complement_radial[0] * radial[1]
+        - complement_radial[1] * radial[0])
+    dot = float(np.dot(complement_radial, radial))
+    signed_angle = float(np.arctan2(cross, dot))
+    desired_abs = float(np.deg2rad(angle))
+    if abs(signed_angle) <= 1.0e-12:
+        desired_signed = desired_abs * (1.0 if int(orientation_sign) >= 0 else -1.0)
+    else:
+        desired_signed = desired_abs * np.sign(signed_angle)
+    angle_error = float(np.arctan2(
+        np.sin(desired_signed - signed_angle),
+        np.cos(desired_signed - signed_angle),
+    ))
+    maximum_angle_step = step / max(radius, 1.0e-12)
+    rotation = float(np.clip(
+        angle_error, -maximum_angle_step, maximum_angle_step))
+    if abs(rotation) <= 1.0e-12:
+        return np.zeros(2, dtype=np.float64), "strategy_hold"
+    cosine, sine = float(np.cos(rotation)), float(np.sin(rotation))
+    rotated = np.asarray([
+        cosine * radial[0] - sine * radial[1],
+        sine * radial[0] + cosine * radial[1],
+    ])
+    return rotated - radial, "strategy_tangent"
+
+
+def bistatic_geometry_tail_ratio(
+    node_positions_xy: np.ndarray,
+    target_positions_xy: np.ndarray,
+    tx_role_mask: np.ndarray,
+    *,
+    height_m: float,
+) -> float:
+    """Return a scale-free worst/median bistatic range-product ratio.
+
+    For each target, the public-geometry proxy is the product of the squared
+    ranges to its nearest Tx and nearest Rx.  The maximum divided by the
+    median is invariant to a common spatial scaling (apart from the physical
+    height term), so it detects a genuine isolated bistatic tail rather than
+    merely reacting to a larger deployment region.
+    """
+    nodes = np.asarray(node_positions_xy, dtype=np.float64)
+    targets = np.asarray(target_positions_xy, dtype=np.float64)
+    roles = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    if (
+        nodes.ndim != 2 or targets.ndim != 2
+        or nodes.shape[1:] != (2,) or targets.shape[1:] != (2,)
+        or roles.shape != (nodes.shape[0],)
+        or np.any(~np.isfinite(nodes)) or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError("invalid bistatic tail-ratio inputs")
+    if targets.shape[0] == 0:
+        return 1.0
+    if nodes.shape[0] == 0 or np.all(roles) or not np.any(roles):
+        raise ValueError("bistatic tail ratio requires both Tx and Rx")
+    height = max(float(height_m), 0.0)
+    range_sq = (
+        height * height
+        + np.sum((nodes[:, None, :] - targets[None, :, :]) ** 2, axis=-1)
+    )
+    target_product = (
+        np.min(range_sq[roles], axis=0)
+        * np.min(range_sq[~roles], axis=0)
+    )
+    median = float(np.median(target_product))
+    return float(np.max(target_product) / max(median, np.finfo(float).tiny))
+
+
+def project_pairwise_safe_movement(
+    node_positions_xy: np.ndarray,
+    desired_delta_xy: np.ndarray,
+    *,
+    minimum_distance_m: float,
+    maximum_step_m: float,
+    area_size_xy: Tuple[float, float],
+    return_diagnostics: bool = False,
+    outside_invariant_recovery: bool = False,
+    recovery_gain: float = 1.0,
+    independently_composable: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, object]]]:
+    """Project fleet movement onto a conservative one-step safety set.
+
+    For a nearby pair with relative position ``r_ij`` and relative movement
+    ``du_ij``, the affine constraint
+
+    ``r_ij.T @ du_ij >= (d_safe**2 - ||r_ij||**2) / 2``
+
+    is a sufficient affine condition for safe next-frame endpoints because
+    ``||r_ij + du_ij||^2`` contains the additional non-negative
+    ``||du_ij||^2`` term. Pairs farther than ``d_safe + 2*max_step`` need
+    no constraint because bounded movements cannot reach the unsafe set in one
+    frame.  The strictly convex least-change objective preserves the sensing
+    movement whenever it is already safe.  Per-node Euclidean speed balls and
+    rectangular flight bounds are enforced by SLSQP.
+    """
+    from scipy.optimize import minimize
+    from time import perf_counter
+
+    started = perf_counter()
+    initially_safe = True
+    minimum_initial_distance = float('inf')
+    recovery_pair_count = 0
+
+    def finish(
+        value: np.ndarray,
+        *,
+        intervened: bool,
+        fail_closed: bool,
+        constraint_count: int,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, object]]]:
+        if not return_diagnostics:
+            return value
+        return value, {
+            'intervened': bool(intervened),
+            'fail_closed': bool(fail_closed),
+            'solve_time_s': float(perf_counter() - started),
+            'pairwise_constraint_count': int(constraint_count),
+            'initially_safe': bool(initially_safe),
+            'minimum_initial_distance_m': float(minimum_initial_distance),
+            'recovery_pair_count': int(recovery_pair_count),
+        }
+
+    positions = np.asarray(node_positions_xy, dtype=np.float64)
+    desired = np.asarray(desired_delta_xy, dtype=np.float64)
+    if (
+        positions.ndim != 2 or positions.shape[1:] != (2,)
+        or desired.shape != positions.shape
+        or np.any(~np.isfinite(positions))
+        or np.any(~np.isfinite(desired))
+    ):
+        raise ValueError("invalid pairwise movement projection inputs")
+    distance = max(float(minimum_distance_m), 0.0)
+    step = max(float(maximum_step_m), 0.0)
+    area = np.asarray(area_size_xy, dtype=np.float64).reshape(-1)
+    if area.shape != (2,) or np.any(~np.isfinite(area)) or np.any(area <= 0.0):
+        raise ValueError("area_size_xy must contain two positive finite values")
+    if positions.shape[0] == 0 or step <= 0.0:
+        stopped = np.zeros_like(desired)
+        return finish(
+            stopped,
+            intervened=bool(np.any(np.abs(stopped - desired) > 1.0e-12)),
+            fail_closed=False,
+            constraint_count=0,
+        )
+
+    desired = desired.copy()
+    desired_norm = np.linalg.norm(desired, axis=1)
+    scale = np.minimum(1.0, step / np.maximum(desired_norm, 1.0e-15))
+    desired *= scale[:, None]
+    original_desired = desired.copy()
+    K = positions.shape[0]
+    if K >= 2:
+        initial_pair_distance = np.linalg.norm(
+            positions[:, None, :] - positions[None, :, :],
+            axis=-1,
+        )[np.triu_indices(K, k=1)]
+        minimum_initial_distance = float(np.min(initial_pair_distance))
+        initially_safe = bool(
+            minimum_initial_distance >= distance - 1.0e-9)
+    rows = []
+    lower = []
+    recovery_bias = np.zeros_like(desired)
+    influence = distance + 2.0 * step
+    for i in range(K):
+        for j in range(i + 1, K):
+            relative = positions[i] - positions[j]
+            current = float(np.linalg.norm(relative))
+            if current > influence + 1.0e-12:
+                continue
+            outside = bool(current < distance - 1.0e-9)
+            if outside and outside_invariant_recovery:
+                # Zero is feasible and keeps the public squared distance from
+                # decreasing. A truncated gradient of the pairwise shortfall
+                # potential biases the least-change objective toward gradual
+                # recovery without demanding an unreachable one-frame jump.
+                pair_lower = 0.0
+                recovery_pair_count += 1
+                if current > 1.0e-12:
+                    unit = relative / current
+                    # First cancel the desired relative velocity that closes
+                    # this pair, then add a bounded shortfall-gradient step.
+                    # Without the cancellation term, a large sensing command
+                    # can dominate the recovery bias and the QP merely lands
+                    # on the non-decreasing-distance boundary.
+                    desired_relative = desired[i] - desired[j]
+                    closing_speed = max(
+                        0.0, -float(unit @ desired_relative))
+                    recovery_speed = (
+                        max(float(recovery_gain), 0.0)
+                        * step
+                        * (distance - current) / max(distance, 1.0e-12)
+                    )
+                    magnitude = closing_speed + recovery_speed
+                    recovery_bias[i] += 0.5 * magnitude * unit
+                    recovery_bias[j] -= 0.5 * magnitude * unit
+            else:
+                pair_lower = 0.5 * (
+                    distance * distance - current * current)
+            if independently_composable:
+                # Split the affine barrier budget equally between endpoints:
+                #   r^T u_i >= b/2,  (-r)^T u_j >= b/2.
+                # Summing locally verified endpoint actions recovers the joint
+                # barrier r^T(u_i-u_j)>=b. A stale endpoint's zero action is
+                # also feasible because b<=0 inside the invariant set and the
+                # recovery rule sets b=0 outside it.
+                row_i = np.zeros((K, 2), dtype=np.float64)
+                row_j = np.zeros((K, 2), dtype=np.float64)
+                row_i[i] = relative
+                row_j[j] = -relative
+                rows.extend((row_i.reshape(-1), row_j.reshape(-1)))
+                lower.extend((0.5 * pair_lower, 0.5 * pair_lower))
+            else:
+                row = np.zeros((K, 2), dtype=np.float64)
+                row[i] = relative
+                row[j] = -relative
+                rows.append(row.reshape(-1))
+                lower.append(pair_lower)
+
+    recovery_reference = desired + recovery_bias
+    recovery_norm = np.linalg.norm(recovery_reference, axis=1)
+    recovery_scale = np.minimum(
+        1.0, step / np.maximum(recovery_norm, 1.0e-15))
+    recovery_reference *= recovery_scale[:, None]
+
+    def satisfies_affine(value: np.ndarray, tol: float = 1.0e-8) -> bool:
+        if not rows:
+            return True
+        return bool(np.all(
+            np.asarray(rows) @ value.reshape(-1)
+            >= np.asarray(lower) - tol))
+
+    next_position = positions + desired
+    if K >= 2:
+        desired_pair_distance = np.linalg.norm(
+            next_position[:, None, :] - next_position[None, :, :],
+            axis=-1,
+        )[np.triu_indices(K, k=1)]
+    else:
+        desired_pair_distance = np.asarray([np.inf])
+    desired_feasible = bool(
+        np.all(desired_pair_distance >= distance - 1.0e-9)
+        and satisfies_affine(desired)
+        and np.all(next_position >= -1.0e-9)
+        and np.all(next_position <= area[None, :] + 1.0e-9)
+    )
+    if desired_feasible and recovery_pair_count == 0:
+        return finish(
+            desired,
+            intervened=False,
+            fail_closed=False,
+            constraint_count=len(rows),
+        )
+
+    x0 = np.zeros_like(desired).reshape(-1)
+    lower_bound = np.maximum(-step, -positions).reshape(-1)
+    upper_bound = np.minimum(step, area[None, :] - positions).reshape(-1)
+    constraints = []
+    if rows:
+        matrix = np.asarray(rows, dtype=np.float64)
+        rhs = np.asarray(lower, dtype=np.float64)
+        constraints.append({
+            'type': 'ineq',
+            'fun': lambda value, A=matrix, b=rhs: A @ value - b,
+            'jac': lambda value, A=matrix, b=rhs: A,
+        })
+    constraints.append({
+        'type': 'ineq',
+        'fun': lambda value: (
+            step * step
+            - np.sum(value.reshape(K, 2) ** 2, axis=1)),
+        'jac': lambda value: np.asarray([
+            np.concatenate([
+                np.zeros(2 * node),
+                -2.0 * value.reshape(K, 2)[node],
+                np.zeros(2 * (K - node - 1)),
+            ])
+            for node in range(K)
+        ]),
+    })
+    result = minimize(
+        lambda value: 0.5 * float(np.sum(
+            (value - recovery_reference.reshape(-1)) ** 2)),
+        x0,
+        jac=lambda value: value - recovery_reference.reshape(-1),
+        bounds=list(zip(lower_bound, upper_bound)),
+        constraints=constraints,
+        method='SLSQP',
+        options={'ftol': 1.0e-10, 'maxiter': 200, 'disp': False},
+    )
+    projected = np.asarray(result.x, dtype=np.float64).reshape(K, 2)
+    projected_next = positions + projected
+    if K >= 2:
+        projected_pair_distance = np.linalg.norm(
+            projected_next[:, None, :] - projected_next[None, :, :],
+            axis=-1,
+        )[np.triu_indices(K, k=1)]
+    else:
+        projected_pair_distance = np.asarray([np.inf])
+    if K >= 2:
+        required_pair_distance = np.where(
+            (initial_pair_distance < distance)
+            & bool(outside_invariant_recovery),
+            initial_pair_distance,
+            distance,
+        )
+    else:
+        required_pair_distance = np.asarray([np.inf])
+    feasible = bool(
+        satisfies_affine(projected, tol=1.0e-6)
+        and np.all(np.linalg.norm(projected, axis=1) <= step + 1.0e-6)
+        and np.all(
+            projected_pair_distance >= required_pair_distance - 1.0e-6)
+        and np.all(projected_next >= -1.0e-6)
+        and np.all(projected_next <= area[None, :] + 1.0e-6)
+    )
+    if not feasible:
+        # Numerical optimization is not allowed to crash the flight loop or
+        # release the unsafe desired action.  Holding position is the
+        # deterministic fail-closed action: it preserves every currently safe
+        # physical separation and never increases the violation of an already
+        # unsafe pair.  A later frame may retry the least-change projection.
+        return finish(
+            np.zeros_like(desired),
+            intervened=True,
+            fail_closed=True,
+            constraint_count=len(rows),
+        )
+    return finish(
+        projected,
+        intervened=bool(np.any(
+            np.abs(projected - original_desired) > 1.0e-9)),
+        fail_closed=False,
+        constraint_count=len(rows),
+    )
 
 
 @dataclass(frozen=True)
@@ -147,6 +1117,493 @@ def reconstruct_bistatic_pair_value(
         if target_max > 0.0:
             pair_value[:, :, target] /= target_max
     return pair_value
+
+
+def reconstruct_bistatic_coefficient_from_public_state(
+    node_positions_xy: np.ndarray,
+    node_velocities_xy: np.ndarray,
+    target_positions: np.ndarray,
+    target_velocities: np.ndarray,
+    visible: np.ndarray,
+    *,
+    uav_height_m: float,
+    fc_hz: float,
+    rcs_m2: float,
+    delta_f_hz: float,
+    symbol_period_s: float,
+    delay_bins: int,
+    doppler_bins: int,
+    dd_gate_min: float,
+    coefficient_scale: float,
+    position_uncertainty_m: float | np.ndarray = 0.0,
+    target_position_uncertainty_m: float | np.ndarray = 0.0,
+) -> np.ndarray:
+    """Reconstruct the executable per-watt graph from delivered endpoint state.
+
+    The bistatic radar equation factorizes through the two endpoint ranges,
+    while delay/Doppler support is deterministic given endpoint and target
+    state.  Consequently broadcasting one position/velocity tuple per UAV is
+    a sufficient statistic for all ``K(K-1)Q`` coefficients: a receiver need
+    not transmit a dense edge matrix.  Missing endpoint messages fail closed
+    to zero coefficient.
+
+    This reconstruction is exact for the deployed deterministic analytical
+    sensing model when reporting loss and Swerling fading are disabled.  With
+    quantized state it is a public, reproducible approximation rather than
+    privileged access to the simulator's realized deflection entries.
+    """
+    positions_xy = np.asarray(node_positions_xy, dtype=np.float64)
+    velocities_xy = np.asarray(node_velocities_xy, dtype=np.float64)
+    targets = np.asarray(target_positions, dtype=np.float64)
+    target_velocity = np.asarray(target_velocities, dtype=np.float64)
+    seen = np.asarray(visible, dtype=bool)
+    if positions_xy.ndim != 3 or positions_xy.shape[-1] != 2:
+        raise ValueError("node_positions_xy must have shape (K,Q,2)")
+    if velocities_xy.shape != positions_xy.shape:
+        raise ValueError("node_velocities_xy must match node_positions_xy")
+    K, Q, _ = positions_xy.shape
+    if targets.shape != (Q, 3) or target_velocity.shape != (Q, 3):
+        raise ValueError("target position/velocity must have shape (Q,3)")
+    if seen.shape != (K, Q):
+        raise ValueError("visible must have shape (K,Q)")
+    uncertainty = np.asarray(
+        position_uncertainty_m, dtype=np.float64)
+    if uncertainty.ndim == 0:
+        uncertainty = np.full(K, float(uncertainty), dtype=np.float64)
+    elif uncertainty.shape != (K,):
+        raise ValueError(
+            "position_uncertainty_m must be a scalar or K-vector")
+    target_uncertainty = np.asarray(
+        target_position_uncertainty_m, dtype=np.float64)
+    if target_uncertainty.ndim == 0:
+        target_uncertainty = np.full(
+            Q, float(target_uncertainty), dtype=np.float64)
+    elif target_uncertainty.shape != (Q,):
+        raise ValueError(
+            "target_position_uncertainty_m must be a scalar or Q-vector")
+    scalar_values = (
+        float(uav_height_m), float(fc_hz), float(rcs_m2),
+        float(delta_f_hz), float(symbol_period_s),
+        float(dd_gate_min), float(coefficient_scale),
+    )
+    if (
+        not np.all(np.isfinite(positions_xy))
+        or not np.all(np.isfinite(velocities_xy))
+        or not np.all(np.isfinite(targets))
+        or not np.all(np.isfinite(target_velocity))
+        or not np.all(np.isfinite(uncertainty))
+        or not np.all(np.isfinite(target_uncertainty))
+        or not all(np.isfinite(value) for value in scalar_values)
+    ):
+        raise ValueError("public physical reconstruction inputs must be finite")
+    if (delay_bins < 1 or doppler_bins < 1 or coefficient_scale <= 0.0
+            or np.any(uncertainty < 0.0)):
+        raise ValueError(
+            "grid sizes/scale must be positive and uncertainty non-negative")
+    if np.any(target_uncertainty < 0.0):
+        raise ValueError("target uncertainty must be non-negative")
+
+    coefficient = np.zeros((K, K, Q), dtype=np.float64)
+    roles = np.full(K, 2, dtype=np.int64)
+    for q in range(Q):
+        positions = np.column_stack([
+            positions_xy[:, q], np.full(K, float(uav_height_m))])
+        velocities = np.column_stack([
+            velocities_xy[:, q], np.zeros(K, dtype=np.float64)])
+        tau, nu, alpha = compute_all_bistatic_params(
+            positions,
+            velocities,
+            targets[q:q + 1],
+            target_velocity[q:q + 1],
+            roles,
+            float(fc_hz),
+            float(rcs_m2),
+            role_agnostic=True,
+        )
+        endpoint_range = np.linalg.norm(
+            positions - targets[q][None, :], axis=1)
+        for i in range(K):
+            if not seen[i, q]:
+                continue
+            for j in range(K):
+                if i == j or not seen[j, q]:
+                    continue
+                g_dd = compute_dd_effectiveness(
+                    float(tau[i, j, 0]),
+                    float(nu[i, j, 0]),
+                    float(delta_f_hz),
+                    float(symbol_period_s),
+                    int(delay_bins),
+                    int(doppler_bins),
+                    float(dd_gate_min),
+                )
+                if g_dd >= float(dd_gate_min):
+                    robust_pathloss = (
+                        endpoint_range[i]
+                        / (endpoint_range[i] + float(uncertainty[i])
+                           + float(target_uncertainty[q]))
+                    ) ** 2 * (
+                        endpoint_range[j]
+                        / (endpoint_range[j] + float(uncertainty[j])
+                           + float(target_uncertainty[q]))
+                    ) ** 2
+                    coefficient[i, j, q] = (
+                        float(coefficient_scale)
+                        * float(alpha[i, j, 0]) ** 2
+                        * float(robust_pathloss)
+                    )
+    return coefficient
+
+
+def plan_budget_certified_hyperedges(
+    coefficient: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    target_deficit: np.ndarray,
+    *,
+    p_fa: float,
+    p_d_floor: float,
+    target_pair_limit: int,
+    reports_per_receiver: int,
+) -> LocalHyperedgePlan:
+    """Replicate a budget-feasible structure solve from one public local view.
+
+    The solver receives only a graph reconstructed from delivered endpoint
+    messages.  Its returned support is a feasible primal certificate under
+    single-role, unique-owner, target-cardinality, receiver-capacity, and
+    per-UAV sensing-power constraints.  Global optimality is not claimed.
+    """
+    from uav_isac.physical.feasibility_oracle import (
+        solve_enumerated_role_ceiling_local_pairs,
+    )
+
+    gain = np.asarray(coefficient, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    deficit = np.asarray(target_deficit, dtype=np.float64).reshape(-1)
+    if gain.ndim != 3 or gain.shape[0] != gain.shape[1]:
+        raise ValueError("coefficient must have shape (K,K,Q)")
+    K, _, Q = gain.shape
+    if budget.shape != (K,) or deficit.shape != (Q,):
+        raise ValueError("budget/deficit shapes do not match coefficient")
+    priority = 1.0 + np.clip(deficit, 0.0, 1.0)
+    solution = solve_enumerated_role_ceiling_local_pairs(
+        gain,
+        budget,
+        P_FA=float(p_fa),
+        p_d_floor=float(p_d_floor),
+        target_pair_limit=int(target_pair_limit),
+        reports_per_receiver=int(reports_per_receiver),
+        target_priority=priority,
+    )
+    scores = {
+        edge: float(
+            gain[edge] * solution.sensing_power_w[edge[0], edge[2]])
+        for edge in solution.selected_set
+    }
+    role = np.zeros(K, dtype=bool)
+    if solution.tx_indices:
+        role[np.asarray(solution.tx_indices, dtype=np.int64)] = True
+    return LocalHyperedgePlan(
+        selected=tuple(solution.selected_set),
+        proxy_target_value=np.asarray(solution.D_q, dtype=np.float64),
+        proxy_scores=scores,
+        role_mask=role,
+    )
+
+
+def plan_reserved_endpoint_hyperedges(
+    coefficient: np.ndarray,
+    visible: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    *,
+    viewer: int,
+    tx_role_mask: np.ndarray,
+    target_pair_limit: int,
+) -> LocalHyperedgePlan:
+    """Create one endpoint-local plan under stable role/owner reservations.
+
+    Every Rx ranks only Tx packets present in its inbox; a Tx independently
+    endorses each visible Rx edge. Hence an endorsement depends only on the two
+    endpoints, not on identical global snapshots. ``mutual_endpoint_consensus``
+    subsequently elects one owner from mutually endorsed receiver bids.
+    """
+    gain = np.asarray(coefficient, dtype=np.float64)
+    seen = np.asarray(visible, dtype=bool)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    role = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    if gain.ndim != 3 or gain.shape[0] != gain.shape[1]:
+        raise ValueError("coefficient must have shape (K,K,Q)")
+    K, _, Q = gain.shape
+    if seen.shape != (K, Q) or budget.shape != (K,) or role.shape != (K,):
+        raise ValueError("reserved endpoint input shapes are inconsistent")
+    if not 0 <= int(viewer) < K:
+        raise ValueError("viewer index is out of range")
+    tx_nodes = tuple(int(i) for i in np.flatnonzero(role))
+    rx_nodes = tuple(int(i) for i in np.flatnonzero(~role))
+    if not tx_nodes or not rx_nodes:
+        return LocalHyperedgePlan(
+            selected=(), proxy_target_value=np.zeros(Q),
+            proxy_scores={}, role_mask=role.copy())
+    limit = max(1, int(target_pair_limit))
+    selected: list[Hyperedge] = []
+    scores: Dict[Hyperedge, float] = {}
+    target_value = np.zeros(Q, dtype=np.float64)
+    for q in range(Q):
+        if int(viewer) in rx_nodes:
+            owner = int(viewer)
+            incoming = []
+            for tx in tx_nodes:
+                if not (seen[tx, q] and seen[owner, q]):
+                    continue
+                score = float(budget[tx] * gain[tx, owner, q])
+                if score > 0.0:
+                    incoming.append((score, (tx, owner, q)))
+            incoming.sort(key=lambda item: (-item[0], item[1]))
+            for score, edge in incoming[:limit]:
+                selected.append(edge)
+                scores[edge] = score
+                target_value[q] += score
+        elif role[int(viewer)]:
+            tx = int(viewer)
+            for owner in rx_nodes:
+                if seen[tx, q] and seen[owner, q]:
+                    score = float(budget[tx] * gain[tx, owner, q])
+                    if score > 0.0:
+                        edge = (tx, owner, q)
+                        selected.append(edge)
+                        scores[edge] = score
+                        target_value[q] += score
+    return LocalHyperedgePlan(
+        selected=tuple(sorted(selected)),
+        proxy_target_value=target_value,
+        proxy_scores=scores,
+        role_mask=role.copy(),
+    )
+
+
+def refine_role_mask_local_search(
+    coefficient: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    *,
+    target_pair_limit: int,
+    initial_role_mask: np.ndarray | None = None,
+    max_rounds: int | None = None,
+) -> np.ndarray:
+    """Find a polynomial-time max-min Tx/Rx cut from public coefficients.
+
+    For a role cut, each target's ceiling is the strongest receiver-local sum
+    of at most ``target_pair_limit`` incoming Tx contributions.  Candidate
+    one-node flips and Tx/Rx swaps are compared by the sorted vector of target
+    ceilings, which is the lexicographic max-min order.  Each accepted move
+    strictly improves that finite objective, so the procedure terminates at a
+    1-flip/1-swap local optimum.  It avoids the ``2**K`` role enumeration used
+    by the diagnostic replicated-global solver.
+    """
+    gain = np.asarray(coefficient, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    if gain.ndim != 3 or gain.shape[0] != gain.shape[1]:
+        raise ValueError("coefficient must have shape (K,K,Q)")
+    K, _, Q = gain.shape
+    if budget.shape != (K,):
+        raise ValueError("sensing_budget_w must have shape (K,)")
+    if not (np.all(np.isfinite(gain)) and np.all(np.isfinite(budget))):
+        raise ValueError("role-refinement inputs must be finite")
+    if initial_role_mask is None:
+        role = np.arange(K, dtype=np.int64) % 2 == 0
+    else:
+        role = np.asarray(initial_role_mask, dtype=bool).reshape(-1).copy()
+        if role.shape != (K,):
+            raise ValueError("initial_role_mask must have shape (K,)")
+    if K < 2:
+        return role
+    if not np.any(role) or np.all(role):
+        role = np.arange(K, dtype=np.int64) % 2 == 0
+    limit = max(1, int(target_pair_limit))
+
+    def target_ceiling(candidate: np.ndarray) -> np.ndarray:
+        tx_nodes = np.flatnonzero(candidate)
+        rx_nodes = np.flatnonzero(~candidate)
+        values = np.zeros(Q, dtype=np.float64)
+        for q in range(Q):
+            for rx in rx_nodes:
+                incoming = np.sort(
+                    budget[tx_nodes] * gain[tx_nodes, int(rx), q])
+                if incoming.size:
+                    values[q] = max(
+                        values[q], float(np.sum(incoming[-limit:])))
+        return values
+
+    def key(candidate: np.ndarray) -> tuple:
+        values = target_ceiling(candidate)
+        # Rounded physics values prevent machine-epsilon changes from causing
+        # different discrete roles on otherwise identical quantized caches.
+        fairness = tuple(np.round(np.sort(values), 15).tolist())
+        return fairness + (
+            round(float(np.sum(values)), 15),
+            tuple(bool(value) for value in candidate),
+        )
+
+    current_key = key(role)
+    rounds = max(1, int(max_rounds if max_rounds is not None else 2 * K))
+    for _ in range(rounds):
+        best_role = role
+        best_key = current_key
+        candidates = []
+        for node in range(K):
+            candidate = role.copy()
+            candidate[node] = ~candidate[node]
+            if np.any(candidate) and not np.all(candidate):
+                candidates.append(candidate)
+        for tx in np.flatnonzero(role):
+            for rx in np.flatnonzero(~role):
+                candidate = role.copy()
+                candidate[int(tx)] = False
+                candidate[int(rx)] = True
+                candidates.append(candidate)
+        for candidate in candidates:
+            candidate_key = key(candidate)
+            if candidate_key > best_key:
+                best_key = candidate_key
+                best_role = candidate
+        if best_key <= current_key:
+            break
+        role = best_role
+        current_key = best_key
+    return role
+
+
+def plan_refined_endpoint_hyperedges(
+    coefficient: np.ndarray,
+    visible: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    *,
+    viewer: int,
+    target_pair_limit: int,
+) -> LocalHyperedgePlan:
+    """Endpoint proposal using a locally reconstructed max-min role cut."""
+    role = refine_role_mask_local_search(
+        coefficient,
+        sensing_budget_w,
+        target_pair_limit=target_pair_limit,
+    )
+    return plan_reserved_endpoint_hyperedges(
+        coefficient,
+        visible,
+        sensing_budget_w,
+        viewer=viewer,
+        tx_role_mask=role,
+        target_pair_limit=target_pair_limit,
+    )
+
+
+def select_sparse_tx_coalition_role(
+    coefficient: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    *,
+    target_pair_limit: int,
+    max_transmitters: int,
+) -> np.ndarray:
+    """Select a budget-coupled sparse Tx coalition in polynomial time.
+
+    For each coalition of at most ``max_transmitters`` nodes, every target
+    nominates the receiver with the largest coalition ceiling.  The resulting
+    fixed structure is then scored by the exact per-UAV max-min power LP, so a
+    transmitter's budget cannot be reused independently by every target.  For
+    fixed coalition size ``r`` the search is ``O(K**r)`` rather than ``2**K``.
+    """
+    from uav_isac.coordination.maxmin_power import (
+        solve_fixed_structure_maxmin_power_lp,
+    )
+
+    gain = np.asarray(coefficient, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    if gain.ndim != 3 or gain.shape[0] != gain.shape[1]:
+        raise ValueError("coefficient must have shape (K,K,Q)")
+    K, _, Q = gain.shape
+    if budget.shape != (K,):
+        raise ValueError("sensing_budget_w must have shape (K,)")
+    if not (np.all(np.isfinite(gain)) and np.all(np.isfinite(budget))):
+        raise ValueError("coalition inputs must be finite")
+    if K < 2:
+        return np.zeros(K, dtype=bool)
+    limit = max(1, int(target_pair_limit))
+    coalition_limit = max(1, min(int(max_transmitters), K - 1))
+    eligible = tuple(int(i) for i in np.flatnonzero(budget > 0.0))
+    best_key = None
+    best_role = np.arange(K, dtype=np.int64) % 2 == 0
+    for size in range(1, min(coalition_limit, len(eligible)) + 1):
+        for coalition in combinations(eligible, size):
+            receivers = tuple(i for i in range(K) if i not in coalition)
+            if not receivers:
+                continue
+            fixed_gain = np.zeros((K, Q), dtype=np.float64)
+            feasible = True
+            for q in range(Q):
+                owners = []
+                for owner in receivers:
+                    ranked = sorted(
+                        coalition,
+                        key=lambda tx: (
+                            budget[tx] * gain[tx, owner, q], -tx),
+                        reverse=True,
+                    )
+                    chosen = tuple(
+                        tx for tx in ranked[:limit]
+                        if gain[tx, owner, q] > 0.0
+                    )
+                    if chosen:
+                        owners.append((
+                            float(sum(
+                                budget[tx] * gain[tx, owner, q]
+                                for tx in chosen)),
+                            -int(owner), int(owner), chosen,
+                        ))
+                if not owners:
+                    feasible = False
+                    break
+                _ceiling, _tie, owner, chosen = max(owners)
+                for tx in chosen:
+                    fixed_gain[int(tx), q] = gain[int(tx), int(owner), q]
+            if not feasible:
+                continue
+            result = solve_fixed_structure_maxmin_power_lp(
+                fixed_gain, budget)
+            target_value = np.asarray(result.deflection, dtype=np.float64)
+            score = tuple(np.round(np.sort(target_value), 15).tolist()) + (
+                round(float(np.sum(target_value)), 15),
+                -len(coalition),
+                tuple(-int(node) for node in coalition),
+            )
+            if best_key is None or score > best_key:
+                best_key = score
+                best_role = np.zeros(K, dtype=bool)
+                best_role[np.asarray(coalition, dtype=np.int64)] = True
+    return best_role
+
+
+def plan_sparse_coalition_endpoint_hyperedges(
+    coefficient: np.ndarray,
+    visible: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    *,
+    viewer: int,
+    target_pair_limit: int,
+    max_transmitters: int,
+) -> LocalHyperedgePlan:
+    """Endpoint proposals under a public, budget-coupled sparse Tx cut."""
+    role = select_sparse_tx_coalition_role(
+        coefficient,
+        sensing_budget_w,
+        target_pair_limit=target_pair_limit,
+        max_transmitters=max_transmitters,
+    )
+    return plan_reserved_endpoint_hyperedges(
+        coefficient,
+        visible,
+        sensing_budget_w,
+        viewer=viewer,
+        tx_role_mask=role,
+        target_pair_limit=target_pair_limit,
+    )
 
 
 def _edge_score(
@@ -322,23 +1779,34 @@ def mutual_endpoint_consensus(
         if edge in selected_sets[tx] and edge in selected_sets[rx]:
             candidates.add(edge)
 
-    # Mutual endorsement already preserves each endpoint's local single-role
-    # constraint. Retain a deterministic target-capacity safety projection for
-    # disconnected local views at larger K.
-    by_target = {q: [] for q in range(int(num_targets))}
+    # Mutual endorsement preserves the stable endpoint roles. Receiver-local
+    # detection additionally requires one owner per target: aggregate the
+    # mutually endorsed support by receiver, elect one owner, then retain at
+    # most the target edge limit. This is the deterministic reduction every
+    # node can reproduce from the same endorsement set in a commit round.
+    by_target_owner: dict[int, dict[int, list[tuple[float, Hyperedge]]]] = {
+        q: {} for q in range(int(num_targets))}
     for edge in sorted(candidates):
         tx, rx, target = edge
         support = 0.5 * (
             float(local[tx].proxy_scores.get(edge, 0.0))
             + float(local[rx].proxy_scores.get(edge, 0.0))
         )
-        by_target[target].append((support, edge))
+        by_target_owner[target].setdefault(rx, []).append((support, edge))
 
     chosen = []
     limit = max(1, int(target_pair_limit))
     for target in range(int(num_targets)):
+        owner_groups = by_target_owner[target]
+        if not owner_groups:
+            continue
+        owner = min(
+            owner_groups,
+            key=lambda rx: (
+                -sum(score for score, _edge in owner_groups[rx]), rx),
+        )
         ranked = sorted(
-            by_target[target], key=lambda item: (-item[0], item[1]))
+            owner_groups[owner], key=lambda item: (-item[0], item[1]))
         chosen.extend(edge for _, edge in ranked[:limit])
 
     # A final explicit invariant check makes integration errors fail closed.

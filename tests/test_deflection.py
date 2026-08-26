@@ -5,10 +5,46 @@ import pytest
 from uav_isac.physical.deflection import (
     compute_raw_deflection,
     DeflectionComputer,
+    validate_cpi_schedule,
 )
 
 
 class TestRawDeflection:
+    def test_single_otfs_frame_fits_control_window(self):
+        duration, maximum = validate_cpi_schedule(1, 16, 64e-6, 0.1)
+        assert duration == pytest.approx(0.001024)
+        assert maximum == 97
+
+    def test_cpi_schedule_rejects_physical_time_overrun(self):
+        with pytest.raises(ValueError, match="exceed"):
+            validate_cpi_schedule(128, 16, 64e-6, 0.1)
+
+    def test_energy_normalization_is_dimensionless(self):
+        """W*s divided by W*s closes the raw-deflection unit audit."""
+        power_w = 2.0
+        alpha = 0.5
+        symbol_s = 4.0e-6
+        noise_w = 0.25
+        value = compute_raw_deflection(
+            alpha, power_w, symbol_s, 4, 2, noise_w)
+        signal_energy_j = power_w * alpha**2 * (2 * symbol_s)
+        noise_psd_j = noise_w / (4 / symbol_s)
+        assert value == pytest.approx(signal_energy_j / noise_psd_j)
+
+    def test_symbol_time_cancels_for_fixed_in_band_noise_power(self):
+        first = compute_raw_deflection(0.2, 1.0, 1e-6, 8, 4, 0.1)
+        second = compute_raw_deflection(0.2, 1.0, 2e-6, 8, 4, 0.1)
+        assert first == pytest.approx(second)
+
+    def test_detector_convention_scale_is_explicit_and_linear(self):
+        base = compute_raw_deflection(0.2, 1.0, 1e-6, 8, 4, 0.1)
+        doubled = compute_raw_deflection(
+            0.2, 1.0, 1e-6, 8, 4, 0.1, c_det=2.0)
+        assert doubled == pytest.approx(2.0 * base)
+        with pytest.raises(ValueError):
+            compute_raw_deflection(
+                0.2, 1.0, 1e-6, 8, 4, 0.1, c_det=0.0)
+
     def test_increases_with_snr(self):
         """Higher SNR → higher Deflection."""
         alpha_high = 1e-6

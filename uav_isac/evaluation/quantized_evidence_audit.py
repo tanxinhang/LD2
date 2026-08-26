@@ -46,22 +46,28 @@ def _apply_content_control(
 def evidence_inclusion(
     receiver_deflection: np.ndarray,
     topk: int,
+    fusion_owner: np.ndarray,
     owner_aware: bool = False,
     delivery_matrix: Optional[np.ndarray] = None,
     peer_deflection_estimate: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
-    """Build pre-evidence owner and peer-routing masks."""
+    """Build peer-routing masks for an explicit scheduled-owner directory."""
     receiver_d = np.asarray(receiver_deflection, dtype=np.float64)
     if receiver_d.ndim != 3:
         raise ValueError("receiver_deflection must have shape (F, K, Q)")
     frames, agents, targets = receiver_d.shape
-    owner = np.argmax(receiver_d, axis=1).astype(np.int64)
+    owner = np.asarray(fusion_owner, dtype=np.int64)
+    if owner.shape != (frames, targets):
+        raise ValueError("fusion_owner must have shape (F, Q)")
+    if np.any((owner < -1) | (owner >= agents)):
+        raise ValueError("fusion_owner contains an invalid receiver index")
+    owned = owner >= 0
     owner_mask = np.zeros(
         (frames, agents, targets), dtype=bool)
-    frame_index = np.arange(frames)[:, None]
-    target_index = np.arange(targets)[None, :]
-    owner_mask[frame_index, owner, target_index] = True
-    selection_quality = receiver_d
+    frame_index, target_index = np.nonzero(owned)
+    owner_mask[frame_index, owner[owned], target_index] = True
+    selection_quality = np.where(
+        owned[:, None, :], receiver_d, 0.0)
     if owner_aware:
         selection_quality = receiver_d.copy()
         selection_quality[owner_mask] = 0.0
@@ -72,14 +78,11 @@ def evidence_inclusion(
         if delivery.shape != (frames, agents, agents):
             raise ValueError(
                 "delivery_matrix must have shape (F, K, K)")
-        source_index = np.arange(agents)[None, :, None]
-        frame_for_delivery = np.arange(frames)[:, None, None]
-        owner_for_delivery = owner[:, None, :]
-        delivered_to_owner = delivery[
-            frame_for_delivery,
-            source_index,
-            owner_for_delivery,
-        ]
+        delivered_to_owner = np.zeros_like(peer_mask)
+        for frame in range(frames):
+            for target in np.flatnonzero(owned[frame]):
+                delivered_to_owner[frame, :, target] = delivery[
+                    frame, :, owner[frame, target]]
         peer_mask &= delivered_to_owner
     included = owner_mask | peer_mask
     fused_d = np.sum(receiver_d * included, axis=1)
@@ -119,6 +122,7 @@ def evidence_inclusion(
 def calibrate_standardized_threshold(
     receiver_deflection: np.ndarray,
     *,
+    fusion_owner: np.ndarray,
     topk: int,
     bits: int,
     clip_max: float,
@@ -141,6 +145,7 @@ def calibrate_standardized_threshold(
     routing = evidence_inclusion(
         receiver_d,
         topk,
+        fusion_owner,
         owner_aware=owner_aware,
         delivery_matrix=delivery_matrix,
         peer_deflection_estimate=peer_deflection_estimate,
@@ -157,9 +162,20 @@ def calibrate_standardized_threshold(
 
     noise = rng.standard_normal((count, agents))
     local_h0 = -0.5 * d + np.sqrt(d) * noise
-    quantized_h0 = quantize_llr(local_h0, bits, clip_max)
-    quantized_h0 = _apply_content_control(
-        quantized_h0, content_mode)
+    normalized_content = str(content_mode).strip().lower()
+    if normalized_content == "standardized_score":
+        quantized_score = quantize_llr(
+            np.where(d > 0.0, noise, 0.0), bits, clip_max)
+        if peer_deflection_estimate is None:
+            d_hat = d
+        else:
+            d_hat = np.asarray(peer_deflection_estimate, dtype=np.float64)[
+                frame_ids, :, target_ids]
+        quantized_h0 = -0.5 * d_hat + np.sqrt(d_hat) * quantized_score
+    else:
+        quantized_h0 = quantize_llr(local_h0, bits, clip_max)
+        quantized_h0 = _apply_content_control(
+            quantized_h0, content_mode)
     owner_values = local_h0[np.arange(count), owner]
     fused_h0 = owner_values + np.sum(
         np.where(peer, quantized_h0, 0.0), axis=1)
@@ -197,6 +213,7 @@ def calibrate_standardized_threshold(
 def simulate_quantized_detection(
     receiver_deflection: np.ndarray,
     *,
+    fusion_owner: np.ndarray,
     topk: int,
     bits: int,
     clip_max: float,
@@ -216,6 +233,7 @@ def simulate_quantized_detection(
     routing = evidence_inclusion(
         receiver_d,
         topk,
+        fusion_owner,
         owner_aware=owner_aware,
         delivery_matrix=delivery_matrix,
         peer_deflection_estimate=peer_deflection_estimate,
@@ -244,16 +262,42 @@ def simulate_quantized_detection(
         noise_h1 = rng.standard_normal(shape)
         local_h0 = -0.5 * d[None] + np.sqrt(d[None]) * noise_h0
         local_h1 = +0.5 * d[None] + np.sqrt(d[None]) * noise_h1
-        quantized_h0 = quantize_llr(local_h0, bits, clip_max)
-        quantized_h1 = quantize_llr(local_h1, bits, clip_max)
-        quantized_h0 = _apply_content_control(
-            quantized_h0, content_mode)
-        quantized_h1 = _apply_content_control(
-            quantized_h1,
-            content_mode,
-            null_reference=quantize_llr(
-                local_h0, bits, clip_max),
-        )
+        normalized_content = str(content_mode).strip().lower()
+        if normalized_content == "standardized_score":
+            if peer_deflection_estimate is None:
+                d_hat = d
+            else:
+                d_hat = np.asarray(
+                    peer_deflection_estimate,
+                    dtype=np.float64,
+                )[start:stop]
+            raw_peer_h0 = np.where(d[None] > 0.0, noise_h0, 0.0)
+            raw_peer_h1 = np.where(
+                d[None] > 0.0, np.sqrt(d[None]) + noise_h1, 0.0)
+            quantized_peer_h0 = quantize_llr(
+                raw_peer_h0, bits, clip_max)
+            quantized_peer_h1 = quantize_llr(
+                raw_peer_h1, bits, clip_max)
+            quantized_h0 = (
+                -0.5 * d_hat[None]
+                + np.sqrt(d_hat[None]) * quantized_peer_h0)
+            quantized_h1 = (
+                -0.5 * d_hat[None]
+                + np.sqrt(d_hat[None]) * quantized_peer_h1)
+        else:
+            raw_peer_h0 = local_h0
+            raw_peer_h1 = local_h1
+            quantized_peer_h0 = quantize_llr(
+                local_h0, bits, clip_max)
+            quantized_peer_h1 = quantize_llr(
+                local_h1, bits, clip_max)
+            quantized_h0 = _apply_content_control(
+                quantized_peer_h0, content_mode)
+            quantized_h1 = _apply_content_control(
+                quantized_peer_h1,
+                content_mode,
+                null_reference=quantized_peer_h0,
+            )
         owner_broadcast = owner_mask[None]
         peer_broadcast = peer_mask[None]
         fused_h0 = np.sum(np.where(
@@ -291,7 +335,8 @@ def simulate_quantized_detection(
 
         transmitted = np.broadcast_to(peer_broadcast, local_h0.shape)
         for raw, quantized in (
-                (local_h0, quantized_h0), (local_h1, quantized_h1)):
+                (raw_peer_h0, quantized_peer_h0),
+                (raw_peer_h1, quantized_peer_h1)):
             chosen_raw = raw[transmitted]
             chosen_quantized = quantized[transmitted]
             if chosen_raw.size == 0:
@@ -345,68 +390,6 @@ def episode_detection_metrics(
     return np.asarray(rows, dtype=np.float64)
 
 
-def summarize_quantized_method(
-    method_pd: np.ndarray,
-    local_pd: np.ndarray,
-    central_pd: np.ndarray,
-    episode_index: np.ndarray,
-    *,
-    steady_window: int = 20,
-    bootstrap_samples: int = 2000,
-    bootstrap_seed: int = 20260726,
-) -> Dict[str, object]:
-    """Summarize paired recovery of central evidence gain."""
-    method_metrics = episode_detection_metrics(
-        method_pd, episode_index, steady_window)
-    local_metrics = episode_detection_metrics(
-        local_pd, episode_index, steady_window)
-    central_metrics = episode_detection_metrics(
-        central_pd, episode_index, steady_window)
-    if not (
-        method_metrics.shape == local_metrics.shape == central_metrics.shape
-    ):
-        raise ValueError("method/local/central episode metrics must align")
-    names = ("steady", "weak3", "worst")
-    rng = np.random.default_rng(int(bootstrap_seed))
-    episode_count = len(method_metrics)
-    indices = rng.integers(
-        0, episode_count,
-        size=(max(1, int(bootstrap_samples)), episode_count),
-    )
-    result: Dict[str, object] = {
-        "episode_count": int(episode_count),
-    }
-    for column, name in enumerate(names):
-        method_mean = float(np.mean(method_metrics[:, column]))
-        local_mean = float(np.mean(local_metrics[:, column]))
-        central_mean = float(np.mean(central_metrics[:, column]))
-        delta = method_metrics[:, column] - local_metrics[:, column]
-        oracle = central_metrics[:, column] - local_metrics[:, column]
-        recovery = (
-            (method_mean - local_mean) / (central_mean - local_mean)
-            if central_mean - local_mean > 1e-12 else 0.0)
-        boot_delta = np.mean(delta[indices], axis=1)
-        boot_oracle = np.mean(oracle[indices], axis=1)
-        boot_recovery = np.divide(
-            boot_delta,
-            boot_oracle,
-            out=np.zeros_like(boot_delta),
-            where=boot_oracle > 1e-12,
-        )
-        result[name] = method_mean
-        result[f"{name}_delta_vs_local"] = float(np.mean(delta))
-        result[f"{name}_delta_vs_local_ci95"] = [
-            float(np.quantile(boot_delta, 0.025)),
-            float(np.quantile(boot_delta, 0.975)),
-        ]
-        result[f"{name}_recovery"] = float(recovery)
-        result[f"{name}_recovery_ci95"] = [
-            float(np.quantile(boot_recovery, 0.025)),
-            float(np.quantile(boot_recovery, 0.975)),
-        ]
-    return result
-
-
 def summarize_paired_detection_delta(
     first_pd: np.ndarray,
     second_pd: np.ndarray,
@@ -424,8 +407,12 @@ def summarize_paired_detection_delta(
     if first.shape != second.shape:
         raise ValueError("paired method metrics must align")
     delta = first - second
-    rng = np.random.default_rng(int(bootstrap_seed))
+    # Audit 2026-08-17: guard empty input (paired-delta and central-delta
+    # summaries use the same empty-input convention).
     episode_count = len(delta)
+    if episode_count == 0:
+        return {"episode_count": 0}
+    rng = np.random.default_rng(int(bootstrap_seed))
     indices = rng.integers(
         0, episode_count,
         size=(max(1, int(bootstrap_samples)), episode_count),

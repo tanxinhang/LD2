@@ -188,6 +188,26 @@ def audit_atomic_n5_event(
     selected = np.asarray(
         core._cached_p0_solution.z_selected, dtype=bool).copy()
     state = coordinator.get_state()
+    # Audit 2026-08-17: resolve() leaves role=None when the last resolve ran
+    # with an empty candidate set; np.asarray(None, dtype=np.int8) raised
+    # TypeError.  Mirror has_proxy_positive_atomic_n5 and return a no-op result.
+    if state.get("role") is None:
+        return {
+            "episode_seed": int(episode_seed),
+            "frame": int(frame),
+            "target_mode": normalized,
+            "n5_rebuild_scope": normalized_rebuild_scope,
+            "neighborhood": normalized_neighborhood,
+            "atomic_only": True,
+            "candidate_count_proxy_weak": 0,
+            "candidate_count_all": 0,
+            "evaluated_atomic_candidate_count": 0,
+            "evaluated_candidate_count": 0,
+            "candidate_truncated": False,
+            "choice": "no_op",
+            "candidate_index": None,
+            "note": "coordinator role unresolved (empty candidate set); no-op",
+        }
     role = np.asarray(state["role"], dtype=np.int8)
     role, owner = role_owner_from_structure(
         selected, fallback_role=role)

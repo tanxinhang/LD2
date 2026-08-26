@@ -1,0 +1,104 @@
+{
+  "protocol_id": "LD3-tailgate-safe-confirm-v1",
+  "sealed_on_local_date": "2026-08-24",
+  "status_at_creation": "sealed_unexposed",
+  "purpose": "Paired independent confirmation of quantization-robust distributed movement safety for K10/Q10 and K12/Q12.",
+  "seed_generation": {
+    "rule": "100000000 + (uint64_be(SHA256('LD3-tailgate-safe-confirm-v1:' + decimal_index)[0:8]) mod 2000000000)",
+    "indices": [0, 24],
+    "selection_or_rejection_after_generation": "none"
+  },
+  "paired_seeds": [
+    1019466100,
+    1466409252,
+    272618232,
+    2005825564,
+    1969862817,
+    1914864024,
+    1432484627,
+    1245781959,
+    530968976,
+    2063700163,
+    597462755,
+    528245837,
+    1992563642,
+    1080924982,
+    1329066063,
+    330692561,
+    1224507828,
+    529576084,
+    1609364221,
+    647973436,
+    1834410891,
+    1491304537,
+    1755461577,
+    1704378734,
+    404347358
+  ],
+  "stages": {
+    "stage_1_smoke": [1019466100, 1466409252, 272618232, 2005825564, 1969862817],
+    "stage_2_extension": [1914864024, 1432484627, 1245781959, 530968976, 2063700163],
+    "stage_3_final": [597462755, 528245837, 1992563642, 1080924982, 1329066063, 330692561, 1224507828, 529576084, 1609364221, 647973436, 1834410891, 1491304537, 1755461577, 1704378734, 404347358]
+  },
+  "candidate_configs": {
+    "k10": {
+      "path": "config/exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40_safe.yaml",
+      "sha256": "5648E52DE011A39C18E32B93D6DAAE8C47437F9793433DE38D0D097739AFC608"
+    },
+    "k12": {
+      "path": "config/exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40_safe.yaml",
+      "sha256": "4A8BCBBF15193188AFCB19C631130909D388F20EFE01A90F33B4E394DB8BACB2"
+    }
+  },
+  "paired_comparator_configs": {
+    "k10": {
+      "path": "config/exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40.yaml",
+      "sha256": "616C341EB6ABB1B47B5ADF7BF8C4F2D38694F4CF7E2B2324B298D48894EBB3D2"
+    },
+    "k12": {
+      "path": "config/exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40.yaml",
+      "sha256": "95945C0A2D4917ACC030FE615176871C9DA1F6C07BDEB39DBEE978DD133B0CB6"
+    }
+  },
+  "warm_start": {
+    "path": "results/_audit_k10_tail40_safe_robust2/best_restored.pt",
+    "sha256": "8B3BB61FC7BCB04042C29A640880291C6F658E09A2D7426B18BDA28607C1453D"
+  },
+  "bound_source_files": {
+    "uav_isac/coordination/hyperedge.py": "2A64D7198FFB5E4DCEE479D8B147E4E013715F9E55DB48EA629C3D15D5C41C68",
+    "uav_isac/environment/env_core.py": "7199E83D8D531404B405A9E3C7D1B1F5EA07619B2017F14E43636BCB31FFAAEB",
+    "uav_isac/agents/trainer.py": "ABAD03AEC9F847397C6F6541F7BB1917E34CC7D55A32C2F5FFAD9C92DBD8BE77",
+    "config/params.py": "2F8F130C469B673BA6BA2DA08CF47F67DE28DCBDD90CE8A0A38FADE8AC727E86",
+    "tests/test_hyperedge_negotiation.py": "417C74C5EB9E6A4FF71D06503C58973D65156682535AE651EE97067733D407BB"
+  },
+  "stage_1_continue_rules": {
+    "candidate_physical_separation_violations": 0,
+    "candidate_continuous_separation_violations": 0,
+    "candidate_numeric_fail_closed_inside_robust_invariant_calls": 0,
+    "minimum_qos_successes_per_scale": 4,
+    "qos_trials_per_scale": 5
+  },
+  "final_primary_rules": {
+    "candidate_physical_separation_violations": 0,
+    "candidate_continuous_separation_violations": 0,
+    "candidate_minimum_distance_m": 20.0,
+    "candidate_numeric_fail_closed_inside_robust_invariant_calls": 0,
+    "minimum_qos_successes_per_scale": 23,
+    "qos_trials_per_scale": 25,
+    "per_episode_qos": {
+      "steady_P_D_min": 0.8,
+      "weak3_P_D_min": 0.7,
+      "worst_P_D_min": 0.6
+    },
+    "paired_mean_worst_P_D_noninferiority_margin": 0.01,
+    "communication_delivery_rate_min": 1.0,
+    "communication_deadline_violation_rate_max": 0.0,
+    "rf_power_budget_violation_w_max": 0.0
+  },
+  "analysis_policy": {
+    "pairing": "same seed, scale, checkpoint, channel and episode horizon for candidate and comparator",
+    "timing_metrics": "report descriptively; not a cross-hardware acceptance gate",
+    "outside_invariant_fail_closed": "report separately; never relabel as a numerical solver failure",
+    "algorithm_changes_after_unsealing": "create a new protocol id and new seed bank"
+  }
+}

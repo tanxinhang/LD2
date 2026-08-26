@@ -57,7 +57,10 @@ class UAVISACEnv(gymnasium.Env):
         self.max_dp = config.uav.v_max * config.scenario.dt
 
         # Per-agent observation space
-        obs_dim = self.core.obs_builder.get_obs_dim()
+        # Audit 2026-08-17: use core.get_obs_dim() (accounts for history
+        # stacking) instead of obs_builder.get_obs_dim() (single-frame only),
+        # otherwise obs_history_frames>1 violates the declared Box shape.
+        obs_dim = self.core.get_obs_dim()
         self.observation_space = spaces.Dict({
             str(k): spaces.Box(
                 low=-np.inf, high=np.inf,
@@ -99,8 +102,7 @@ class UAVISACEnv(gymnasium.Env):
         """
         if seed is not None:
             self.seed_val = seed
-            self.rng = np.random.default_rng(seed)
-            self.core.rng = self.rng
+            self.rng = self.core.reseed(seed)
 
         obs, info = self.core.reset()
         self.current_obs = obs
@@ -168,6 +170,11 @@ class UAVISACEnv(gymnasium.Env):
                     int(q) for _, _, q
                     in step_info.p0_solution.selected_set
                 }) / max(self.Q, 1)),
+            'p0_target_selected_mask': np.asarray([
+                any(int(edge_q) == q for _, _, edge_q
+                    in step_info.p0_solution.selected_set)
+                for q in range(self.Q)
+            ], dtype=np.float64),
             'n_duplex': step_info.n_duplex,
             'multistatic_subslot_enabled': bool(
                 self.core._multistatic_subslot_enabled),
@@ -224,7 +231,9 @@ class UAVISACEnv(gymnasium.Env):
         lines.append(f"P_D per target: {info.P_D_q}")
 
         for k, u in enumerate(self.core.uavs):
-            role_str = ['tx', 'rx', 'idle'][u.role]
+            # Audit 2026-08-17: P0 can assign role code 3 (dual TX+RX endpoint),
+            # which is out of range for the 3-element list -> IndexError.
+            role_str = ['tx', 'rx', 'idle', 'duplex'][u.role % 4]
             lines.append(
                 f"  UAV{k}: pos=({u.pos[0]:.0f},{u.pos[1]:.0f}) "
                 f"battery={u.battery:.0f}J role={role_str}"

@@ -1,0 +1,15 @@
+# V2 development branch: ACK-free self-stabilizing movement semantics.
+extends: exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40_safe.yaml
+
+marl:
+  distributed_movement_local_assignment_cache_enabled: true
+  distributed_movement_public_max_age_frames: 1
+  distributed_movement_stale_fail_closed: true
+  distributed_movement_execute_projected_public_action: true
+  distributed_movement_outside_invariant_recovery_enabled: true
+  distributed_movement_outside_invariant_recovery_gain: 1.0
+  distributed_movement_independently_composable_safety: true
+  # 7.1 m two-endpoint quantization bound plus 5 m per AoI frame.
+  distributed_movement_safety_margin_m: 7.1
+  distributed_movement_safety_margin_per_age_m: 5.0
+  comm_message_ttl_frames: 1

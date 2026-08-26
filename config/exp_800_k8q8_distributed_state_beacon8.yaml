@@ -1,0 +1,22 @@
+# 8x8 scale-up of the distributed endpoint-state beacon and locally replicated
+# minimum-bottleneck geometry responsibility. Centralized P0 event/fallback is
+# disabled; L1 and partial-loss commit/ACK remain explicit research limits.
+extends: exp_800_k8q8_budget_coupled_p0_enumerated.yaml
+
+marl:
+  p0_maxmin_event_triggered_enabled: false
+  p0_maxmin_bypass_commitment_filter: false
+  hyperedge_negotiation_enabled: true
+  hyperedge_pair_score_mode: budget_reconstructable
+  hyperedge_coordination_mode: reserved_endpoint
+  hyperedge_tx_coalition_max: 2
+  hyperedge_robust_quantization_enabled: true
+  distributed_bottleneck_matching_movement_enabled: true
+  hyperedge_state_stream_enabled: true
+  hyperedge_protocol_only_enabled: true
+  hyperedge_state_bits_per_dim: 8
+  hyperedge_share_topk: 1
+  hyperedge_consensus_rounds: 1
+  hyperedge_assignment_hold_frames: 5
+  hyperedge_min_target_coverage: 1.0
+  hyperedge_safety_fallback_enabled: false

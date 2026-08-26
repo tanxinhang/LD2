@@ -198,7 +198,7 @@ def test_soft_local_commitment_keeps_graph_and_relaxes_uncertain_claims():
     assert metrics['learned_comm_commitment_hard_target_coverage'] == 1 / 3
 
 
-def test_joint_budget_is_exact_and_communication_repeats_each_frame():
+def test_joint_budget_is_capped_and_communication_repeats_each_frame():
     cfg = load_config('config/exp_800_q4_u2u_joint_isac.yaml')
     assert cfg.uav.P_isac_total == 1.0
     assert cfg.marl.comm_power_fraction_min == 0.0
@@ -225,11 +225,15 @@ def test_joint_budget_is_exact_and_communication_repeats_each_frame():
             messages, rates, fractions, weights)
         next_obs, _, _, _, info = env.step(actions)
         assert info['learned_comm_bits'] > 0.0
-        assert info['isac_max_power_balance_error_w'] < 1e-12
+        assert info['isac_max_power_budget_violation_w'] < 1e-12
         combined = (
             info['isac_per_uav_comm_power_w']
             + info['isac_per_uav_sensing_power_w'])
-        assert np.allclose(combined, cfg.uav.P_isac_total)
+        assert np.all(combined <= cfg.uav.P_isac_total + 1e-12)
+        assert np.all(
+            info['isac_per_uav_sensing_power_w']
+            <= cfg.uav.P_sense_max + 1e-12)
+        assert info['isac_unused_power_w'] > 0.0
         assert info['isac_target_power_w'].shape == (Q,)
         assert np.all(info['isac_target_power_w'] > 0.0)
         metadata = env.core._received_comm_meta.get(1, {}).get(0, {})

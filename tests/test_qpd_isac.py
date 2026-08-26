@@ -138,9 +138,11 @@ def test_qpd_protocol_uses_physical_tokens_and_keeps_exact_power_budget():
         info['isac_per_uav_comm_power_w']
         + info['isac_per_uav_sensing_power_w']
     )
-    np.testing.assert_allclose(
-        combined, env.cfg.uav.P_isac_total, atol=1e-12)
-    assert info['isac_max_power_balance_error_w'] < 1e-12
+    assert np.all(combined <= env.cfg.uav.P_isac_total + 1e-12)
+    assert np.all(
+        info['isac_per_uav_sensing_power_w']
+        <= env.cfg.uav.P_sense_max + 1e-12)
+    assert info['isac_max_power_budget_violation_w'] < 1e-12
     assert info['qpd_enabled'] == 1.0
 
 

@@ -23,13 +23,13 @@ def test_registry_covers_documented_formal_results():
 def test_assert_formal_gates_marks_quarantined_without_asserting():
     report = assert_formal_gates()
     for name, item in report.items():
-        if "6/6" in name:
+        if item.get("quarantined", False):
             assert item["status"] == "QUARANTINED"
-        elif "LCB enforced" in name:
+        elif not item.get("enforced", True):
             # LCB-enforced rows are audit-standard checks; a FAIL is a valid,
             # honest disclosure of insufficient statistical power (e.g. D1.5
             # blind 100: LCB 0.636 < 0.70), so it must not crash the batch.
-            assert item["status"] in ("PASS", "FAIL")
+            assert item["status"] in ("PASS", "DISCLOSED_FAIL")
         else:
             assert item["status"] == "PASS", name
             assert item["steady"] > 0
@@ -66,7 +66,7 @@ def test_d1_5_blind_registry_point_estimate_passes_lcb_disclosed():
     report = assert_formal_gates(results=point + lcb)
     assert report[point[0].name]["status"] == "PASS"
     assert report[point[0].name]["qos_feasible"] >= 0.70
-    assert report[lcb[0].name]["status"] == "FAIL"
+    assert report[lcb[0].name]["status"] == "DISCLOSED_FAIL"
     assert report[lcb[0].name]["error"]  # non-empty failure detail
 
 

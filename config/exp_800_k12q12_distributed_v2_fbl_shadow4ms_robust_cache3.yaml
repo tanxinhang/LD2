@@ -1,0 +1,11 @@
+# Gate B2: family-wise robust L0 power plus cache-3.  For 3 dB Gaussian
+# shadowing and K(K-1)=132 directed links, a 10 dB one-sided design margin is
+# approximately the union-bound scale needed for a fleet-level 95% all-link
+# event.  This is a model-based stress design, not a calibrated guarantee.
+extends: exp_800_k12q12_distributed_v2_fbl_shadow4ms.yaml
+
+marl:
+  analytical_comm_snr_margin_db: 10.0
+  comm_finite_blocklength_coding_snr_margin_db: 10.0
+  comm_message_ttl_frames: 3
+  distributed_movement_public_max_age_frames: 3

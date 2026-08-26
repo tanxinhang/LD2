@@ -1,4 +1,4 @@
-﻿"""Certified finite-horizon slow-geometry repair for static-target UAV ISAC.
+"""Certified finite-horizon slow-geometry repair for static-target UAV ISAC.
 
 The inverse-range radar law supplies an analytic proposal gradient.  The
 gradient never certifies execution: every finite trust-region candidate is

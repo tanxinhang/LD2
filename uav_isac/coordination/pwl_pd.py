@@ -102,6 +102,47 @@ def chord_lower_bound(p_fa: float, breakpoints: np.ndarray) -> np.ndarray:
     return slopes, intercepts
 
 
+def saturating_chord_lower_bound(
+    p_fa: float,
+    d_min: float,
+    d_max: float,
+    epsilon: float,
+    *,
+    saturation_probability: float = 0.999,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Conservative chord bound without catastrophic high-D dynamic range.
+
+    Chords are built only up to the Deflection attaining ``p_sat``.  If the
+    physical ceiling is larger, the constant line ``P_D(D_sat)`` is appended.
+    Monotonicity makes that line a valid lower bound for every ``D>=D_sat``;
+    taking the minimum with the chord extensions preserves the lower bound on
+    the complete ``[d_min,d_max]`` interval.
+    """
+    from uav_isac.physical.detection import (
+        minimum_deflection_for_detection_probability,
+    )
+
+    lower_d = float(d_min)
+    upper_d = float(d_max)
+    probability = float(saturation_probability)
+    if not 0.0 <= lower_d < upper_d or not 0.0 < float(epsilon):
+        raise ValueError("require 0 <= d_min < d_max and epsilon > 0")
+    if not float(p_fa) < probability < 1.0:
+        raise ValueError("saturation_probability must lie in (p_fa,1)")
+    saturation_d = float(minimum_deflection_for_detection_probability(
+        np.asarray([probability]), p_fa)[0])
+    chord_max = min(upper_d, max(lower_d + 1.0e-12, saturation_d))
+    breakpoints = curvature_breakpoints(
+        p_fa, lower_d, chord_max, float(epsilon))
+    slopes, intercepts = chord_lower_bound(p_fa, breakpoints)
+    if upper_d > saturation_d and saturation_d > lower_d:
+        slopes = np.concatenate([slopes, np.asarray([0.0])])
+        intercepts = np.concatenate([
+            intercepts, np.asarray([float(p_d(np.asarray([saturation_d]), p_fa)[0])])
+        ])
+    return slopes, intercepts, breakpoints
+
+
 def tangent_upper_bound(p_fa: float, breakpoints: np.ndarray) -> np.ndarray:
     """Tangent upper bound: (slopes, intercepts) with slope*D + intercept >= P_D."""
     bps = np.asarray(breakpoints, dtype=np.float64)

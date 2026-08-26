@@ -92,7 +92,7 @@ def _one_step_delta(gain_of, uav, target, gain, budget, d_min, cs, ci, kind,
     return g0 - g1  # positive = decrease
 
 
-def test_capability_dual_beats_simple_baselines():
+def _capability_dual_baseline_means():
     rng = np.random.default_rng(70)
     results = {k: [] for k in
                ("no_move", "toward_worst", "friis_distance", "capability_dual")}
@@ -109,16 +109,19 @@ def test_capability_dual_beats_simple_baselines():
             if d is not None:
                 results[kind].append(d)
 
-    mean = {k: float(np.mean(v)) for k, v in results.items() if v}
+    return {k: float(np.mean(v)) for k, v in results.items() if v}
+
+
+def test_capability_dual_beats_simple_baselines():
+    mean = _capability_dual_baseline_means()
     # Capability-dual must be at least as good as every baseline on average.
     assert mean["capability_dual"] >= mean["toward_worst"] - 1e-9
     assert mean["capability_dual"] >= mean["friis_distance"] - 1e-9
     assert mean["capability_dual"] >= mean["no_move"] - 1e-9
     # And it must do strictly better than no movement.
     assert mean["capability_dual"] > 0.0
-    return mean
 
 
 if __name__ == "__main__":
-    means = test_capability_dual_beats_simple_baselines()
+    means = _capability_dual_baseline_means()
     print(json := __import__("json").dumps(means, indent=2))

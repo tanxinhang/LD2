@@ -1,0 +1,13 @@
+# Distributed L2/L3 research candidate: one 8-bit (x,y,vx,vy) beacon per UAV
+# plus locally replicated minimum-bottleneck geometry responsibility. The
+# unused 16-dimensional learned token is suppressed. L1 power and partial-loss
+# commit/ACK are not yet fully distributed; see the dated audit report.
+extends: exp_800_k6q6_distributed_budget_reconstructable.yaml
+
+marl:
+  hyperedge_protocol_only_enabled: true
+  hyperedge_state_bits_per_dim: 8
+  hyperedge_coordination_mode: reserved_endpoint
+  hyperedge_tx_coalition_max: 2
+  hyperedge_robust_quantization_enabled: true
+  distributed_bottleneck_matching_movement_enabled: true

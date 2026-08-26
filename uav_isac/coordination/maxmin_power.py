@@ -28,6 +28,70 @@ class MaxMinPowerResult:
     reserve_feasible: bool = True
     reserve_shortfall: float = 0.0
     minimum_deflection: tuple[float, ...] = ()
+    communication_bits: int = 0
+
+
+@dataclass(frozen=True)
+class ReplicatedLocalPowerResult:
+    """Row-wise execution assembled from independent node-local solves."""
+
+    power_w: np.ndarray
+    local_worst_deflection: np.ndarray
+    local_full_coverage: np.ndarray
+    common_view: bool
+
+
+def blend_row_feasible_power_with_inertia(
+    candidate_power_w: np.ndarray,
+    previous_power_w: np.ndarray,
+    sensing_budget_w: np.ndarray,
+    inertia: float,
+) -> np.ndarray:
+    """Blend two row allocations without leaving the local RF simplex.
+
+    Both allocations are first projected onto each transmitter's current
+    budget simplex.  Their convex combination is therefore non-negative and
+    exactly budget feasible.  The operation is entirely local: it reuses the
+    transmitter's last executed row and exchanges no optimizer certificate.
+    """
+    candidate = np.asarray(candidate_power_w, dtype=np.float64)
+    previous = np.asarray(previous_power_w, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    if (
+        candidate.ndim != 2 or previous.shape != candidate.shape
+        or candidate.shape[0] != budget.size or candidate.shape[1] < 1
+    ):
+        raise ValueError(
+            "candidate_power_w and previous_power_w must have shape (K,Q) "
+            "matching sensing_budget_w")
+    if (
+        np.any(~np.isfinite(candidate)) or np.any(candidate < 0.0)
+        or np.any(~np.isfinite(previous)) or np.any(previous < 0.0)
+        or np.any(~np.isfinite(budget)) or np.any(budget < 0.0)
+    ):
+        raise ValueError("power and budget inputs must be finite and non-negative")
+    rho = float(inertia)
+    if not np.isfinite(rho) or not 0.0 <= rho < 1.0:
+        raise ValueError("inertia must be finite and lie in [0,1)")
+
+    def project_rows(power: np.ndarray) -> np.ndarray:
+        projected = power.copy()
+        for transmitter in range(projected.shape[0]):
+            row_sum = float(np.sum(projected[transmitter]))
+            row_budget = float(budget[transmitter])
+            if row_budget <= 0.0:
+                projected[transmitter] = 0.0
+            elif row_sum > 0.0:
+                projected[transmitter] *= row_budget / row_sum
+            else:
+                projected[transmitter] = row_budget / projected.shape[1]
+        return projected
+
+    current = project_rows(candidate)
+    history = project_rows(previous)
+    blended = (1.0 - rho) * current + rho * history
+    # Remove only floating-point simplex residuals, not physical power.
+    return project_rows(blended)
 
 
 def _validated(
@@ -50,7 +114,14 @@ def _fill_budget(
     gain: np.ndarray,
     budget: np.ndarray,
 ) -> np.ndarray:
-    """Turn LP inequalities into the exact per-UAV RF equality harmlessly."""
+    """Select a budget-saturated optimum in the ordinary monotone regime.
+
+    With non-negative gains, no exposure upper bound, and no power penalty,
+    unused power can be placed on a best-gain target without reducing the
+    max-min objective.  This is an optimizer tie-break, not a physical RF
+    equality.  Constrained/covert solvers must use their own headroom-aware
+    logic and may legitimately leave power unused.
+    """
     result = np.maximum(np.asarray(power, dtype=np.float64), 0.0).copy()
     for transmitter in range(result.shape[0]):
         slack = float(budget[transmitter] - np.sum(result[transmitter]))
@@ -72,7 +143,7 @@ def solve_fixed_structure_maxmin_power_lp(
     sensing_budget_w: np.ndarray,
     minimum_deflection: np.ndarray | None = None,
 ) -> MaxMinPowerResult:
-    """Solve the fixed-owner max-min power LP and preserve exact RF budgets.
+    """Solve fixed-owner max-min and select a saturated ordinary optimum.
 
     When ``minimum_deflection`` is supplied, the LP additionally enforces the
     per-target reserve ``sum_i a_iq p_iq >= r_q`` before maximising the worst
@@ -162,6 +233,179 @@ def solve_fixed_structure_maxmin_power_lp(
     )
 
 
+def replicated_local_row_maxmin_power(
+    gain_views_per_watt: np.ndarray,
+    public_sensing_budget_w: np.ndarray,
+    executed_sensing_budget_w: np.ndarray | None = None,
+    unknown_target_reserve_fraction: float = 1.0,
+    incomplete_view_prior_share: np.ndarray | None = None,
+) -> ReplicatedLocalPowerResult:
+    """Execute only each transmitter's row from its private public-cache LP.
+
+    ``gain_views_per_watt[k]`` is UAV ``k``'s locally reconstructed ``(K,Q)``
+    gain matrix. Every UAV solves the same fixed-structure LP using its own
+    cache, but transmitter ``k`` executes only row ``k``. No primal/dual
+    certificate or optimizer state is exchanged.
+
+    When all public views and budgets agree, deterministic local solves are
+    identical and the assembled allocation equals the ordinary centralized LP
+    optimum. Under packet loss the views may disagree; global max-min
+    optimality is then deliberately not claimed, while each executed row is
+    rescaled to its own physical budget and remains feasible.
+    """
+    views = np.asarray(gain_views_per_watt, dtype=np.float64)
+    public_budget = np.asarray(
+        public_sensing_budget_w, dtype=np.float64).reshape(-1)
+    if (
+        views.ndim != 3 or views.shape[0] != views.shape[1]
+        or views.shape[0] != public_budget.size or views.shape[2] < 1
+    ):
+        raise ValueError(
+            "gain_views_per_watt must have shape (K,K,Q) matching budget")
+    if np.any(~np.isfinite(views)) or np.any(views < 0.0):
+        raise ValueError(
+            "gain_views_per_watt must be finite and non-negative")
+    if np.any(~np.isfinite(public_budget)) or np.any(public_budget < 0.0):
+        raise ValueError(
+            "public_sensing_budget_w must be finite and non-negative")
+    executed_budget = (
+        public_budget.copy()
+        if executed_sensing_budget_w is None
+        else np.asarray(
+            executed_sensing_budget_w, dtype=np.float64).reshape(-1)
+    )
+    if (
+        executed_budget.shape != public_budget.shape
+        or np.any(~np.isfinite(executed_budget))
+        or np.any(executed_budget < 0.0)
+    ):
+        raise ValueError(
+            "executed_sensing_budget_w must be a finite non-negative K-vector")
+    reserve_fraction = float(unknown_target_reserve_fraction)
+    if (
+        not np.isfinite(reserve_fraction)
+        or not 0.0 <= reserve_fraction <= 1.0
+    ):
+        raise ValueError(
+            "unknown_target_reserve_fraction must lie in [0,1]")
+    prior_share = None
+    if incomplete_view_prior_share is not None:
+        prior_share = np.asarray(
+            incomplete_view_prior_share, dtype=np.float64)
+        if (
+            prior_share.shape != (views.shape[0], views.shape[2])
+            or np.any(~np.isfinite(prior_share))
+            or np.any(prior_share < 0.0)
+            or np.any(np.sum(prior_share, axis=1) <= 0.0)
+        ):
+            raise ValueError(
+                "incomplete_view_prior_share must be a finite non-negative "
+                "(K,Q) array with positive rows")
+        prior_share = prior_share / np.sum(
+            prior_share, axis=1, keepdims=True)
+
+    K, _, Q = views.shape
+    power = np.zeros((K, Q), dtype=np.float64)
+    local_worst = np.zeros(K, dtype=np.float64)
+    local_coverage = np.zeros(K, dtype=bool)
+    for viewer in range(K):
+        local_gain = views[viewer]
+        ceiling = np.sum(
+            local_gain * public_budget[:, None], axis=0)
+        local_coverage[viewer] = bool(np.all(ceiling > 0.0))
+        if not local_coverage[viewer]:
+            # A zero in an incomplete/quantized public graph is not evidence
+            # that the already selected physical edge is truly unreachable.
+            # Keep an explicit uniform floor for unknown targets, then use the
+            # remainder on targets that are reachable in this local cache.
+            # No reachability certificate is exchanged: the mask is private.
+            uniform = np.full(Q, 1.0 / Q, dtype=np.float64)
+            observed = ceiling > 0.0
+            exploit = np.zeros(Q, dtype=np.float64)
+            if reserve_fraction < 1.0 and prior_share is not None:
+                exploit = prior_share[viewer].copy()
+            elif reserve_fraction < 1.0 and np.any(observed):
+                local = solve_fixed_structure_maxmin_power_lp(
+                    local_gain[:, observed], public_budget)
+                local_worst[viewer] = float(local.worst_deflection)
+                row = np.maximum(local.power_w[viewer], 0.0)
+                row_mass = float(np.sum(row))
+                if row_mass > 0.0:
+                    exploit[observed] = row / row_mass
+                else:
+                    own = np.maximum(local_gain[viewer, observed], 0.0)
+                    if float(np.sum(own)) > 0.0:
+                        observed_indices = np.flatnonzero(observed)
+                        exploit[observed_indices[int(np.argmax(own))]] = 1.0
+                    else:
+                        exploit = uniform.copy()
+            else:
+                exploit = uniform.copy()
+            share = (
+                reserve_fraction * uniform
+                + (1.0 - reserve_fraction) * exploit
+            )
+            power[viewer] = float(executed_budget[viewer]) * share
+            continue
+        local = solve_fixed_structure_maxmin_power_lp(
+            local_gain, public_budget)
+        local_worst[viewer] = float(local.worst_deflection)
+        row = np.maximum(local.power_w[viewer], 0.0)
+        row_mass = float(np.sum(row))
+        if row_mass > 0.0:
+            power[viewer] = row * (
+                float(executed_budget[viewer]) / row_mass)
+        elif executed_budget[viewer] > 0.0:
+            # Stable local tie-break; this does not create a coordination
+            # channel and still respects the transmitter's own RF cap.
+            target = int(np.argmax(local_gain[viewer]))
+            power[viewer, target] = float(executed_budget[viewer])
+
+    common_view = bool(np.allclose(
+        views, views[0][None, :, :], rtol=0.0, atol=1.0e-15))
+    return ReplicatedLocalPowerResult(
+        power_w=power,
+        local_worst_deflection=local_worst,
+        local_full_coverage=local_coverage,
+        common_view=common_view,
+    )
+
+
+def local_transmitter_range_minimax_share(
+    transmitter_positions_m: np.ndarray,
+    target_positions_m: np.ndarray,
+) -> np.ndarray:
+    """Return the row-local range-only minimax power prior.
+
+    If an unknown receiver range is bounded by the common mission-domain
+    radius ``R_max``, bistatic free-space gain obeys
+    ``a_ijq >= C/(R_iq^2 R_max^2)`` (conditional on the selected DD gate).
+    Choosing ``p_iq proportional to R_iq^2`` equalizes this conservative
+    transmitter-side contribution across targets. Each row depends only on
+    transmitter ``i``'s own position and the common target map.
+    """
+    transmitters = np.asarray(transmitter_positions_m, dtype=np.float64)
+    targets = np.asarray(target_positions_m, dtype=np.float64)
+    if (
+        transmitters.ndim != 2 or targets.ndim != 2
+        or transmitters.shape[1] != targets.shape[1]
+        or transmitters.shape[0] < 1 or targets.shape[0] < 1
+        or np.any(~np.isfinite(transmitters))
+        or np.any(~np.isfinite(targets))
+    ):
+        raise ValueError(
+            "transmitter_positions_m and target_positions_m must be finite "
+            "non-empty arrays with a common coordinate dimension")
+    range_squared = np.sum(
+        (transmitters[:, None, :] - targets[None, :, :]) ** 2,
+        axis=-1,
+    )
+    # Coincident positions need no infinite priority; the smallest positive
+    # float keeps every row normalizable and its corresponding share minimal.
+    range_squared = np.maximum(range_squared, np.finfo(np.float64).tiny)
+    return range_squared / np.sum(range_squared, axis=1, keepdims=True)
+
+
 def _quantize_simplex(prices: np.ndarray, bits: int) -> np.ndarray:
     if int(bits) <= 0:
         return prices
@@ -208,15 +452,30 @@ def distributed_dual_maxmin_power(
     *,
     rounds: int,
     price_bits: int = 0,
+    feedback_bits: int = 0,
     initial_prices: np.ndarray | None = None,
+    harmonic_safe_start: bool = True,
 ) -> MaxMinPowerResult:
-    """Finite-round distributed dual mirror descent with primal averaging.
+    """Finite-round distributed dual mirror descent with safe primal recovery.
 
     A target-price vector is public.  In each round every transmitter spends
     its sensing budget on the target maximizing ``lambda_q * a_iq``.  Owners
     aggregate achieved target Deflection, and exponentiated-gradient descent
     updates the simplex price.  The best feasible ergodic primal average is
     returned; no monotonicity is assumed for the last iterate.
+
+    The optional safe start removes the finite-round target-starvation failure
+    of winner-take-all responses.  With ``c_q = sum_i b_i a_iq`` and
+    ``w_q = c_q^-1 / sum_r c_r^-1``, the allocation ``p_iq=b_i w_q`` is
+    feasible and gives every target the same Deflection
+    ``t_H=(sum_q c_q^-1)^-1``.  It is therefore a constructive distributed
+    lower bound, not an oracle fallback.  Subsequent ergodic checkpoints are
+    accepted only when they improve this incumbent.
+
+    ``price_bits=feedback_bits=0`` retains the exact floating-point diagnostic
+    and reports zero wire bits.  A deployable run must select explicit codecs;
+    feedback uses the binary16/binary32 codec accepted by
+    :func:`_quantize_deflection_feedback`.
     """
     gain, budget = _validated(gain_per_watt, sensing_budget_w)
     K, Q = gain.shape
@@ -225,6 +484,8 @@ def distributed_dual_maxmin_power(
         raise ValueError("rounds must be positive")
     if int(price_bits) < 0 or int(price_bits) > 24:
         raise ValueError("price_bits must lie in [0,24]")
+    if int(feedback_bits) not in (0, 16, 32, 64):
+        raise ValueError("feedback_bits must be one of {0,16,32,64}")
     if initial_prices is None:
         prices = np.full(Q, 1.0 / Q, dtype=np.float64)
     else:
@@ -241,17 +502,60 @@ def distributed_dual_maxmin_power(
     subgradient_bound = max(float(np.sum(budget)), 1.0e-12)
     eta = np.sqrt(2.0 * np.log(max(Q, 2)) / count) / subgradient_bound
     average_power = np.zeros((K, Q), dtype=np.float64)
+    averaging_mass = 0.0
+    if bool(harmonic_safe_start):
+        target_ceiling = np.sum(gain * budget[:, None], axis=0)
+        if np.any(target_ceiling <= 0.0):
+            # A structurally unreachable target makes the max-min optimum
+            # exactly zero.  Return a feasible allocation and the matching
+            # one-hot dual certificate rather than iterating indefinitely.
+            unreachable = int(np.flatnonzero(target_ceiling <= 0.0)[0])
+            for transmitter in range(K):
+                average_power[
+                    transmitter, int(np.argmax(gain[transmitter]))
+                ] = budget[transmitter]
+            deflection = np.sum(gain * average_power, axis=0)
+            prices = np.zeros(Q, dtype=np.float64)
+            prices[unreachable] = 1.0
+            return MaxMinPowerResult(
+                power_w=average_power,
+                deflection=deflection,
+                worst_deflection=0.0,
+                prices=prices,
+                dual_upper_bound=0.0,
+                primal_dual_gap=0.0,
+                rounds=0,
+                worst_history=(0.0,),
+                communication_bits=0,
+            )
+        public_ceiling = _quantize_deflection_feedback(
+            target_ceiling, int(feedback_bits))
+        inverse_ceiling = 1.0 / np.maximum(public_ceiling, 1.0e-300)
+        coverage_share = inverse_ceiling / float(np.sum(inverse_ceiling))
+        average_power = budget[:, None] * coverage_share[None, :]
+        averaging_mass = 1.0
     best_power = average_power.copy()
-    best_worst = -np.inf
+    best_worst = float(np.min(np.sum(gain * best_power, axis=0)))
+    best_dual_upper = np.inf
+    best_dual_prices = prices.copy()
     history = []
-    for iteration in range(1, count + 1):
+    for _iteration in range(1, count + 1):
         public_prices = _quantize_simplex(prices, int(price_bits))
+        dual_upper = float(scale * np.sum(
+            budget * np.max(
+                public_prices[None, :] * normalized_gain, axis=1)))
+        if dual_upper < best_dual_upper:
+            best_dual_upper = dual_upper
+            best_dual_prices = public_prices.copy()
         allocation = np.zeros((K, Q), dtype=np.float64)
         for transmitter in range(K):
             scores = public_prices * normalized_gain[transmitter]
             target = int(np.argmax(scores))
             allocation[transmitter, target] = budget[transmitter]
-        average_power += (allocation - average_power) / float(iteration)
+        averaging_mass += 1.0
+        average_power += (
+            allocation - average_power
+        ) / averaging_mass
         current_deflection = np.sum(gain * average_power, axis=0)
         current_worst = float(np.min(current_deflection))
         history.append(current_worst)
@@ -259,8 +563,10 @@ def distributed_dual_maxmin_power(
             best_worst = current_worst
             best_power = average_power.copy()
 
-        normalized_deflection = np.sum(
-            normalized_gain * allocation, axis=0)
+        normalized_deflection = _quantize_deflection_feedback(
+            np.sum(normalized_gain * allocation, axis=0),
+            int(feedback_bits),
+        )
         log_prices = np.log(np.maximum(prices, 1.0e-300))
         log_prices -= eta * normalized_deflection
         log_prices -= float(np.max(log_prices))
@@ -271,18 +577,31 @@ def distributed_dual_maxmin_power(
     deflection = np.sum(gain * best_power, axis=0)
     worst = float(np.min(deflection))
     public_prices = _quantize_simplex(prices, int(price_bits))
-    dual_upper = float(scale * np.sum(
+    final_dual_upper = float(scale * np.sum(
         budget * np.max(
             public_prices[None, :] * normalized_gain, axis=1)))
+    if final_dual_upper < best_dual_upper:
+        best_dual_upper = final_dual_upper
+        best_dual_prices = public_prices.copy()
+    # One target-price broadcast and one owner-feedback scalar per target and
+    # round.  The initial harmonic ceiling reuses one additional feedback
+    # vector.  Zero denotes the historical exact/unpriced diagnostic.
+    communication_bits = 0
+    if int(price_bits) > 0 or int(feedback_bits) > 0:
+        communication_bits = int(
+            count * Q * (int(price_bits) + int(feedback_bits))
+            + (Q * int(feedback_bits) if harmonic_safe_start else 0)
+        )
     return MaxMinPowerResult(
         power_w=best_power,
         deflection=deflection,
         worst_deflection=worst,
-        prices=public_prices,
-        dual_upper_bound=max(dual_upper, worst),
-        primal_dual_gap=max(dual_upper - worst, 0.0),
+        prices=best_dual_prices,
+        dual_upper_bound=max(best_dual_upper, worst),
+        primal_dual_gap=max(best_dual_upper - worst, 0.0),
         rounds=count,
         worst_history=tuple(history),
+        communication_bits=communication_bits,
     )
 
 
@@ -705,11 +1024,94 @@ def optimal_maxmin_dual_prices(
     return prices, value
 
 
+def canonical_maxmin_dual_prices(
+    gain_per_watt: np.ndarray,
+    sensing_budget_w: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Unique minimum-L2 price on the optimal dual face.
+
+    The LP-optimal target price need not be unique, which makes learning
+    labels solver- and ordering-dependent.  This secondary convex program
+    minimizes ``||lambda||_2^2`` over the complete optimal dual set while
+    preserving the max-min value.  Strict convexity in ``lambda`` makes the
+    returned price unique; no perturbation of the primary task objective is
+    introduced.
+    """
+    from scipy.optimize import Bounds, LinearConstraint, minimize
+
+    gain, budget = _validated(gain_per_watt, sensing_budget_w)
+    K, Q = gain.shape
+    if not np.any(gain > 0.0) or not np.any(budget > 0.0):
+        return np.full(Q, 1.0 / Q, dtype=np.float64), 0.0
+    initial_lambda, value = optimal_maxmin_dual_prices(gain, budget)
+    initial_u = np.max(gain * initial_lambda[None, :], axis=1)
+    x0 = np.concatenate((initial_u, initial_lambda))
+
+    rows = []
+    lower = []
+    upper = []
+    for i in range(K):
+        for q in range(Q):
+            row = np.zeros(K + Q, dtype=np.float64)
+            row[i] = 1.0
+            row[K + q] = -gain[i, q]
+            rows.append(row)
+            lower.append(0.0)
+            upper.append(np.inf)
+    face = np.zeros(K + Q, dtype=np.float64)
+    face[:K] = budget
+    face_tol = 1.0e-8 * max(1.0, abs(value))
+    rows.append(face)
+    lower.append(value - face_tol)
+    upper.append(value + face_tol)
+    inequality_constraint = LinearConstraint(
+        np.stack(rows), np.asarray(lower), np.asarray(upper))
+    simplex = np.zeros((1, K + Q), dtype=np.float64)
+    simplex[0, K:] = 1.0
+    simplex_constraint = LinearConstraint(simplex, [1.0], [1.0])
+
+    def objective(x: np.ndarray) -> float:
+        return 0.5 * float(np.dot(x[K:], x[K:]))
+
+    def gradient(x: np.ndarray) -> np.ndarray:
+        grad = np.zeros_like(x)
+        grad[K:] = x[K:]
+        return grad
+
+    solved = minimize(
+        objective,
+        x0,
+        jac=gradient,
+        method="SLSQP",
+        bounds=Bounds(np.zeros(K + Q), np.full(K + Q, np.inf)),
+        constraints=[inequality_constraint, simplex_constraint],
+        options={"ftol": 1.0e-12, "maxiter": 2000, "disp": False},
+    )
+    if not solved.success or solved.x is None:
+        raise RuntimeError(
+            f"canonical max-min dual solve failed: {solved.message}")
+    prices = np.maximum(np.asarray(solved.x[K:], dtype=np.float64), 0.0)
+    prices /= float(np.sum(prices))
+    dual_value = float(np.sum(
+        budget * np.max(prices[None, :] * gain, axis=1)))
+    if abs(dual_value - value) > 5.0 * face_tol:
+        raise RuntimeError("canonical dual left the optimal dual face")
+    return prices, value
+
+
 def fixed_owner_gain_matrix(
     coefficient: np.ndarray,
     selected: Sequence[tuple[int, int, int]],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Collapse a fixed unique-owner reporting graph to transmitter gains."""
+    """Collapse a fixed unique-owner reporting graph to transmitter gains.
+
+    The downstream LP is valid under *conditionally separable evidence*:
+    structure, DD support and CSI are frozen during the inner solve, and each
+    supplied per-watt coefficient is independent of the optimized power.  If
+    sensing interference, power-dependent CSI/DD support, or nonlinear RF
+    coupling is present, callers must rebuild the physical model instead of
+    treating this matrix as an LP coefficient.
+    """
     values = np.asarray(coefficient, dtype=np.float64)
     if values.ndim != 3 or values.shape[0] != values.shape[1]:
         raise ValueError("coefficient must have shape (K,K,Q)")

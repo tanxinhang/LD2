@@ -87,3 +87,13 @@ def test_optimal_bw_matches_equal_split_for_homogeneous_senders():
     core.cfg.marl.analytical_comm_optimal_bw = False
     p_eq = core._compute_analytical_min_comm_power(positions)
     np.testing.assert_allclose(p_opt, p_eq, rtol=1e-3, atol=1e-12)
+
+
+def test_analytical_comm_snr_margin_scales_required_power():
+    core, positions, _ = _env_with_payloads([4000, 4000, 4000, 4000])
+    core.cfg.marl.analytical_comm_optimal_bw = False
+    core.cfg.marl.analytical_comm_snr_margin_db = 0.0
+    nominal = core._compute_analytical_min_comm_power(positions)
+    core.cfg.marl.analytical_comm_snr_margin_db = 10.0
+    robust = core._compute_analytical_min_comm_power(positions)
+    np.testing.assert_allclose(robust, 10.0 * nominal, rtol=1e-10)

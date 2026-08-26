@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "status": "single-seed engineering calibration; not reliability certification",
+  "trace_path": "results/_calibration_v2_dynamic_k12_passiverx_seed1019466100/receiver_evidence.npz",
+  "trace_seed": 1019466100,
+  "frames": 150,
+  "num_agents": 12,
+  "num_targets": 12,
+  "positive_receiver_deflection_fraction": 0.4943518518518519,
+  "content_mode": "normal",
+  "llr_bits": 8,
+  "clip_max": 46.926640798928354,
+  "clip_selection": "decision-relevant fixed engineering clip; not raw heavy-tail 0.999 quantile",
+  "confidence_bits": 2,
+  "confidence_log_boundaries": [
+    0.33449875837161547,
+    1.826398998113782,
+    3.2577991180749635
+  ],
+  "confidence_representatives": [
+    0.04502506824536463,
+    1.2584506066104937,
+    12.317491520659877,
+    53.09712990523423
+  ],
+  "threshold_calibration": {
+    "hypothesis": "H0 only",
+    "samples": 500000,
+    "seed": 20260825,
+    "target_pfa": 0.001,
+    "standardized_threshold": 3.350053106162944,
+    "calibration_pfa": 0.001
+  },
+  "independent_mc_selfcheck": {
+    "seed": 20260826,
+    "draws_per_frame": 1024,
+    "pfa": 0.0009993489583333334,
+    "steady_pd": 0.9485758463541666,
+    "weak3_pd": 0.8412434895833334,
+    "worst_pd": 0.7123046875
+  }
+}

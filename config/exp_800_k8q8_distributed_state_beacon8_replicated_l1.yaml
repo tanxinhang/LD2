@@ -1,0 +1,12 @@
+# 8x8 certificate-light distributed L1 ablation; see the 6x6 counterpart.
+extends: exp_800_k8q8_distributed_state_beacon8.yaml
+
+marl:
+  distributed_replicated_power_enabled: true
+  task_constrained_power_enabled: false
+  bargaining_objective_enabled: false
+  intercept_constrained_power_enabled: false
+  analytical_sensing_power_reserve_pd: 0.0
+  analytical_structure_ranking_enabled: true
+  hyperedge_robust_quantization_enabled: true
+  hyperedge_assignment_hold_frames: 5

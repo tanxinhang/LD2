@@ -272,13 +272,3 @@ def arbitrate_shadow_horizon(
         energy_feasible=energy_feasible,
         commit_authority=False,
     )
-
-
-def shadow_reason_counts(
-    decisions: tuple[ShadowRouteDecision, ...],
-) -> Mapping[str, int]:
-    """Return deterministic reason counts for audit serialization."""
-    return {
-        reason: sum(decision.reason == reason for decision in decisions)
-        for reason in sorted({decision.reason for decision in decisions})
-    }

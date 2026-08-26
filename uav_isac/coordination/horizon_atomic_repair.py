@@ -1,4 +1,4 @@
-﻿"""Robust receding-horizon ranking of atomic ISAC structure repairs.
+"""Robust receding-horizon ranking of atomic ISAC structure repairs.
 
 The module deliberately separates interval construction from optimization.
 It consumes one simultaneous ``(H,K,K,Q)`` coefficient envelope produced by

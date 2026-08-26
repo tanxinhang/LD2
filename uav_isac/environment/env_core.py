@@ -24,7 +24,10 @@ from dataclasses import dataclass
 from uav_isac.utils.types import Action, P0Solution, UAVState, TargetState
 from uav_isac.environment.uav import UAV
 from uav_isac.environment.target import Target
-from uav_isac.environment.belief import BeliefManager
+from uav_isac.environment.belief import (
+    BeliefManager,
+    generalized_covariance_intersection,
+)
 from uav_isac.environment.observation import ObservationBuilder
 from uav_isac.environment.action import ActionSpace
 from uav_isac.environment.reward import (
@@ -39,15 +42,25 @@ from uav_isac.physical.detection import (
     compute_target_utilities,
 )
 from uav_isac.physical.feasibility_oracle import (
+    repair_invalid_local_only_edges_min_change,
     solve_maxmin_single_role_pairs,
+    unit_deflection_tensor,
+)
+from uav_isac.physical.finite_blocklength import (
+    minimum_snr_normal_approximation,
 )
 from uav_isac.physical.evidence import (
     DETECTION_FUSION_MODES,
     DeflectionConfidenceQuantizer,
     EvidencePacketLayout,
     estimate_quantized_evidence_detection,
+    local_ambiguity_top2_mask,
+    local_quality_topk_mask,
+    quantize_belief_feedback,
+    receiver_deflection_from_broadcast_waveforms,
     receiver_deflection_from_selected,
     route_structured_evidence,
+    scheduled_fusion_owner,
     select_detection_deflection,
 )
 from uav_isac.environment.trust_manager import TrustManager
@@ -61,14 +74,31 @@ from uav_isac.coordination.qpd import (
 )
 from uav_isac.coordination.maxmin_power import (
     MaxMinPowerResult,
+    blend_row_feasible_power_with_inertia,
     fixed_owner_gain_matrix,
+    local_transmitter_range_minimax_share,
+    replicated_local_row_maxmin_power,
+    solve_fixed_structure_maxmin_power_lp as _solve_fixed_structure_maxmin_power_lp,
 )
 from uav_isac.coordination.hyperedge import (
+    annular_alternating_movement_delta,
+    deterministic_bottleneck_cost_assignment,
+    deterministic_bottleneck_matching,
+    bistatic_geometry_tail_ratio,
+    project_pairwise_safe_movement,
     decode_offer_stream,
     encode_offer_stream,
     factorized_endpoint_capabilities,
+    gauss_southwell_bistatic_geometry_step,
+    gauss_southwell_bistatic_geometry_sweep,
     mutual_endpoint_consensus,
+    plan_budget_certified_hyperedges,
     plan_local_hyperedges,
+    plan_refined_endpoint_hyperedges,
+    plan_reserved_endpoint_hyperedges,
+    plan_sparse_coalition_endpoint_hyperedges,
+    reconstruct_bistatic_coefficient_from_public_state,
+    role_aware_bistatic_movement_cost,
     reconstruct_bistatic_pair_value,
     update_consensus_streak,
 )
@@ -269,8 +299,84 @@ class EnvironmentCore:
         self.area_size = (sc.region_size[0], sc.region_size[1])
         self.height = sc.height
         self.tracking_enabled = bool(getattr(ma, 'tracking_enabled', True))
+        self._distributed_coordination_use_local_belief_targets = bool(
+            getattr(
+                ma,
+                'distributed_coordination_use_local_belief_targets',
+                False,
+            )
+        )
+        if (
+            self._distributed_coordination_use_local_belief_targets
+            and not self.tracking_enabled
+        ):
+            raise ValueError(
+                'distributed_coordination_use_local_belief_targets requires '
+                'tracking_enabled=true')
         self._detection_fusion_mode = str(getattr(
             ma, 'detection_fusion_mode', 'local_only')).strip().lower()
+        self._passive_multireceiver_evidence_enabled = bool(getattr(
+            ma, 'passive_multireceiver_evidence_enabled', False))
+        self._passive_multireceiver_belief_update_enabled = bool(getattr(
+            ma, 'passive_multireceiver_belief_update_enabled', False))
+        self._u2u_belief_feedback_enabled = bool(getattr(
+            ma, 'u2u_belief_feedback_enabled', False))
+        self._u2u_belief_feedback_mean_bits = max(1, int(getattr(
+            ma, 'u2u_belief_feedback_mean_bits', 12)))
+        self._u2u_belief_feedback_cov_bits = max(1, int(getattr(
+            ma, 'u2u_belief_feedback_cov_bits', 8)))
+        self._u2u_belief_feedback_aoi_bits = max(1, int(getattr(
+            ma, 'u2u_belief_feedback_aoi_bits', 8)))
+        self._u2u_belief_feedback_schedule = str(getattr(
+            ma, 'u2u_belief_feedback_schedule',
+            'evidence_topk')).strip().lower()
+        if self._u2u_belief_feedback_schedule not in {
+                'evidence_topk', 'freshness'}:
+            raise ValueError(
+                'u2u_belief_feedback_schedule must be evidence_topk or '
+                'freshness')
+        self._u2u_belief_feedback_topk = max(1, int(getattr(
+            ma, 'u2u_belief_feedback_topk', 2)))
+        self._u2u_belief_feedback_bit_budget = max(0, int(getattr(
+            ma, 'u2u_belief_feedback_bit_budget', 800)))
+        self._u2u_belief_feedback_max_union_per_source = max(1, int(getattr(
+            ma, 'u2u_belief_feedback_max_union_per_source', 2)))
+        self._u2u_belief_feedback_aoi_weight = max(0.0, float(getattr(
+            ma, 'u2u_belief_feedback_aoi_weight', 1.0 / 3.0)))
+        self._u2u_belief_feedback_uncertainty_weight = max(
+            0.0, float(getattr(
+                ma, 'u2u_belief_feedback_uncertainty_weight', 1.0 / 3.0)))
+        self._u2u_belief_feedback_task_weight = max(0.0, float(getattr(
+            ma, 'u2u_belief_feedback_task_weight', 1.0 / 3.0)))
+        self._u2u_belief_feedback_owner_aware = bool(getattr(
+            ma, 'u2u_belief_feedback_owner_aware', True))
+        self._u2u_belief_feedback_max_age_frames = max(0, int(getattr(
+            ma, 'u2u_belief_feedback_max_age_frames', 5)))
+        if (
+            self._u2u_belief_feedback_enabled
+            and self._detection_fusion_mode != 'u2u_distributed'
+        ):
+            raise ValueError(
+                'u2u_belief_feedback_enabled requires '
+                'detection_fusion_mode=u2u_distributed')
+        if self._u2u_belief_feedback_enabled and not self.tracking_enabled:
+            raise ValueError(
+                'u2u_belief_feedback_enabled requires tracking_enabled=true')
+        if (
+            self._u2u_belief_feedback_enabled
+            and bool(getattr(ma, 'belief_nis_enabled', False))
+        ):
+            raise ValueError(
+                'u2u belief feedback currently requires '
+                'belief_nis_enabled=false because sender-private adaptive '
+                'process-noise scales are not carried in the packet')
+        if (
+            self._passive_multireceiver_belief_update_enabled
+            and not self._passive_multireceiver_evidence_enabled
+        ):
+            raise ValueError(
+                'passive multireceiver belief updates require passive '
+                'multireceiver evidence')
         if self._detection_fusion_mode not in DETECTION_FUSION_MODES:
             allowed = ', '.join(sorted(DETECTION_FUSION_MODES))
             raise ValueError(
@@ -308,6 +414,36 @@ class EnvironmentCore:
                 'analytical_sensing_power_enabled requires joint_isac_power_enabled')
         self._analytical_sensing_power_reserve_pd = float(getattr(
             ma, 'analytical_sensing_power_reserve_pd', 0.0))
+        self._distributed_replicated_power_enabled = bool(getattr(
+            ma, 'distributed_replicated_power_enabled', False))
+        self._distributed_replicated_power_inertia = float(np.clip(
+            getattr(ma, 'distributed_replicated_power_inertia', 0.0),
+            0.0, 0.95))
+        self._distributed_replicated_power_unknown_target_reserve = float(
+            np.clip(getattr(
+                ma,
+                'distributed_replicated_power_unknown_target_reserve',
+                1.0,
+            ), 0.0, 1.0))
+        self._distributed_target_position_uncertainty_sigma = float(getattr(
+            ma, 'distributed_target_position_uncertainty_sigma', 0.0))
+        if self._distributed_target_position_uncertainty_sigma < 0.0:
+            raise ValueError(
+                'distributed_target_position_uncertainty_sigma must be '
+                'non-negative')
+        if (
+            self._distributed_target_position_uncertainty_sigma > 0.0
+            and not self.tracking_enabled
+        ):
+            raise ValueError(
+                'target-position uncertainty reconstruction requires '
+                'tracking_enabled=true')
+        self._distributed_replicated_power_local_range_fallback_enabled = bool(
+            getattr(
+                ma,
+                'distributed_replicated_power_local_range_fallback_enabled',
+                False,
+            ))
         self._analytical_structure_ranking_enabled = bool(getattr(
             ma, 'analytical_structure_ranking_enabled', False))
         if (self._analytical_structure_ranking_enabled
@@ -315,6 +451,8 @@ class EnvironmentCore:
             raise ValueError(
                 'analytical_structure_ranking_enabled requires '
                 'analytical_sensing_power_enabled')
+        # D1.10-C (advice 014 §4/§5): coupling-aware structure repair.  Only
+        # meaningful when the analytical sensing power LP is the executed path.
         self._bargaining_objective_enabled = bool(getattr(
             ma, 'bargaining_objective_enabled', False))
         if (self._bargaining_objective_enabled
@@ -338,6 +476,230 @@ class EnvironmentCore:
                 'analytical_sensing_power_enabled')
         self._analytical_movement_enabled = bool(getattr(
             ma, 'analytical_movement_enabled', False))
+        self._distributed_id_movement_enabled = bool(getattr(
+            ma, 'distributed_id_movement_enabled', False))
+        self._distributed_id_movement_standoff_m = max(0.0, float(getattr(
+            ma, 'distributed_id_movement_standoff_m', 0.0)))
+        self._distributed_greedy_matching_movement_enabled = bool(getattr(
+            ma, 'distributed_greedy_matching_movement_enabled', False))
+        self._distributed_greedy_matching_hold_frames = max(1, int(getattr(
+            ma, 'distributed_greedy_matching_hold_frames', 150)))
+        self._distributed_movement_anchor_broadcast_enabled = bool(getattr(
+            ma, 'distributed_movement_anchor_broadcast_enabled', False))
+        self._distributed_movement_anchor_broadcast_period_frames = max(
+            1, int(getattr(
+                ma,
+                'distributed_movement_anchor_broadcast_period_frames',
+                5,
+            )))
+        self._distributed_movement_anchor_max_age_frames = max(0, int(getattr(
+            ma, 'distributed_movement_anchor_max_age_frames', 10)))
+        self._distributed_bottleneck_matching_movement_enabled = bool(getattr(
+            ma, 'distributed_bottleneck_matching_movement_enabled', False))
+        self._distributed_bistatic_bottleneck_movement_enabled = bool(getattr(
+            ma, 'distributed_bistatic_bottleneck_movement_enabled', False))
+        self._distributed_bistatic_complement_exponent = float(np.clip(
+            getattr(ma, 'distributed_bistatic_complement_exponent', 1.0),
+            0.0, 1.0))
+        self._distributed_alternating_optimization_enabled = bool(getattr(
+            ma, 'distributed_alternating_optimization_enabled', False))
+        self._distributed_ao_inner_radius_m = max(0.0, float(getattr(
+            ma, 'distributed_ao_inner_radius_m', 0.0)))
+        self._distributed_ao_outer_radius_m = max(0.0, float(getattr(
+            ma, 'distributed_ao_outer_radius_m', 225.0)))
+        self._distributed_ao_range_frames = max(1, int(getattr(
+            ma, 'distributed_ao_range_frames', 2)))
+        self._distributed_ao_strategy_frames = max(1, int(getattr(
+            ma, 'distributed_ao_strategy_frames', 3)))
+        self._distributed_ao_desired_bistatic_angle_deg = float(getattr(
+            ma, 'distributed_ao_desired_bistatic_angle_deg', 90.0))
+        self._distributed_gain_scheduled_movement_enabled = bool(getattr(
+            ma, 'distributed_gain_scheduled_movement_enabled', False))
+        self._distributed_gain_scheduled_period_frames = max(2, int(getattr(
+            ma, 'distributed_gain_scheduled_period_frames', 2)))
+        self._distributed_gain_scheduled_min_log_improvement = max(
+            0.0, float(getattr(
+                ma,
+                'distributed_gain_scheduled_min_log_improvement',
+                0.0,
+            )))
+        configured_gain_selected_nodes = int(getattr(
+            ma, 'distributed_gain_scheduled_max_selected_nodes', 0))
+        if configured_gain_selected_nodes < 0:
+            raise ValueError(
+                'distributed gain-scheduled max selected nodes must be '
+                'nonnegative')
+        self._distributed_gain_scheduled_max_selected_nodes = (
+            self.K
+            if configured_gain_selected_nodes == 0
+            else min(self.K, configured_gain_selected_nodes)
+        )
+        self._distributed_gain_scheduled_far_range_gate_m = max(
+            0.0, float(getattr(
+                ma,
+                'distributed_gain_scheduled_far_range_gate_m',
+                0.0,
+            )))
+        self._distributed_gain_scheduled_far_assignment_mode = str(getattr(
+            ma,
+            'distributed_gain_scheduled_far_assignment_mode',
+            'local_matching',
+        )).strip().lower()
+        if self._distributed_gain_scheduled_far_assignment_mode not in {
+            'local_matching', 'fixed_id',
+        }:
+            raise ValueError(
+                'distributed gain-scheduled far assignment mode must be '
+                'local_matching or fixed_id')
+        if self._distributed_alternating_optimization_enabled:
+            if not (
+                self._distributed_ao_inner_radius_m
+                < self._distributed_ao_outer_radius_m
+            ):
+                raise ValueError(
+                    'distributed AO requires inner radius < outer radius')
+            if not 0.0 < self._distributed_ao_desired_bistatic_angle_deg < 180.0:
+                raise ValueError(
+                    'distributed AO desired bistatic angle must lie in (0,180)')
+        if (
+            self._distributed_alternating_optimization_enabled
+            and self._distributed_gain_scheduled_movement_enabled
+        ):
+            raise ValueError(
+                'annular AO and gain-scheduled movement are separate ablations')
+        self._distributed_bistatic_tail_gate_ratio = max(0.0, float(getattr(
+            ma, 'distributed_bistatic_tail_gate_ratio', 0.0)))
+        self._distributed_role_capacity_movement_enabled = bool(getattr(
+            ma, 'distributed_role_capacity_movement_enabled', False))
+        self._distributed_role_capacity_standoff_m = max(0.0, float(getattr(
+            ma, 'distributed_role_capacity_standoff_m', 0.0)))
+        self._distributed_gap_coverage_movement_enabled = bool(getattr(
+            ma, 'distributed_gap_coverage_movement_enabled', False))
+        self._distributed_gap_critical_radius_m = max(
+            1.0, float(getattr(
+                ma, 'distributed_gap_critical_radius_m', 320.0)))
+        self._distributed_gap_capacity = max(1, int(getattr(
+            ma, 'distributed_gap_capacity', 2)))
+        self._distributed_gap_standoff_m = max(0.0, float(getattr(
+            ma, 'distributed_gap_standoff_m', 0.0)))
+        self._distributed_gap_pursuit_radius_m = max(1.0, float(getattr(
+            ma, 'distributed_gap_pursuit_radius_m', 250.0)))
+        self._distributed_gap_deficit_priority = bool(getattr(
+            ma, 'distributed_gap_deficit_priority', True))
+        self._distributed_gap_tangential_phase = bool(getattr(
+            ma, 'distributed_gap_tangential_phase', False))
+        self._distributed_gap_tangential_step_rad = max(
+            0.0, float(getattr(
+                ma, 'distributed_gap_tangential_step_rad', 0.02)))
+        self._distributed_gap_nearfield_focus = bool(getattr(
+            ma, 'distributed_gap_nearfield_focus', True))
+        self._distributed_gap_nearfield_radius_m = max(
+            1.0, float(getattr(
+                ma, 'distributed_gap_nearfield_radius_m', 300.0)))
+        self._distributed_gap_complete_radius_m = max(
+            1.0, float(getattr(
+                ma, 'distributed_gap_complete_radius_m', 350.0)))
+        self._distributed_gap_focus_weight = max(
+            1.0, float(getattr(
+                ma, 'distributed_gap_focus_weight', 4.0)))
+        self._distributed_role_capacity_reassign_threshold = max(
+            0.0, float(getattr(
+                ma, 'distributed_role_capacity_reassign_threshold', 0.05)))
+        self._distributed_role_capacity_hold_frames = max(1, int(getattr(
+            ma, 'distributed_role_capacity_hold_frames', 20)))
+        self._distributed_role_capacity_range_frames = max(1, int(getattr(
+            ma, 'distributed_role_capacity_range_frames', 12)))
+        self._distributed_role_capacity_strategy_frames = max(0, int(getattr(
+            ma, 'distributed_role_capacity_strategy_frames', 3)))
+        if (
+            self._distributed_role_capacity_movement_enabled
+            and (
+                self._distributed_bistatic_bottleneck_movement_enabled
+                or self._distributed_bottleneck_matching_movement_enabled
+                or self._distributed_greedy_matching_movement_enabled
+                or self._distributed_id_movement_enabled
+            )
+        ):
+            raise ValueError(
+                'role-capacity movement is a separate ablation from the '
+                'legacy distributed movement modes')
+        self._distributed_movement_safety_projection_enabled = bool(getattr(
+            ma, 'distributed_movement_safety_projection_enabled', False))
+        self._distributed_movement_safety_margin_m = max(0.0, float(getattr(
+            ma, 'distributed_movement_safety_margin_m', 0.0)))
+        self._distributed_movement_safety_margin_per_age_m = max(
+            0.0, float(getattr(
+                ma, 'distributed_movement_safety_margin_per_age_m', 0.0)))
+        self._distributed_movement_local_assignment_cache_enabled = bool(
+            getattr(
+                ma,
+                'distributed_movement_local_assignment_cache_enabled',
+                False,
+            ))
+        self._distributed_movement_public_max_age_frames = max(0, int(
+            getattr(ma, 'distributed_movement_public_max_age_frames', 5)))
+        self._distributed_movement_stale_fail_closed = bool(getattr(
+            ma, 'distributed_movement_stale_fail_closed', False))
+        self._distributed_movement_execute_projected_public_action = bool(
+            getattr(
+                ma,
+                'distributed_movement_execute_projected_public_action',
+                False,
+            ))
+        if self._distributed_alternating_optimization_enabled:
+            if not self._distributed_movement_safety_projection_enabled:
+                raise ValueError(
+                    'distributed AO requires public-view safety projection')
+            if not self._distributed_movement_execute_projected_public_action:
+                raise ValueError(
+                    'distributed AO requires execution of the projected action')
+        if self._distributed_gain_scheduled_movement_enabled:
+            if not self._distributed_movement_safety_projection_enabled:
+                raise ValueError(
+                    'gain-scheduled movement requires public-view safety '
+                    'projection')
+            if not self._distributed_movement_execute_projected_public_action:
+                raise ValueError(
+                    'gain-scheduled movement requires execution of the '
+                    'projected action')
+        if self._distributed_role_capacity_movement_enabled:
+            if not self._distributed_movement_safety_projection_enabled:
+                raise ValueError(
+                    'role-capacity movement requires public-view safety '
+                    'projection')
+            if not self._distributed_movement_execute_projected_public_action:
+                raise ValueError(
+                    'role-capacity movement requires execution of the '
+                    'projected action')
+        if self._distributed_gap_coverage_movement_enabled:
+            if not self._distributed_movement_safety_projection_enabled:
+                raise ValueError(
+                    'gap-coverage movement requires public-view safety '
+                    'projection')
+            if not self._distributed_movement_execute_projected_public_action:
+                raise ValueError(
+                    'gap-coverage movement requires execution of the '
+                    'projected action')
+        self._distributed_movement_outside_invariant_recovery_enabled = bool(
+            getattr(
+                ma,
+                'distributed_movement_outside_invariant_recovery_enabled',
+                False,
+            ))
+        self._distributed_movement_outside_invariant_recovery_gain = max(
+            0.0,
+            float(getattr(
+                ma,
+                'distributed_movement_outside_invariant_recovery_gain',
+                1.0,
+            )),
+        )
+        self._distributed_movement_independently_composable_safety = bool(
+            getattr(
+                ma,
+                'distributed_movement_independently_composable_safety',
+                False,
+            ))
         if (self._analytical_movement_enabled
                 and not self._analytical_structure_ranking_enabled):
             raise ValueError(
@@ -358,6 +720,11 @@ class EnvironmentCore:
         self._last_intercept_infeasible = False
         self._last_intercept_joined = False
         self._last_analytical_power_balance_error = 0.0
+        # A RF budget is an upper bound.  Keep the historical absolute
+        # balance diagnostic for trace compatibility, but distinguish an
+        # actual cap violation from intentional under-use (e.g. covertness).
+        self._last_analytical_power_budget_violation_w = 0.0
+        self._last_analytical_unused_power_w = 0.0
         self._last_analytical_dual_prices = None
         # D1.1-A audit hook (env var DSH_LEX_AUDIT): per-frame lex diagnostics.
         self._lex_audit_path = (os.environ.get('DSH_LEX_AUDIT', '') or '').strip()
@@ -369,6 +736,13 @@ class EnvironmentCore:
         self._isac_total_power_w = max(
             0.0, float(getattr(ua, 'P_isac_total',
                                ua.P_sense + getattr(ma, 'comm_tx_power_w', 0.25))))
+        configured_sensing_cap = float(getattr(
+            ua, 'P_sense_max', ua.P_sense))
+        if (not np.isfinite(configured_sensing_cap)
+                or configured_sensing_cap <= 0.0):
+            raise ValueError("uav.P_sense_max must be finite and positive")
+        self._sensing_power_cap_w = min(
+            self._isac_total_power_w, configured_sensing_cap)
         self._comm_power_fraction_min = float(np.clip(getattr(
             ma, 'comm_power_fraction_min', 0.0), 0.0, 1.0))
         self._comm_power_fraction_max = float(np.clip(getattr(
@@ -403,6 +777,8 @@ class EnvironmentCore:
         self.action_space = ActionSpace(
             v_max=ua.v_max, dt=sc.dt, rng=self.rng,
             learn_roles=bool(getattr(self.cfg.marl, 'learn_roles', False)),
+            dp_parameterization=str(getattr(
+                self.cfg.marl, 'dp_parameterization', 'radial_clip')),
         )
 
         # Observation builder
@@ -433,6 +809,8 @@ class EnvironmentCore:
             ric_K=ch.ric_K, rcs=ta.rcs, g_min=de.g_min,
             rng=self.rng,
             g_tx_dBi=ot.g_tx_dBi, g_rx_dBi=ot.g_rx_dBi, n_cpi=ot.n_cpi,
+            c_det=float(getattr(de, 'c_det', 1.0)),
+            control_frame_s=sc.dt,
             use_los_prob=getattr(ch, 'use_los_prob', False),
             los_a=getattr(ch, 'los_a', 4.88), los_b=getattr(ch, 'los_b', 0.43),
             eta_los_dB=getattr(ch, 'eta_los_dB', 0.1),
@@ -627,14 +1005,60 @@ class EnvironmentCore:
             ma, 'hyperedge_pair_score_mode',
             'endpoint_proxy')).strip().lower()
         if self._hyperedge_pair_score_mode not in {
-                'endpoint_proxy', 'physical_reconstructable'}:
+                'endpoint_proxy', 'physical_reconstructable',
+                'budget_reconstructable'}:
             raise ValueError(
                 'hyperedge_pair_score_mode must be endpoint_proxy or '
-                'physical_reconstructable')
+                'physical_reconstructable or budget_reconstructable')
+        self._hyperedge_coordination_mode = str(getattr(
+            ma, 'hyperedge_coordination_mode',
+            'replicated_global')).strip().lower()
+        if self._hyperedge_coordination_mode not in {
+                'replicated_global', 'reserved_endpoint',
+                'refined_endpoint', 'coalition_endpoint'}:
+            raise ValueError(
+                'hyperedge_coordination_mode must be replicated_global, '
+                'reserved_endpoint, refined_endpoint or coalition_endpoint')
         self._hyperedge_state_stream_enabled = bool(getattr(
             ma, 'hyperedge_state_stream_enabled', False))
+        self._hyperedge_protocol_only_enabled = bool(getattr(
+            ma, 'hyperedge_protocol_only_enabled', False))
+        self._hyperedge_state_bits_per_dim = max(0, int(getattr(
+            ma, 'hyperedge_state_bits_per_dim', 0)))
+        self._hyperedge_nearfield_residual_enabled = bool(getattr(
+            ma, 'hyperedge_nearfield_residual_enabled', False))
+        self._hyperedge_nearfield_residual_range_m = max(1.0e-6, float(
+            getattr(ma, 'hyperedge_nearfield_residual_range_m', 32.0)))
+        self._hyperedge_nearfield_residual_companding_mu = max(0.0, float(
+            getattr(
+                ma, 'hyperedge_nearfield_residual_companding_mu', 0.0)))
+        self._hyperedge_state_relay_enabled = bool(getattr(
+            ma, 'hyperedge_state_relay_enabled', False))
+        self._hyperedge_tx_coalition_max = max(1, int(getattr(
+            ma, 'hyperedge_tx_coalition_max', 2)))
+        self._hyperedge_robust_quantization_enabled = bool(getattr(
+            ma, 'hyperedge_robust_quantization_enabled', False))
+        self._hyperedge_reserved_tx_nodes = tuple(int(node) for node in getattr(
+            ma, 'hyperedge_reserved_tx_nodes', ()))
+        if any(
+            node < 0 or node >= self.K
+            for node in self._hyperedge_reserved_tx_nodes
+        ):
+            raise ValueError('hyperedge_reserved_tx_nodes contains invalid ID')
+        # The budget-reconstructable protocol needs only one node-level
+        # (x,y,vx,vy) sufficient statistic. It is carried once in a target
+        # token packet and expanded locally, rather than repeated Q times.
+        hyperedge_base_state_dim = (
+            7 if self._hyperedge_nearfield_residual_enabled else 4)
+        self._hyperedge_base_state_dim = hyperedge_base_state_dim
         self._hyperedge_protocol_dim = (
-            7 if self._hyperedge_state_stream_enabled else 3)
+            (
+                2 * hyperedge_base_state_dim + 1
+                if self._hyperedge_state_relay_enabled
+                else hyperedge_base_state_dim
+            )
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable'
+            else (7 if self._hyperedge_state_stream_enabled else 3))
         self._hyperedge_consensus_rounds = max(1, int(getattr(
             ma, 'hyperedge_consensus_rounds', 2)))
         self._hyperedge_assignment_hold_frames = max(1, int(getattr(
@@ -672,11 +1096,61 @@ class EnvironmentCore:
             if self._comm_payload_mode != 'target_tokens':
                 raise ValueError(
                     'hyperedge negotiation requires target-token payloads')
-            if (self._hyperedge_pair_score_mode == 'physical_reconstructable'
+            if (self._hyperedge_pair_score_mode in {
+                    'physical_reconstructable', 'budget_reconstructable'}
                     and not self._hyperedge_state_stream_enabled):
                 raise ValueError(
                     'physical-reconstructable hyperedge scores require the '
                     'position/velocity state stream')
+            if (self._hyperedge_protocol_only_enabled
+                    and self._hyperedge_pair_score_mode
+                    != 'budget_reconstructable'):
+                raise ValueError(
+                    'protocol-only hyperedge beacons currently require '
+                    'budget_reconstructable scores')
+            if (self._hyperedge_protocol_only_enabled
+                    and self._hyperedge_state_bits_per_dim <= 0):
+                raise ValueError(
+                    'protocol-only hyperedge beacons require a positive '
+                    'hyperedge_state_bits_per_dim')
+            if (
+                self._hyperedge_nearfield_residual_enabled
+                and self._hyperedge_pair_score_mode
+                != 'budget_reconstructable'
+            ):
+                raise ValueError(
+                    'near-field residual beacons require '
+                    'budget-reconstructable hyperedges')
+        if self._distributed_movement_anchor_broadcast_enabled:
+            if self._hyperedge_pair_score_mode != 'budget_reconstructable':
+                raise ValueError(
+                    'movement anchor broadcast requires the '
+                    'budget-reconstructable protocol')
+            if not self._hyperedge_nearfield_residual_enabled:
+                raise ValueError(
+                    'movement anchor broadcast requires the three-dimensional '
+                    'near-field header')
+        if self._distributed_replicated_power_enabled:
+            if not self._analytical_sensing_power_enabled:
+                raise ValueError(
+                    'distributed replicated power requires analytical '
+                    'sensing power')
+            if (
+                not self._hyperedge_enabled
+                or self._hyperedge_pair_score_mode
+                != 'budget_reconstructable'
+            ):
+                raise ValueError(
+                    'distributed replicated power requires the '
+                    'budget-reconstructable hyperedge state channel')
+            if (
+                self._intercept_constrained_power_enabled
+                or self._task_constrained_power_enabled
+                or self._bargaining_objective_enabled
+            ):
+                raise ValueError(
+                    'distributed replicated power currently supports only '
+                    'ordinary fixed-structure max-min power')
         self._p0_maxmin_pairing_enabled = bool(getattr(
             ma, "p0_maxmin_pairing_enabled", False))
         self._p0_maxmin_bypass_commitment_filter = bool(getattr(
@@ -687,6 +1161,36 @@ class EnvironmentCore:
             ma, "p0_maxmin_local_fusion_enabled", False))
         self._p0_maxmin_event_triggered_enabled = bool(getattr(
             ma, "p0_maxmin_event_triggered_enabled", False))
+        self._p0_maxmin_event_qos_enabled = bool(getattr(
+            ma, "p0_maxmin_event_qos_enabled", True))
+        self._p0_topology_min_change_repair_enabled = bool(getattr(
+            ma, "p0_topology_min_change_repair_enabled", False))
+        self._p0_budget_coupled_structure_enabled = bool(getattr(
+            ma, "p0_budget_coupled_structure_enabled", False))
+        self._p0_budget_coupled_time_limit_s = float(getattr(
+            ma, "p0_budget_coupled_time_limit_s", 5.0))
+        self._p0_budget_coupled_secondary_enabled = bool(getattr(
+            ma, "p0_budget_coupled_secondary_enabled", True))
+        self._p0_budget_coupled_solver_mode = str(getattr(
+            ma, "p0_budget_coupled_solver_mode", "milp")).strip().lower()
+        if self._p0_budget_coupled_solver_mode not in {
+                "milp", "enumerated_role_ceiling",
+                "satisficing_legacy_then_enumerated"}:
+            raise ValueError(
+                "p0_budget_coupled_solver_mode must be 'milp' or "
+                "'enumerated_role_ceiling' or "
+                "'satisficing_legacy_then_enumerated'")
+        if self._p0_budget_coupled_time_limit_s <= 0.0:
+            raise ValueError(
+                "p0_budget_coupled_time_limit_s must be positive")
+        if (self._p0_budget_coupled_structure_enabled
+                and not self._p0_maxmin_local_fusion_enabled):
+            raise ValueError(
+                "budget-coupled P0 requires local-fusion max-min pairing")
+        if (self._p0_budget_coupled_structure_enabled
+                and not self._analytical_sensing_power_enabled):
+            raise ValueError(
+                "budget-coupled P0 requires analytical sensing power")
         if (self._distributed_target_commitment_enabled
                 and not self._joint_isac_power_enabled):
             raise ValueError(
@@ -796,6 +1300,7 @@ class EnvironmentCore:
         self._qpd_metrics: Dict[str, object] = {}
         self._qpd_last_submission_frame = -1
         self._pending_hyperedge_protocol: Dict[int, np.ndarray] = {}
+        self._pending_hyperedge_protocol_frame: Dict[int, int] = {}
         self._hyperedge_local_offer = np.zeros(
             (self.K, self.Q, self._hyperedge_protocol_dim),
             dtype=np.float64)
@@ -809,12 +1314,45 @@ class EnvironmentCore:
         self._hyperedge_selected_set: Tuple[Tuple[int, int, int], ...] = tuple()
         self._hyperedge_last_update_frame = -10**9
         self._hyperedge_metrics: Dict[str, object] = {}
+        self._hyperedge_public_gain_views = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._hyperedge_public_full_views = np.zeros(
+            self.K, dtype=bool)
+        self._distributed_movement_target = np.full(
+            self.K, -1, dtype=np.int64)
+        self._distributed_movement_local_assignment = np.full(
+            (self.K, self.K), -1, dtype=np.int64)
+        self._distributed_movement_last_update = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._distributed_movement_anchor_target_xy = np.zeros(
+            (self.K, self.K, self.Q, 2), dtype=np.float64)
+        self._distributed_movement_anchor_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._distributed_bistatic_gate_latch = np.full(
+            self.K, -1, dtype=np.int8)
+        self._distributed_role_capacity_tx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_role_capacity_rx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_role_capacity_bottleneck = np.full(
+            self.K, np.inf, dtype=np.float64)
+        self._distributed_role_capacity_last_reassign = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._distributed_gap_tx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_gap_rx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
         self._pending_comm_power_fractions: Dict[int, float] = {}
         self._pending_sensing_weights: Dict[int, np.ndarray] = {}
         self._current_comm_power_w = np.zeros(self.K, dtype=np.float64)
         self._current_sensing_power_w = np.full(
-            (self.K, self.Q), float(ua.P_sense), dtype=np.float64)
+            (self.K, self.Q),
+            self._sensing_power_cap_w / max(self.Q, 1), dtype=np.float64)
+        self._distributed_replicated_previous_power = (
+            self._current_sensing_power_w.copy())
+        self._isac_sensing_battery_before = None
         self._last_isac_metrics: Dict[str, object] = {}
+        self._last_movement_safety_metrics: Dict[str, object] = {}
         # Optional information-equivalent distributed structure surrogate.
         # The trainer assembles this graph only from per-UAV local features;
         # realized detection below continues to use the true physical echo.
@@ -877,10 +1415,58 @@ class EnvironmentCore:
                 noise_figure_db=ch.NF,
                 dt=sc.dt,
                 message_dim=self._comm_payload_dim,
+                finite_blocklength_enabled=bool(getattr(
+                    ma, 'comm_finite_blocklength_enabled', False)),
+                finite_blocklength_target_bler=float(getattr(
+                    ma, 'comm_finite_blocklength_target_bler', 1.0e-5)),
+                finite_blocklength_max_channel_uses=int(getattr(
+                    ma, 'comm_finite_blocklength_max_channel_uses',
+                    100_000_000)),
+                finite_blocklength_sample_errors=bool(getattr(
+                    ma, 'comm_finite_blocklength_sample_errors', True)),
+                finite_blocklength_coding_snr_margin_db=float(getattr(
+                    ma, 'comm_finite_blocklength_coding_snr_margin_db', 0.0)),
+                snr_shadowing_std_db=float(getattr(
+                    ma, 'comm_snr_shadowing_std_db', 0.0)),
+                snr_shadowing_correlation=float(getattr(
+                    ma, 'comm_snr_shadowing_correlation', 0.0)),
+                burst_loss_enabled=bool(getattr(
+                    ma, 'comm_burst_loss_enabled', False)),
+                burst_good_to_bad_probability=float(getattr(
+                    ma, 'comm_burst_good_to_bad_probability', 0.0)),
+                burst_bad_to_good_probability=float(getattr(
+                    ma, 'comm_burst_bad_to_good_probability', 1.0)),
+                burst_good_drop_probability=float(getattr(
+                    ma, 'comm_burst_good_drop_probability', 0.0)),
+                burst_bad_drop_probability=float(getattr(
+                    ma, 'comm_burst_bad_drop_probability', 1.0)),
+                rng=self.rng,
             )
+            if (
+                self._inter_uav_comm.finite_blocklength_enabled
+                and self._analytical_comm_power_enabled
+                and bool(getattr(ma, 'analytical_comm_optimal_bw', True))
+            ):
+                raise ValueError(
+                    'finite-blocklength analytical L0 currently requires '
+                    'analytical_comm_optimal_bw=false; the Shannon KKT '
+                    'bandwidth allocator is not valid under dispersion')
         if self._detection_fusion_mode == 'u2u_distributed':
             self._evidence_topk = max(
                 1, int(getattr(ma, 'evidence_packet_topk', 1)))
+            self._evidence_ambiguity_top2_enabled = bool(getattr(
+                ma, 'evidence_packet_ambiguity_top2_enabled', False))
+            self._evidence_ambiguity_ratio = float(getattr(
+                ma, 'evidence_packet_ambiguity_ratio', 0.5))
+            self._evidence_ambiguity_min_deflection = float(getattr(
+                ma, 'evidence_packet_ambiguity_min_deflection', 0.0))
+            if not 0.0 <= self._evidence_ambiguity_ratio <= 1.0:
+                raise ValueError(
+                    'evidence_packet_ambiguity_ratio must lie in [0,1]')
+            if self._evidence_ambiguity_min_deflection < 0.0:
+                raise ValueError(
+                    'evidence_packet_ambiguity_min_deflection must be '
+                    'non-negative')
             self._evidence_owner_aware = bool(getattr(
                 ma, 'evidence_packet_owner_aware', True))
             self._evidence_llr_bits = int(getattr(
@@ -911,16 +1497,22 @@ class EnvironmentCore:
                     'u2u_distributed requires an explicit '
                     'evidence_packet_calibration_profile')
             if self._evidence_content_mode not in {
-                    'normal', 'zero', 'value_roll'}:
+                    'normal', 'standardized_score', 'zero', 'value_roll'}:
                 raise ValueError(
                     'evidence_packet_content_mode must be '
-                    'normal, zero, or value_roll')
+                    'normal, standardized_score, zero, or value_roll')
             self._evidence_packet_layout = EvidencePacketLayout(
                 num_agents=self.K,
                 num_targets=self.Q,
                 header_bits=int(getattr(ma, 'comm_header_bits', 64)),
                 timestamp_bits=16,
                 confidence_bits=self._evidence_confidence_bits,
+                feedback_bits_per_entry=(
+                    4 * self._u2u_belief_feedback_mean_bits
+                    + 4 * self._u2u_belief_feedback_cov_bits
+                    + self._u2u_belief_feedback_aoi_bits
+                    if self._u2u_belief_feedback_enabled else 0
+                ),
             )
             boundaries = np.asarray(getattr(
                 ma,
@@ -953,6 +1545,23 @@ class EnvironmentCore:
                 )
         self._gru_hidden: Dict[int, np.ndarray] = {}  # per-agent GRU hidden state (64-dim)
 
+    def reseed(self, seed: int) -> np.random.Generator:
+        """Replace the owned RNG and rebind persistent stochastic clients.
+
+        Audit 2026-08-25: the cost-aware InterUAVCommunicationModel previously
+        kept the constructor-time generator after a reset(seed=...), so its
+        burst/shadowing/FBL-erasure draws followed the stale constructor stream
+        and same-seed episode replay diverged (runtime probe _rng_probe.py
+        confirmed shadow matrices differ across two reset(seed=91) episodes).
+        Rebind it here so reset(seed=...) governs every stochastic consumer.
+        """
+        self.rng = np.random.default_rng(seed)
+        self.action_space.rng = self.rng
+        self.deflection_computer.rng = self.rng
+        if self._inter_uav_comm is not None:
+            self._inter_uav_comm.rng = self.rng
+        return self.rng
+
     def reset(self) -> Tuple[Dict[int, np.ndarray], Dict]:
         """Reset the environment to initial state.
 
@@ -968,6 +1577,17 @@ class EnvironmentCore:
         self._lex_t_star = None
         self._last_analytical_gain = None
         self._last_analytical_budget = None
+        # Audit 2026-08-17 (P0): these per-episode state holders must be reset,
+        # otherwise the first frame(s) of every episode after the first inherit
+        # the previous episode's values (cross-episode state leak / A6 replay
+        # determinism violation).
+        self._last_analytical_dual_prices = None
+        self._last_bargaining_value = None
+        self._last_analytical_power_balance_error = 0.0
+        self._last_analytical_power_budget_violation_w = 0.0
+        self._last_analytical_unused_power_w = 0.0
+        self._prev_obs_deque = {}
+        self._probe_miss_count = np.zeros(self.Q, dtype=np.int32)
         self._prev_obs = {}  # clear history on reset
         self._gru_hidden = {}  # clear GRU state on reset
         self._comm_msgs = {}
@@ -1020,6 +1640,7 @@ class EnvironmentCore:
         self._qpd_metrics = {}
         self._qpd_last_submission_frame = -1
         self._pending_hyperedge_protocol = {}
+        self._pending_hyperedge_protocol_frame = {}
         self._hyperedge_local_offer = np.zeros(
             (self.K, self.Q, self._hyperedge_protocol_dim),
             dtype=np.float64)
@@ -1033,12 +1654,45 @@ class EnvironmentCore:
         self._hyperedge_selected_set = tuple()
         self._hyperedge_last_update_frame = -10**9
         self._hyperedge_metrics = {}
+        self._hyperedge_public_gain_views = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.float64)
+        self._hyperedge_public_full_views = np.zeros(
+            self.K, dtype=bool)
+        self._distributed_movement_target = np.full(
+            self.K, -1, dtype=np.int64)
+        self._distributed_movement_local_assignment = np.full(
+            (self.K, self.K), -1, dtype=np.int64)
+        self._distributed_movement_last_update = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._distributed_movement_anchor_target_xy = np.zeros(
+            (self.K, self.K, self.Q, 2), dtype=np.float64)
+        self._distributed_movement_anchor_last_seen = np.full(
+            (self.K, self.K, self.Q), -10**9, dtype=np.int64)
+        self._distributed_bistatic_gate_latch = np.full(
+            self.K, -1, dtype=np.int8)
+        self._distributed_role_capacity_tx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_role_capacity_rx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_role_capacity_bottleneck = np.full(
+            self.K, np.inf, dtype=np.float64)
+        self._distributed_role_capacity_last_reassign = np.full(
+            self.K, -10**9, dtype=np.int64)
+        self._distributed_gap_tx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
+        self._distributed_gap_rx_resp = np.zeros(
+            (self.K, self.K, self.Q), dtype=np.int8)
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
         self._current_comm_power_w = np.zeros(self.K, dtype=np.float64)
         self._current_sensing_power_w = np.full(
-            (self.K, self.Q), float(self.cfg.uav.P_sense), dtype=np.float64)
+            (self.K, self.Q),
+            self._sensing_power_cap_w / max(self.Q, 1), dtype=np.float64)
+        self._distributed_replicated_previous_power = (
+            self._current_sensing_power_w.copy())
+        self._isac_sensing_battery_before = None
         self._last_isac_metrics = {}
+        self._last_movement_safety_metrics = {}
         self._external_structure_edge_values = None
         self._external_structure_candidate_mask = None
         if self._dynamic_local_search_coordinator is not None:
@@ -1059,8 +1713,11 @@ class EnvironmentCore:
         self._comm_mailbox = []
         self._last_comm_stats = CommunicationStepStats()
         self._sample_comm_channel_profile()
+        if self._inter_uav_comm is not None:
+            self._inter_uav_comm.reset_channel_state(self.K)
         if self._trust_manager is not None:
             self._trust_manager.reset()
+
 
         # Fusion center at center of area
         self.fc_position = np.array([
@@ -1119,7 +1776,7 @@ class EnvironmentCore:
         # Initialize beliefs
         true_positions = np.array([t.get_position_3d() for t in self.targets])
         true_velocities = np.array([
-            np.array([t.state[2], t.state[3], 0.0]) for t in self.targets
+            np.array([*t.get_velocity(), 0.0]) for t in self.targets
         ])
         self.belief_mgr = BeliefManager(
             K=self.K, Q=self.Q,
@@ -1560,18 +2217,377 @@ class EnvironmentCore:
         )[0]
         self.submit_structure_student_edge_values(values)
 
+    def _coordination_target_state_for_viewer(
+        self,
+        viewer: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the target state legally available to one coordinator.
+
+        In dynamic distributed experiments this is a strict information
+        boundary: invalid or unavailable local tracker state raises instead of
+        silently exposing simulator ground truth.  Ground truth remains legal
+        only for physical measurement generation and post-hoc scoring.
+        """
+        viewer = int(viewer)
+        if not 0 <= viewer < self.K:
+            raise ValueError('viewer is outside the UAV index set')
+        if self._distributed_coordination_use_local_belief_targets:
+            if self.belief_mgr is None:
+                raise RuntimeError(
+                    'local target belief is unavailable during coordination')
+            local = np.asarray(
+                self.belief_mgr.mean[viewer], dtype=np.float64)
+            if local.shape != (self.Q, 4) or not np.all(np.isfinite(local)):
+                raise RuntimeError(
+                    'local target belief is invalid during coordination')
+            position = np.column_stack([
+                local[:, :2],
+                np.zeros(self.Q, dtype=np.float64),
+            ])
+            velocity = np.column_stack([
+                local[:, 2:4],
+                np.zeros(self.Q, dtype=np.float64),
+            ])
+            return position, velocity
+        position = np.asarray([
+            target.get_position_3d() for target in self.targets
+        ], dtype=np.float64)
+        velocity = np.asarray([
+            [*target.get_velocity(), 0.0] for target in self.targets
+        ], dtype=np.float64)
+        return position, velocity
+
+    @staticmethod
+    def _belief_position_disagreement(mean: np.ndarray) -> float:
+        """Mean pairwise position disagreement over targets."""
+        values = np.asarray(mean, dtype=np.float64)
+        if values.ndim != 3 or values.shape[2] < 2 or values.shape[0] < 2:
+            return 0.0
+        differences = (
+            values[:, None, :, :2] - values[None, :, :, :2])
+        distances = np.linalg.norm(differences, axis=-1)
+        upper = np.triu_indices(values.shape[0], k=1)
+        return float(np.mean(distances[upper]))
+
+    def _movement_target_state_for_viewer(
+        self,
+        viewer: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return local target state with physically received anchor positions.
+
+        Anchors replace positions only while fresh. Velocity remains the
+        viewer's own CV estimate and propagates a cached anchor by its public
+        age. No simulator target truth or global owner table is read.
+        """
+        position, velocity = self._coordination_target_state_for_viewer(viewer)
+        if not self._distributed_movement_anchor_broadcast_enabled:
+            return position, velocity
+        position = position.copy()
+        last_seen = self._distributed_movement_anchor_last_seen[int(viewer)]
+        fresh = (
+            (last_seen > -10**8)
+            & (
+                self.t - last_seen
+                <= self._distributed_movement_anchor_max_age_frames
+            )
+        )
+        for target in range(self.Q):
+            sources = np.flatnonzero(fresh[:, target])
+            if sources.size == 0:
+                continue
+            age = (
+                self.t - last_seen[sources, target]
+            ).astype(np.float64)
+            propagated = (
+                self._distributed_movement_anchor_target_xy[
+                    int(viewer), sources, target]
+                + age[:, None]
+                * float(self.uavs[int(viewer)].dt)
+                * velocity[target, :2][None, :]
+            )
+            position[target, :2] = np.median(propagated, axis=0)
+        return position, velocity
+
+    def _belief_freshness_schedule_mask(
+        self,
+        evidence_owner: np.ndarray,
+        evidence_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Hybrid free-ride + top-up posterior broadcast schedule.
+
+        The evidence-selected entries already ride in the broadcast, so they
+        carry the quantized posterior at zero extra cost (legacy coupled
+        behaviour).  This scheduler returns only the freshness TOP-UP entries:
+        each source ranks its own remaining posteriors by
+
+            score_kq = w_aoi * aoi_norm + w_unc * unc_norm
+                       + w_task * task_norm
+
+        and the top entries are added subject to (a) a per-source union cap
+        (evidence + top-ups <= ``u2u_belief_feedback_max_union_per_source``,
+        which bounds the per-packet payload and keeps the broadcast inside the
+        frame deadline) and (b) a global posterior-bit budget.  Entries whose
+        source AoI exceeds the receiver-side fusion guard, owned fusion
+        targets (when ``u2u_belief_feedback_owner_aware``) and targets already
+        in the evidence selection are excluded from the top-ups.  Each signal
+        is min-max normalized per source row over its own Q posteriors, so the
+        schedule is deterministic from purely local state and needs no global
+        quality matrix, no ground link and no ACK.
+        """
+        if self.belief_mgr is None:
+            return np.zeros((self.K, self.Q), dtype=bool)
+        aoi = np.asarray(self.belief_mgr.aoi, dtype=np.float64)
+        cov = np.asarray(self.belief_mgr.cov, dtype=np.float64)
+        uncertainty = cov[..., 0, 0] + cov[..., 1, 1]
+        deficit = np.zeros((self.K, self.Q), dtype=np.float64)
+        for source in range(self.K):
+            local_pd = np.asarray(
+                self.prev_P_D_local.get(
+                    source, np.zeros(self.Q, dtype=np.float64)),
+                dtype=np.float64,
+            ).reshape(-1)
+            if local_pd.shape == (self.Q,):
+                deficit[source] = np.clip(1.0 - local_pd, 0.0, 1.0)
+
+        def row_normalized(values: np.ndarray) -> np.ndarray:
+            out = np.zeros_like(values, dtype=np.float64)
+            for source in range(self.K):
+                row = np.asarray(values[source], dtype=np.float64)
+                lo = float(np.min(row))
+                hi = float(np.max(row))
+                if hi - lo > 1.0e-12:
+                    out[source] = (row - lo) / (hi - lo)
+            return out
+
+        score = (
+            self._u2u_belief_feedback_aoi_weight
+            * row_normalized(aoi)
+            + self._u2u_belief_feedback_uncertainty_weight
+            * row_normalized(uncertainty)
+            + self._u2u_belief_feedback_task_weight
+            * row_normalized(deficit)
+        )
+        # Entries whose source AoI already exceeds the receiver-side fusion
+        # guard cannot be fused and must not consume broadcast budget.
+        stale = aoi > float(self._u2u_belief_feedback_max_age_frames)
+        score[stale] = -np.inf
+        owner = np.asarray(evidence_owner, dtype=np.int64).reshape(-1)
+        owned = owner >= 0
+        owner_mask = np.zeros((self.K, self.Q), dtype=bool)
+        owner_mask[owner[owned], np.arange(self.Q)[owned]] = True
+        if self._u2u_belief_feedback_owner_aware:
+            score[owner_mask] = -np.inf
+        evidence = np.asarray(evidence_mask, dtype=bool)
+        if evidence.shape != (self.K, self.Q):
+            raise ValueError('evidence_mask must have shape (K, Q)')
+        # Evidence entries already free-ride the posterior; top-ups must be
+        # disjoint from them.
+        score[evidence] = -np.inf
+
+        topk = max(1, int(self._u2u_belief_feedback_topk))
+        union_cap = max(1, int(self._u2u_belief_feedback_max_union_per_source))
+        evidence_count = np.sum(evidence, axis=1).astype(np.int64)
+        # The posterior payload must fit inside the frame window shared with
+        # the coordination and evidence broadcasts (unified-MAC budget): select
+        # top-ups greedily by score subject to a global posterior-bit budget.
+        per_entry_bits = max(
+            1,
+            4 * self._u2u_belief_feedback_mean_bits
+            + 4 * self._u2u_belief_feedback_cov_bits
+            + self._u2u_belief_feedback_aoi_bits,
+        )
+        budget_entries = (
+            self._u2u_belief_feedback_bit_budget // per_entry_bits
+            if self._u2u_belief_feedback_bit_budget > 0
+            else self.K * self.Q
+        )
+        per_source_count = np.zeros(self.K, dtype=np.int64)
+        scored = []
+        for source in range(self.K):
+            row = score[source]
+            finite_indices = np.flatnonzero(np.isfinite(row))
+            if finite_indices.size == 0:
+                continue
+            order = finite_indices[np.argsort(
+                -row[finite_indices], kind='stable')]
+            for q in order[:topk]:
+                scored.append((float(row[q]), int(source), int(q)))
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        mask = np.zeros((self.K, self.Q), dtype=bool)
+        selected_entries = 0
+        for _value, source, target in scored:
+            if selected_entries >= budget_entries:
+                break
+            if per_source_count[source] >= max(
+                    0, union_cap - int(evidence_count[source])):
+                continue
+            mask[source, target] = True
+            per_source_count[source] += 1
+            selected_entries += 1
+        return mask
+
+    def _apply_u2u_belief_feedback(
+        self,
+        evidence_transport,
+        source_mean: np.ndarray,
+        source_covariance: np.ndarray,
+        source_aoi: np.ndarray,
+    ) -> Dict[str, float]:
+        """Fuse one physically delivered cross-frame posterior round."""
+        metrics = {
+            'belief_feedback_enabled': float(
+                self._u2u_belief_feedback_enabled),
+            'belief_feedback_fused_entries': 0.0,
+            'belief_feedback_receivers': 0.0,
+            'belief_feedback_disagreement_before_m': 0.0,
+            'belief_feedback_disagreement_after_m': 0.0,
+            'belief_feedback_contraction_ratio': 1.0,
+            'belief_feedback_truth_rmse_before_m': 0.0,
+            'belief_feedback_truth_rmse_after_m': 0.0,
+        }
+        if (
+            not self._u2u_belief_feedback_enabled
+            or evidence_transport is None
+            or self.belief_mgr is None
+        ):
+            return metrics
+        if self.belief_mgr.state_dim != 4:
+            raise RuntimeError(
+                'U2U belief feedback currently requires a 4D CV belief')
+        means = np.asarray(source_mean, dtype=np.float64)
+        covariances = np.asarray(source_covariance, dtype=np.float64)
+        ages = np.asarray(source_aoi, dtype=np.int64)
+        if means.shape != (self.K, self.Q, 4):
+            raise ValueError('feedback source means have invalid shape')
+        if covariances.shape != (self.K, self.Q, 4, 4):
+            raise ValueError('feedback source covariances have invalid shape')
+        if ages.shape != (self.K, self.Q):
+            raise ValueError('feedback source AoI has invalid shape')
+
+        true_position = np.asarray([
+            target.get_position_3d()[:2] for target in self.targets
+        ], dtype=np.float64)
+        before = self._belief_position_disagreement(self.belief_mgr.mean)
+        truth_rmse_before = float(np.sqrt(np.mean(np.square(np.linalg.norm(
+            self.belief_mgr.mean[:, :, :2]
+            - true_position[None, :, :], axis=-1)))))
+        new_mean = self.belief_mgr.mean.copy()
+        new_covariance = self.belief_mgr.cov.copy()
+        new_aoi = self.belief_mgr.aoi.copy()
+        selected = np.asarray(
+            evidence_transport.belief_schedule_mask, dtype=bool)
+        delivery = np.asarray(
+            evidence_transport.delivery_matrix, dtype=bool)
+        decoded = {}
+        fused_entries = 0
+        receivers_used = set()
+        for receiver in range(self.K):
+            for target in range(self.Q):
+                local_means = [self.belief_mgr.mean[receiver, target].copy()]
+                local_covariances = [
+                    self.belief_mgr.cov[receiver, target].copy()]
+                local_ages = [int(self.belief_mgr.aoi[receiver, target])]
+                for source in range(self.K):
+                    encoded_age = min(
+                        max(int(ages[source, target]), 0),
+                        (1 << self._u2u_belief_feedback_aoi_bits) - 1,
+                    )
+                    if (
+                        source == receiver
+                        or not selected[source, target]
+                        or not delivery[source, receiver]
+                        or encoded_age
+                        > self._u2u_belief_feedback_max_age_frames
+                    ):
+                        continue
+                    key = (source, target)
+                    if key not in decoded:
+                        decoded_mean, decoded_covariance = (
+                            quantize_belief_feedback(
+                                means[source, target],
+                                covariances[source, target],
+                                area_size_xy=(
+                                    float(self.area_size[0]),
+                                    float(self.area_size[1]),
+                                ),
+                                velocity_bound_mps=max(
+                                    float(self.cfg.uav.v_max),
+                                    float(self.cfg.target.speed_range[1])
+                                    + 4.0 * float(self.cfg.target.sigma_a),
+                                    1.0,
+                                ),
+                                mean_bits=(
+                                    self._u2u_belief_feedback_mean_bits),
+                                covariance_bits=(
+                                    self._u2u_belief_feedback_cov_bits),
+                            )
+                        )
+                        # The packet contains the previous-round posterior.
+                        # Propagate it once to the receiver's current time.
+                        propagated_mean = self.belief_mgr.F @ decoded_mean
+                        propagated_covariance = (
+                            self.belief_mgr.F @ decoded_covariance
+                            @ self.belief_mgr.F.T
+                            + self.belief_mgr.Q_proc_base
+                        )
+                        decoded[key] = (
+                            propagated_mean,
+                            propagated_covariance,
+                            encoded_age + 1,
+                        )
+                    decoded_mean, decoded_covariance, decoded_age = decoded[key]
+                    local_means.append(decoded_mean)
+                    local_covariances.append(decoded_covariance)
+                    local_ages.append(decoded_age)
+                    fused_entries += 1
+                if len(local_means) <= 1:
+                    continue
+                fused_mean, fused_covariance = (
+                    generalized_covariance_intersection(
+                        np.asarray(local_means),
+                        np.asarray(local_covariances),
+                    )
+                )
+                new_mean[receiver, target] = fused_mean
+                new_covariance[receiver, target] = fused_covariance
+                new_aoi[receiver, target] = min(local_ages)
+                receivers_used.add(receiver)
+        self.belief_mgr.mean[:] = new_mean
+        self.belief_mgr.cov[:] = new_covariance
+        self.belief_mgr.aoi[:] = new_aoi
+        after = self._belief_position_disagreement(self.belief_mgr.mean)
+        truth_rmse_after = float(np.sqrt(np.mean(np.square(np.linalg.norm(
+            self.belief_mgr.mean[:, :, :2]
+            - true_position[None, :, :], axis=-1)))))
+        metrics.update({
+            'belief_feedback_fused_entries': float(fused_entries),
+            'belief_feedback_receivers': float(len(receivers_used)),
+            'belief_feedback_disagreement_before_m': float(before),
+            'belief_feedback_disagreement_after_m': float(after),
+            'belief_feedback_contraction_ratio': float(
+                after / max(before, 1.0e-12)),
+            'belief_feedback_truth_rmse_before_m': truth_rmse_before,
+            'belief_feedback_truth_rmse_after_m': truth_rmse_after,
+        })
+        return metrics
+
     def _prepare_hyperedge_submission(self) -> None:
         """Append a physically charged local Tx/Rx/deficit offer stream."""
         if len(self.uavs) != self.K or len(self.targets) != self.Q:
             return
         uav_xy = np.asarray([uav.pos[:2] for uav in self.uavs])
-        target_xy = np.asarray([
-            target.get_position_3d()[:2] for target in self.targets])
-        distance = np.linalg.norm(
-            uav_xy[:, None, :] - target_xy[None, :, :], axis=-1)
 
         self._pending_hyperedge_protocol = {}
+        self._pending_hyperedge_protocol_frame = {}
         for sender in range(self.K):
+            anchor_payload = False
+            sender_target_position, _ = (
+                self._coordination_target_state_for_viewer(sender))
+            sender_target_xy = sender_target_position[:, :2]
+            sender_distance = np.linalg.norm(
+                uav_xy[sender, None, :] - sender_target_xy,
+                axis=-1,
+            )
             comm_fraction = float(self._pending_comm_power_fractions.get(
                 sender, 0.0))
             sensing_weights = np.asarray(
@@ -1584,7 +2600,7 @@ class EnvironmentCore:
             # receive participation does not emit sensing RF power.
             tx_capability, rx_capability = (
                 factorized_endpoint_capabilities(
-                    distance[sender],
+                    sender_distance,
                     (1.0 - comm_fraction) * sensing_weights,
                     distance_scale_m=self._hyperedge_distance_scale_m,
                     mode=self._hyperedge_capability_mode,
@@ -1598,11 +2614,7 @@ class EnvironmentCore:
             if local_pd.shape != (self.Q,):
                 local_pd = np.zeros(self.Q, dtype=np.float64)
             deficit = np.clip(1.0 - local_pd, 0.0, 1.0)
-            decoded = np.stack(
-                [tx_capability, rx_capability, deficit], axis=-1)
-            encoded = encode_offer_stream(
-                tx_capability, rx_capability, deficit)
-            if self._hyperedge_state_stream_enabled:
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
                 width = max(float(self.area_size[0]), 1e-9)
                 height = max(float(self.area_size[1]), 1e-9)
                 speed = max(float(self.cfg.uav.v_max), 1e-9)
@@ -1616,14 +2628,144 @@ class EnvironmentCore:
                         0.5 * (self.uavs[sender].vel[1] / speed + 1.0),
                         0.0, 1.0),
                 ], dtype=np.float64)
-                repeated_state = np.repeat(
+                if self._hyperedge_nearfield_residual_enabled:
+                    anchor_payload = bool(
+                        self._distributed_movement_anchor_broadcast_enabled
+                        and self.t
+                        % self._distributed_movement_anchor_broadcast_period_frames
+                        == 0
+                    )
+                    if anchor_payload:
+                        anchor_round = int(
+                            self.t
+                            // self._distributed_movement_anchor_broadcast_period_frames)
+                        target_code = int(
+                            (sender + anchor_round) % self.Q)
+                        nearfield = np.asarray([
+                            float(target_code) / max(float(self.Q), 1.0),
+                            np.clip(
+                                sender_target_xy[target_code, 0] / width,
+                                0.0, 1.0),
+                            np.clip(
+                                sender_target_xy[target_code, 1] / height,
+                                0.0, 1.0),
+                        ], dtype=np.float64)
+                        levels = max(
+                            (1 << self._hyperedge_state_bits_per_dim) - 1,
+                            1,
+                        )
+                        quantized_anchor = np.rint(
+                            nearfield[1:] * levels) / levels
+                        self._distributed_movement_anchor_target_xy[
+                            sender, sender, target_code] = (
+                                quantized_anchor
+                                * np.asarray([width, height]))
+                        self._distributed_movement_anchor_last_seen[
+                            sender, sender, target_code] = int(self.t)
+                    else:
+                        nearest = int(np.argmin(sender_distance))
+                        residual_range = float(
+                            self._hyperedge_nearfield_residual_range_m)
+                        companding_mu = float(
+                            self._hyperedge_nearfield_residual_companding_mu)
+                        use_residual = bool(
+                            companding_mu > 0.0
+                            or sender_distance[nearest] <= residual_range)
+                        # Code Q is an explicit absolute-position fallback.
+                        target_code = nearest if use_residual else self.Q
+                        residual = (
+                            uav_xy[sender] - sender_target_xy[nearest]
+                            if use_residual else np.zeros(2, dtype=np.float64)
+                        )
+                        if companding_mu > 0.0:
+                            companded = (
+                                np.sign(residual)
+                                * np.log1p(
+                                    companding_mu
+                                    * np.minimum(
+                                        np.abs(residual), residual_range)
+                                    / residual_range)
+                                / np.log1p(companding_mu)
+                            )
+                        else:
+                            companded = residual / residual_range
+                        nearfield = np.asarray([
+                            float(target_code) / max(float(self.Q), 1.0),
+                            np.clip(
+                                0.5 * (companded[0] + 1.0),
+                                0.0, 1.0),
+                            np.clip(
+                                0.5 * (companded[1] + 1.0),
+                                0.0, 1.0),
+                        ], dtype=np.float64)
+                    state_normalized = np.concatenate(
+                        [state_normalized, nearfield])
+                if self._hyperedge_state_relay_enabled:
+                    # Rotate one cached physical state through the beacon.
+                    # Source code K is the explicit no-relay sentinel. Cached
+                    # values have already passed the physical link/codec.
+                    relay_source = self.K
+                    relay_state = np.zeros(
+                        self._hyperedge_base_state_dim, dtype=np.float64)
+                    seen = np.any(
+                        self._hyperedge_received_last_seen[sender] > -10**8,
+                        axis=1,
+                    )
+                    seen[sender] = False
+                    for offset in range(self.K):
+                        candidate = int((self.t + sender + offset) % self.K)
+                        if seen[candidate]:
+                            relay_source = candidate
+                            relay_state = self._hyperedge_received_offer[
+                                sender, candidate, 0,
+                                :self._hyperedge_base_state_dim,
+                            ].copy()
+                            break
+                    state_normalized = np.concatenate([
+                        state_normalized,
+                        np.asarray([
+                            float(relay_source) / max(float(self.K), 1.0)
+                        ]),
+                        relay_state,
+                    ])
+                decoded = np.repeat(
                     state_normalized[None, :], self.Q, axis=0)
-                decoded = np.concatenate(
-                    [decoded, repeated_state], axis=-1)
-                encoded = np.concatenate(
-                    [encoded, 2.0 * repeated_state - 1.0], axis=-1)
-            self._hyperedge_local_offer[sender] = decoded
+                encoded = 2.0 * decoded - 1.0
+            else:
+                decoded = np.stack(
+                    [tx_capability, rx_capability, deficit], axis=-1)
+                encoded = encode_offer_stream(
+                    tx_capability, rx_capability, deficit)
+                if self._hyperedge_state_stream_enabled:
+                    width = max(float(self.area_size[0]), 1e-9)
+                    height = max(float(self.area_size[1]), 1e-9)
+                    speed = max(float(self.cfg.uav.v_max), 1e-9)
+                    state_normalized = np.array([
+                        np.clip(self.uavs[sender].pos[0] / width, 0.0, 1.0),
+                        np.clip(self.uavs[sender].pos[1] / height, 0.0, 1.0),
+                        np.clip(
+                            0.5 * (self.uavs[sender].vel[0] / speed + 1.0),
+                            0.0, 1.0),
+                        np.clip(
+                            0.5 * (self.uavs[sender].vel[1] / speed + 1.0),
+                            0.0, 1.0),
+                    ], dtype=np.float64)
+                    repeated_state = np.repeat(
+                        state_normalized[None, :], self.Q, axis=0)
+                    decoded = np.concatenate(
+                        [decoded, repeated_state], axis=-1)
+                    encoded = np.concatenate(
+                        [encoded, 2.0 * repeated_state - 1.0], axis=-1)
+            local_decoded = decoded
+            if anchor_payload:
+                # The multiplexed target anchor is consumed by the movement
+                # cache.  Do not reinterpret its absolute x/y fields as a
+                # near-field residual in the physical structure decoder.
+                local_decoded = decoded.copy()
+                local_decoded[:, 4:7] = np.asarray([1.0, 0.5, 0.5])
+            self._hyperedge_local_offer[sender] = local_decoded
             self._pending_hyperedge_protocol[sender] = encoded
+            self._pending_hyperedge_protocol_frame[sender] = int(self.t)
 
             priority = deficit * np.maximum(
                 tx_capability, rx_capability)
@@ -1644,6 +2786,17 @@ class EnvironmentCore:
             if token_mask is None
             else np.asarray(token_mask, dtype=np.float64).reshape(-1) > 0.5
         )
+        if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+            # One active target token carries the node-level state header.
+            # Expand it to every target because endpoint state is target
+            # independent; no untransmitted target-specific value is created.
+            active_indices = np.flatnonzero(active)
+            if active_indices.size == 0:
+                return np.zeros_like(stream), np.zeros(self.Q, dtype=bool)
+            state = np.clip(
+                0.5 * (stream[int(active_indices[0])] + 1.0), 0.0, 1.0)
+            decoded = np.repeat(state[None, :], self.Q, axis=0)
+            return decoded, np.ones(self.Q, dtype=bool)
         decoded = decode_offer_stream(stream[:, :3])
         if self._hyperedge_state_stream_enabled:
             decoded = np.concatenate([
@@ -1658,13 +2811,56 @@ class EnvironmentCore:
         sender: int,
         protocol: np.ndarray,
         token_mask: Optional[np.ndarray],
+        sent_frame: Optional[int] = None,
     ) -> None:
         decoded, active = self._decode_hyperedge_packet(
             protocol, token_mask)
+        packet_frame = int(self.t if sent_frame is None else sent_frame)
+        if (
+            self._distributed_movement_anchor_broadcast_enabled
+            and packet_frame
+            % self._distributed_movement_anchor_broadcast_period_frames
+            == 0
+            and np.any(active)
+        ):
+            first = decoded[int(np.flatnonzero(active)[0])]
+            target_code = int(np.rint(float(first[4]) * float(self.Q)))
+            if 0 <= target_code < self.Q:
+                self._distributed_movement_anchor_target_xy[
+                    int(receiver), int(sender), target_code] = np.asarray([
+                        float(first[5]) * float(self.area_size[0]),
+                        float(first[6]) * float(self.area_size[1]),
+                    ])
+                self._distributed_movement_anchor_last_seen[
+                    int(receiver), int(sender), target_code] = packet_frame
+            decoded = decoded.copy()
+            decoded[:, 4:7] = np.asarray([1.0, 0.5, 0.5])
         self._hyperedge_received_offer[
             int(receiver), int(sender), active] = decoded[active]
         self._hyperedge_received_last_seen[
             int(receiver), int(sender), active] = self.t
+        if (
+            self._hyperedge_pair_score_mode == 'budget_reconstructable'
+            and self._hyperedge_state_relay_enabled
+            and np.any(active)
+        ):
+            first = decoded[int(np.flatnonzero(active)[0])]
+            base = self._hyperedge_base_state_dim
+            relay_source = int(np.rint(float(first[base]) * float(self.K)))
+            if 0 <= relay_source < self.K and relay_source != int(sender):
+                relay_state = np.asarray(
+                    first[base + 1:base + 1 + base],
+                    dtype=np.float64,
+                )
+                relayed = np.zeros(
+                    (self.Q, self._hyperedge_protocol_dim),
+                    dtype=np.float64,
+                )
+                relayed[:, :base] = relay_state[None, :]
+                self._hyperedge_received_offer[
+                    int(receiver), relay_source] = relayed
+                self._hyperedge_received_last_seen[
+                    int(receiver), relay_source] = self.t
 
     def _prepare_qpd_submission(self) -> None:
         """Build the local QPD control plane before physical transmission.
@@ -1703,10 +2899,14 @@ class EnvironmentCore:
         self._qpd_age = np.where(safe, 0, self._qpd_age + 1)
 
         uav_xy = np.asarray([u.pos[:2] for u in self.uavs])
-        target_xy = np.asarray([
-            target.get_position_3d()[:2] for target in self.targets])
-        distances = np.linalg.norm(
-            uav_xy[:, None, :] - target_xy[None, :, :], axis=-1)
+        distances = np.zeros((self.K, self.Q), dtype=np.float64)
+        for k in range(self.K):
+            local_target_position, _ = (
+                self._coordination_target_state_for_viewer(k))
+            distances[k] = np.linalg.norm(
+                uav_xy[k, None, :] - local_target_position[:, :2],
+                axis=-1,
+            )
         self._qpd_capability = np.exp(
             -distances / self._qpd_distance_scale_m)
 
@@ -1899,6 +3099,10 @@ class EnvironmentCore:
         n_active = max(1, int(np.sum(active)))
         b_total = comm.bandwidth_hz
         gamma_th = float(10.0 ** (comm.snr_threshold_db / 10.0))
+        design_snr_factor = float(10.0 ** (
+            max(0.0, float(getattr(
+                self.cfg.marl, 'analytical_comm_snr_margin_db', 0.0)))
+            / 10.0))
         t_win = max(comm.deadline_s - comm.processing_delay_s, 1e-12)
 
         # Per-sender rate demand and worst-receiver path gain (g_i = min_j g_ij).
@@ -1926,9 +3130,17 @@ class EnvironmentCore:
             for i in range(K):
                 if not active[i] or payload[i] <= 0.0:
                     continue
-                r_req = rates[i]
-                gamma_rate = float(2.0 ** (r_req / b_eff) - 1.0)
-                gamma_req = max(gamma_th, gamma_rate)
+                if comm.finite_blocklength_enabled:
+                    channel_uses = max(1, int(np.floor(b_eff * t_win)))
+                    required = minimum_snr_normal_approximation(
+                        channel_uses, int(np.ceil(payload[i])),
+                        comm.finite_blocklength_target_bler)
+                    gamma_rate = (
+                        float('inf') if required is None else float(required))
+                else:
+                    r_req = rates[i]
+                    gamma_rate = float(2.0 ** (r_req / b_eff) - 1.0)
+                gamma_req = max(gamma_th, gamma_rate) * design_snr_factor
                 result[i] = gamma_req * n0_b / gains[i]
             return result
 
@@ -1981,7 +3193,7 @@ class EnvironmentCore:
         for idx, i in enumerate(active_idx):
             b_i = max(float(b_alloc[idx]), 1e-12)
             gamma_rate = float(2.0 ** min(r_arr[idx] / b_i, 60.0) - 1.0)
-            gamma_req = max(gamma_th, gamma_rate)
+            gamma_req = max(gamma_th, gamma_rate) * design_snr_factor
             result[i] = gamma_req * n0 * b_i / g_arr[idx]
         return result
 
@@ -2139,6 +3351,15 @@ class EnvironmentCore:
                     if k in self._pending_structure_student_protocol
                     else 0
                 )
+                hyperedge_protocol_bits = (
+                    self._hyperedge_protocol_dim
+                    * self._hyperedge_state_bits_per_dim
+                    if (
+                        self._hyperedge_enabled
+                        and self._hyperedge_protocol_only_enabled
+                        and k in self._pending_hyperedge_protocol
+                    ) else 0
+                )
                 active = (
                     k in self._pending_comm_messages
                     and (
@@ -2146,6 +3367,7 @@ class EnvironmentCore:
                             self._pending_comm_rates.get(k, 0),
                             active_dimensions=active_dimensions) > 0
                         or structure_bits > 0
+                        or hyperedge_protocol_bits > 0
                     )
                 )
                 fraction = (self._pending_comm_power_fractions.get(k, 0.0)
@@ -2158,7 +3380,10 @@ class EnvironmentCore:
                     )
                 else:
                     p_comm = self._isac_total_power_w * fraction
-                p_sense = self._isac_total_power_w - p_comm
+                p_sense = min(
+                    self._isac_total_power_w - p_comm,
+                    self._sensing_power_cap_w,
+                )
                 weights = self._pending_sensing_weights.get(
                     k, np.full(self.Q, 1.0 / max(self.Q, 1)))
                 self._current_comm_power_w[k] = p_comm
@@ -2241,13 +3466,19 @@ class EnvironmentCore:
                         and 'hyperedge_protocol' in md):
                     self._merge_received_hyperedge_packet(
                         int(receiver), int(sender),
-                        md['hyperedge_protocol'], md.get('token_mask'))
+                        md['hyperedge_protocol'], md.get('token_mask'),
+                        sent_frame=md.get(
+                            'hyperedge_protocol_frame',
+                            md.get('sent_frame')))
             else:
                 future_mail.append(
                     (due_frame, receiver, sender, message, metadata))
         self._comm_mailbox = future_mail
 
         extra_dimensions = {}
+        exact_extra_payload_bits: Dict[int, int] = {}
+        base_payload_dimensions: Dict[int, int] = {}
+        suppress_message_payload: Dict[int, bool] = {}
         quantized_qpd_protocol: Dict[int, np.ndarray] = {}
         if self._qpd_enabled and not self._qpd_overwrite_protocol_header:
             for sender, protocol in self._pending_qpd_protocol.items():
@@ -2267,15 +3498,46 @@ class EnvironmentCore:
                 mask = np.asarray(self._pending_comm_token_masks.get(
                     sender, np.ones(self.Q)), dtype=np.float64)
                 active_targets = int(np.sum(mask > 0.5))
-                extra_dimensions[sender] = (
-                    int(extra_dimensions.get(sender, 0))
-                    + self._hyperedge_protocol_dim * active_targets
+                hyperedge_dimensions = (
+                    self._hyperedge_protocol_dim
+                    if (
+                        self._hyperedge_pair_score_mode
+                        == 'budget_reconstructable'
+                        and active_targets > 0
+                    )
+                    else self._hyperedge_protocol_dim * active_targets
                 )
                 rate_index = int(self._pending_comm_rates.get(sender, 0))
-                quantized = self._inter_uav_comm.quantize_values(
-                    np.asarray(protocol).reshape(-1), rate_index,
-                ).reshape(self.Q, self._hyperedge_protocol_dim)
-                quantized[mask <= 0.5] = 0.0
+                if self._hyperedge_protocol_only_enabled:
+                    base_payload_dimensions[sender] = 0
+                    suppress_message_payload[sender] = True
+                    exact_extra_payload_bits[sender] = (
+                        int(exact_extra_payload_bits.get(sender, 0))
+                        + self._hyperedge_protocol_dim
+                        * self._hyperedge_state_bits_per_dim
+                    )
+                    quantized = self._inter_uav_comm.quantize_values_at_bits(
+                        np.asarray(protocol).reshape(-1),
+                        self._hyperedge_state_bits_per_dim,
+                    ).reshape(self.Q, self._hyperedge_protocol_dim)
+                else:
+                    extra_dimensions[sender] = (
+                        int(extra_dimensions.get(sender, 0))
+                        + hyperedge_dimensions)
+                    quantized = self._inter_uav_comm.quantize_values(
+                        np.asarray(protocol).reshape(-1), rate_index,
+                    ).reshape(self.Q, self._hyperedge_protocol_dim)
+                if (self._hyperedge_pair_score_mode
+                        == 'budget_reconstructable'):
+                    active_indices = np.flatnonzero(mask > 0.5)
+                    if active_indices.size:
+                        state = quantized[int(active_indices[0])].copy()
+                        quantized[:] = 0.0
+                        quantized[int(active_indices[0])] = state
+                    else:
+                        quantized[:] = 0.0
+                else:
+                    quantized[mask <= 0.5] = 0.0
                 quantized_hyperedge_protocol[sender] = quantized
                 # Consensus must use public protocol state.  If the sender
                 # plans from an unquantized private copy while every neighbor
@@ -2291,7 +3553,6 @@ class EnvironmentCore:
         selected_structure_bits: Dict[int, int] = {}
         structure_endpoint_dimensions = (
             self.Q * self._structure_student_endpoint_width)
-        exact_extra_payload_bits: Dict[int, int] = {}
         if self._structure_student_channel_enabled:
             active_sender_count = 0
             for candidate_sender in range(self.K):
@@ -2327,8 +3588,8 @@ class EnvironmentCore:
                 )
                 selected_structure_bits[int(sender)] = int(selected_bits)
                 exact_extra_payload_bits[sender] = (
-                    structure_endpoint_dimensions
-                    * selected_bits
+                    int(exact_extra_payload_bits.get(sender, 0))
+                    + structure_endpoint_dimensions * selected_bits
                     + rate_header_bits
                 )
                 quantized_structure_protocol[sender] = (
@@ -2349,6 +3610,8 @@ class EnvironmentCore:
             token_masks=self._pending_comm_token_masks,
             extra_payload_dimensions=extra_dimensions,
             extra_payload_bits=exact_extra_payload_bits,
+            base_payload_dimensions=base_payload_dimensions,
+            suppress_message_payload=suppress_message_payload,
         )
         # A sender always knows the sparse claim mask it just put on air. Keep
         # this local state through observation construction; peer copies still
@@ -2360,11 +3623,16 @@ class EnvironmentCore:
             has_payload = sender in self._pending_comm_messages
             active_dims = self._inter_uav_comm._active_dimensions(
                 self._pending_comm_token_masks.get(sender))
+            if sender in base_payload_dimensions:
+                active_dims = int(base_payload_dimensions[sender])
             active_dims += int(extra_dimensions.get(sender, 0))
             active = (
                 has_payload
-                and self._inter_uav_comm.payload_bits(
-                    rate_index, active_dimensions=active_dims) > 0)
+                and (
+                    self._inter_uav_comm.payload_bits(
+                        rate_index, active_dimensions=active_dims) > 0
+                    or int(exact_extra_payload_bits.get(sender, 0)) > 0
+                ))
             if active:
                 self._last_sent_comm_token_masks[sender] = np.asarray(
                     self._pending_comm_token_masks.get(
@@ -2395,6 +3663,9 @@ class EnvironmentCore:
             if item.sender in quantized_hyperedge_protocol:
                 metadata['hyperedge_protocol'] = (
                     quantized_hyperedge_protocol[item.sender].copy())
+                metadata['hyperedge_protocol_frame'] = int(
+                    self._pending_hyperedge_protocol_frame.get(
+                        item.sender, self.t))
             # A sub-frame transmission is available in the next observation;
             # longer delays remain in the mailbox until their due frame.
             due_frame = self.t + max(0, item.delay_frames - 1)
@@ -2423,6 +3694,9 @@ class EnvironmentCore:
                         int(item.sender),
                         metadata['hyperedge_protocol'],
                         metadata.get('token_mask'),
+                        sent_frame=metadata.get(
+                            'hyperedge_protocol_frame',
+                            metadata.get('sent_frame')),
                     )
             else:
                 self._comm_mailbox.append((
@@ -2516,6 +3790,11 @@ class EnvironmentCore:
         if self._joint_isac_power_enabled:
             # Sensing allocation is held for the full simulator frame; packet
             # energy uses its actual serialization airtime.
+            # Save the post-communication battery state.  A later analytical
+            # solver may deliberately use less than the provisional sensing
+            # budget, in which case accounting is recomputed from this state.
+            self._isac_sensing_battery_before = np.asarray(
+                [uav.battery for uav in self.uavs], dtype=np.float64)
             for k in range(self.K):
                 sensing_energy = float(
                     np.sum(self._current_sensing_power_w[k]) * self.dt)
@@ -2532,6 +3811,10 @@ class EnvironmentCore:
                     self._current_sensing_power_w)),
                 'isac_max_power_balance_error_w': float(np.max(np.abs(
                     allocated - self._isac_total_power_w))),
+                'isac_max_power_budget_violation_w': float(np.max(np.maximum(
+                    allocated - self._isac_total_power_w, 0.0))),
+                'isac_unused_power_w': float(np.sum(np.maximum(
+                    self._isac_total_power_w - allocated, 0.0))),
                 'isac_per_uav_comm_power_w': self._current_comm_power_w.copy(),
                 'isac_per_uav_sensing_power_w': np.sum(
                     self._current_sensing_power_w, axis=1),
@@ -2548,6 +3831,7 @@ class EnvironmentCore:
         self._pending_comm_token_masks = {}
         self._pending_qpd_protocol = {}
         self._pending_hyperedge_protocol = {}
+        self._pending_hyperedge_protocol_frame = {}
         self._pending_structure_student_protocol = {}
         self._pending_comm_power_fractions = {}
         self._pending_sensing_weights = {}
@@ -2792,24 +4076,24 @@ class EnvironmentCore:
 
     def _resolve_hyperedge_negotiation(
         self,
-        physical_entries: list,
     ) -> Tuple[Tuple[int, int, int], ...]:
-        """Resolve reciprocal directed plans from receiver-local offer views."""
-        physical_lookup = {
-            (int(entry.i), int(entry.j), int(entry.q))
-            for entry in physical_entries
-            if int(entry.i) != int(entry.j) and float(entry.d_eff) > 0.0
-        }
-        held = tuple(
-            edge for edge in self._hyperedge_selected_set
-            if edge in physical_lookup)
+        """Resolve reciprocal plans without a simulator-truth validity filter.
+
+        Local plans are functions only of physically delivered endpoint state,
+        local target beliefs and public configuration.  A planned edge whose
+        true delay/Doppler support is poor must therefore fail through its
+        realized receiver statistic and subsequent AoI/belief evolution; the
+        protocol may not inspect the environment's true feasible-edge set to
+        erase the mistake before execution.
+        """
+        held = tuple(self._hyperedge_selected_set)
         hold_active = bool(
             held
             and len(held) == len(self._hyperedge_selected_set)
             and self.t - self._hyperedge_last_update_frame
             < self._hyperedge_assignment_hold_frames
         )
-        if hold_active:
+        if hold_active and not self._distributed_replicated_power_enabled:
             coverage = float(len({
                 target for _, _, target in held
             }) / max(self.Q, 1))
@@ -2829,44 +4113,99 @@ class EnvironmentCore:
             self._last_isac_metrics.update(self._hyperedge_metrics)
             return held
 
-        target_xy = np.asarray([
-            target.get_position_3d()[:2] for target in self.targets
-        ], dtype=np.float64)
         local_plans = []
+        public_coefficient_views = []
+        public_full_views = []
         visible_peer_counts = []
         local_min_proxy = []
         for viewer in range(self.K):
+            target_position_3d, target_velocity_3d = (
+                self._coordination_target_state_for_viewer(viewer))
+            target_xy = target_position_3d[:, :2]
             tx_capability = np.zeros((self.K, self.Q), dtype=np.float64)
             rx_capability = np.zeros((self.K, self.Q), dtype=np.float64)
             deficit = np.zeros((self.K, self.Q), dtype=np.float64)
             visible = np.zeros((self.K, self.Q), dtype=bool)
             public_position = np.zeros(
                 (self.K, self.Q, 2), dtype=np.float64)
+            public_velocity = np.zeros(
+                (self.K, self.Q, 2), dtype=np.float64)
+            public_nearfield = np.zeros(
+                (self.K, self.Q, 3), dtype=np.float64)
 
-            tx_capability[viewer] = self._hyperedge_local_offer[
-                viewer, :, 0]
-            rx_capability[viewer] = self._hyperedge_local_offer[
-                viewer, :, 1]
-            deficit[viewer] = self._hyperedge_local_offer[viewer, :, 2]
             visible[viewer] = True
-            if self._hyperedge_state_stream_enabled:
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+                public_position[viewer, :, 0] = (
+                    self._hyperedge_local_offer[viewer, :, 0]
+                    * float(self.area_size[0]))
+                public_position[viewer, :, 1] = (
+                    self._hyperedge_local_offer[viewer, :, 1]
+                    * float(self.area_size[1]))
+                public_velocity[viewer, :, 0] = (
+                    (2.0 * self._hyperedge_local_offer[viewer, :, 2] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                public_velocity[viewer, :, 1] = (
+                    (2.0 * self._hyperedge_local_offer[viewer, :, 3] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                if self._hyperedge_nearfield_residual_enabled:
+                    public_nearfield[viewer] = (
+                        self._hyperedge_local_offer[viewer, :, 4:7])
+            else:
+                tx_capability[viewer] = self._hyperedge_local_offer[
+                    viewer, :, 0]
+                rx_capability[viewer] = self._hyperedge_local_offer[
+                    viewer, :, 1]
+                deficit[viewer] = self._hyperedge_local_offer[viewer, :, 2]
+            if (self._hyperedge_state_stream_enabled
+                    and self._hyperedge_pair_score_mode
+                    != 'budget_reconstructable'):
                 public_position[viewer, :, 0] = (
                     self._hyperedge_local_offer[viewer, :, 3]
                     * float(self.area_size[0]))
                 public_position[viewer, :, 1] = (
                     self._hyperedge_local_offer[viewer, :, 4]
                     * float(self.area_size[1]))
+                public_velocity[viewer, :, 0] = (
+                    (2.0 * self._hyperedge_local_offer[viewer, :, 5] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                public_velocity[viewer, :, 1] = (
+                    (2.0 * self._hyperedge_local_offer[viewer, :, 6] - 1.0)
+                    * float(self.cfg.uav.v_max))
 
             received = (
                 self._hyperedge_received_last_seen[viewer] > -10**8)
             visible |= received
-            tx_capability[received] = self._hyperedge_received_offer[
-                viewer, :, :, 0][received]
-            rx_capability[received] = self._hyperedge_received_offer[
-                viewer, :, :, 1][received]
-            deficit[received] = self._hyperedge_received_offer[
-                viewer, :, :, 2][received]
-            if self._hyperedge_state_stream_enabled:
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+                public_position[:, :, 0][received] = (
+                    self._hyperedge_received_offer[
+                        viewer, :, :, 0][received]
+                    * float(self.area_size[0]))
+                public_position[:, :, 1][received] = (
+                    self._hyperedge_received_offer[
+                        viewer, :, :, 1][received]
+                    * float(self.area_size[1]))
+                public_velocity[:, :, 0][received] = (
+                    (2.0 * self._hyperedge_received_offer[
+                        viewer, :, :, 2][received] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                public_velocity[:, :, 1][received] = (
+                    (2.0 * self._hyperedge_received_offer[
+                        viewer, :, :, 3][received] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                if self._hyperedge_nearfield_residual_enabled:
+                    public_nearfield[received] = (
+                        self._hyperedge_received_offer[
+                            viewer, :, :, 4:7][received])
+            else:
+                tx_capability[received] = self._hyperedge_received_offer[
+                    viewer, :, :, 0][received]
+                rx_capability[received] = self._hyperedge_received_offer[
+                    viewer, :, :, 1][received]
+                deficit[received] = self._hyperedge_received_offer[
+                    viewer, :, :, 2][received]
+            if (self._hyperedge_state_stream_enabled
+                    and self._hyperedge_pair_score_mode
+                    != 'budget_reconstructable'):
                 public_position[:, :, 0][received] = (
                     self._hyperedge_received_offer[
                         viewer, :, :, 3][received]
@@ -2875,16 +4214,29 @@ class EnvironmentCore:
                     self._hyperedge_received_offer[
                         viewer, :, :, 4][received]
                     * float(self.area_size[1]))
+                public_velocity[:, :, 0][received] = (
+                    (2.0 * self._hyperedge_received_offer[
+                        viewer, :, :, 5][received] - 1.0)
+                    * float(self.cfg.uav.v_max))
+                public_velocity[:, :, 1][received] = (
+                    (2.0 * self._hyperedge_received_offer[
+                        viewer, :, :, 6][received] - 1.0)
+                    * float(self.cfg.uav.v_max))
             visible_peer_counts.append(float(np.sum(
                 np.any(received, axis=1))))
 
-            # Each viewer uses a conservative maximum of the deficits it can
-            # actually see; missing targets retain its own local deficit.
-            visible_deficit = np.where(visible, deficit, -np.inf)
-            target_deficit = np.max(visible_deficit, axis=0)
-            target_deficit[~np.isfinite(target_deficit)] = (
-                self._hyperedge_local_offer[viewer, :, 2][
-                    ~np.isfinite(target_deficit)])
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+                # Uniform priority preserves the max-min objective and makes
+                # replicated plans independent of private detection history.
+                target_deficit = np.zeros(self.Q, dtype=np.float64)
+            else:
+                # Each viewer uses a conservative maximum of the deficits it
+                # can actually see; missing targets retain its local deficit.
+                visible_deficit = np.where(visible, deficit, -np.inf)
+                target_deficit = np.max(visible_deficit, axis=0)
+                target_deficit[~np.isfinite(target_deficit)] = (
+                    self._hyperedge_local_offer[viewer, :, 2][
+                        ~np.isfinite(target_deficit)])
             pair_value = None
             if self._hyperedge_pair_score_mode == 'physical_reconstructable':
                 pair_value = reconstruct_bistatic_pair_value(
@@ -2894,16 +4246,220 @@ class EnvironmentCore:
                     visible,
                     distance_scale_m=self._hyperedge_distance_scale_m,
                 )
-            plan = plan_local_hyperedges(
-                tx_capability,
-                rx_capability,
-                visible,
-                target_deficit,
-                target_pair_limit=int(self.cfg.detection.K_q_max),
-                deficit_gain=self._hyperedge_deficit_gain,
-                proxy_floor=self._hyperedge_proxy_floor,
-                pair_value=pair_value,
-            )
+            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+                dc = self.deflection_computer
+                coefficient_scale = float(
+                    dc.c_det * dc.M * dc.N * dc.antenna_gain * dc.n_cpi
+                    / max(dc.noise_power, 1.0e-15)
+                )
+                quantization_uncertainty_m = (
+                    0.5 * np.hypot(
+                        float(self.area_size[0])
+                        / max(
+                            2 ** self._hyperedge_state_bits_per_dim - 1, 1),
+                        float(self.area_size[1])
+                        / max(
+                            2 ** self._hyperedge_state_bits_per_dim - 1, 1),
+                    )
+                    if (
+                        self._hyperedge_robust_quantization_enabled
+                        and self._hyperedge_state_bits_per_dim > 0
+                    ) else 0.0
+                )
+                target_position_uncertainty_m = np.zeros(
+                    self.Q, dtype=np.float64)
+                if (
+                    self._distributed_target_position_uncertainty_sigma > 0.0
+                    and self.belief_mgr is not None
+                ):
+                    for target in range(self.Q):
+                        position_covariance = self.belief_mgr.cov[
+                            viewer, target, :2, :2]
+                        target_position_uncertainty_m[target] = (
+                            self._distributed_target_position_uncertainty_sigma
+                            * np.sqrt(max(float(np.max(np.linalg.eigvalsh(
+                                0.5 * (position_covariance
+                                       + position_covariance.T)))), 0.0))
+                        )
+                public_coefficient = (
+                    reconstruct_bistatic_coefficient_from_public_state(
+                        public_position,
+                        public_velocity,
+                        target_position_3d,
+                        target_velocity_3d,
+                        visible,
+                        uav_height_m=float(self.cfg.scenario.height),
+                        fc_hz=float(dc.fc),
+                        rcs_m2=float(dc.rcs),
+                        delta_f_hz=float(dc.delta_f),
+                        symbol_period_s=float(dc.T_sym),
+                        delay_bins=int(dc.M),
+                        doppler_bins=int(dc.N),
+                        dd_gate_min=float(dc.g_min),
+                        coefficient_scale=coefficient_scale,
+                        position_uncertainty_m=quantization_uncertainty_m,
+                        target_position_uncertainty_m=(
+                            target_position_uncertainty_m),
+                    )
+                )
+                public_node = np.any(visible, axis=1)
+                power_coefficient = public_coefficient
+                if (
+                    self._distributed_replicated_power_enabled
+                    and self._hyperedge_nearfield_residual_enabled
+                ):
+                    # All receivers decode the same target-relative residual,
+                    # preserving common views while refining near-field range.
+                    power_position = public_position.copy()
+                    power_velocity = public_velocity.copy()
+                    endpoint_uncertainty = np.full(
+                        self.K,
+                        float(quantization_uncertainty_m),
+                        dtype=np.float64,
+                    )
+                    levels = max(
+                        2 ** self._hyperedge_state_bits_per_dim - 1, 1)
+                    residual_range = float(
+                        self._hyperedge_nearfield_residual_range_m)
+                    companding_mu = float(
+                        self._hyperedge_nearfield_residual_companding_mu)
+                    for node in range(self.K):
+                        if not public_node[node]:
+                            continue
+                        near = public_nearfield[node, 0]
+                        target_code = int(np.rint(
+                            float(near[0]) * float(self.Q)))
+                        if not (0 <= target_code < self.Q):
+                            continue
+                        compact = 2.0 * np.asarray(
+                            near[1:3], dtype=np.float64) - 1.0
+                        if companding_mu > 0.0:
+                            log_mu = float(np.log1p(companding_mu))
+                            residual = (
+                                np.sign(compact) * residual_range
+                                * np.expm1(np.abs(compact) * log_mu)
+                                / companding_mu
+                            )
+                            compact_upper = np.minimum(
+                                np.abs(compact) + 1.0 / levels, 1.0)
+                            component_error = (
+                                residual_range / companding_mu
+                                * (
+                                    np.expm1(compact_upper * log_mu)
+                                    - np.expm1(
+                                        np.abs(compact) * log_mu)
+                                )
+                            )
+                            residual_uncertainty = float(
+                                np.linalg.norm(component_error))
+                        else:
+                            residual = compact * residual_range
+                            residual_uncertainty = float(
+                                np.sqrt(2.0) * residual_range / levels)
+                        refined_xy = (
+                            target_position_3d[target_code, :2] + residual)
+                        power_position[node, :, 0] = refined_xy[0]
+                        power_position[node, :, 1] = refined_xy[1]
+                        endpoint_uncertainty[node] = residual_uncertainty
+                    power_coefficient = (
+                        reconstruct_bistatic_coefficient_from_public_state(
+                            power_position,
+                            power_velocity,
+                            target_position_3d,
+                            target_velocity_3d,
+                            visible,
+                            uav_height_m=float(self.cfg.scenario.height),
+                            fc_hz=float(dc.fc),
+                            rcs_m2=float(dc.rcs),
+                            delta_f_hz=float(dc.delta_f),
+                            symbol_period_s=float(dc.T_sym),
+                            delay_bins=int(dc.M),
+                            doppler_bins=int(dc.N),
+                            dd_gate_min=float(dc.g_min),
+                            coefficient_scale=coefficient_scale,
+                            position_uncertainty_m=endpoint_uncertainty,
+                            target_position_uncertainty_m=(
+                                target_position_uncertainty_m),
+                        )
+                    )
+                public_coefficient_views.append(power_coefficient.copy())
+                public_full_views.append(bool(np.all(public_node)))
+                # The independent sensing PA cap is the binding budget in the
+                # current system. Missing nodes receive zero budget and cannot
+                # become transmitters in a viewer's replicated solve.
+                public_budget = np.where(
+                    public_node,
+                    float(self._sensing_power_cap_w),
+                    0.0,
+                )
+                reports_per_receiver = (
+                    max(1, int(
+                        self.cfg.p0_solver.capacity_per_rx
+                        // max(self.cfg.detection.B_q, 1)))
+                    if self.ground_communication_enabled
+                    else self.Q * self.cfg.detection.K_q_max
+                )
+                if self._hyperedge_coordination_mode == 'reserved_endpoint':
+                    tx_role_mask = np.zeros(self.K, dtype=bool)
+                    if self._hyperedge_reserved_tx_nodes:
+                        tx_role_mask[np.asarray(
+                            self._hyperedge_reserved_tx_nodes,
+                            dtype=np.int64)] = True
+                    else:
+                        tx_role_mask = (
+                            np.arange(self.K, dtype=np.int64) % 2 == 0)
+                    plan = plan_reserved_endpoint_hyperedges(
+                        public_coefficient,
+                        visible,
+                        public_budget,
+                        viewer=viewer,
+                        tx_role_mask=tx_role_mask,
+                        target_pair_limit=int(
+                            self.cfg.detection.K_q_max),
+                    )
+                elif (self._hyperedge_coordination_mode
+                        == 'refined_endpoint'):
+                    plan = plan_refined_endpoint_hyperedges(
+                        public_coefficient,
+                        visible,
+                        public_budget,
+                        viewer=viewer,
+                        target_pair_limit=int(
+                            self.cfg.detection.K_q_max),
+                    )
+                elif (self._hyperedge_coordination_mode
+                        == 'coalition_endpoint'):
+                    plan = plan_sparse_coalition_endpoint_hyperedges(
+                        public_coefficient,
+                        visible,
+                        public_budget,
+                        viewer=viewer,
+                        target_pair_limit=int(
+                            self.cfg.detection.K_q_max),
+                        max_transmitters=self._hyperedge_tx_coalition_max,
+                    )
+                else:
+                    plan = plan_budget_certified_hyperedges(
+                        public_coefficient,
+                        public_budget,
+                        target_deficit,
+                        p_fa=float(self.cfg.detection.P_FA),
+                        p_d_floor=float(getattr(
+                            self.cfg.marl, 'comm_qos_worst_min', 0.60)),
+                        target_pair_limit=int(self.cfg.detection.K_q_max),
+                        reports_per_receiver=reports_per_receiver,
+                    )
+            else:
+                plan = plan_local_hyperedges(
+                    tx_capability,
+                    rx_capability,
+                    visible,
+                    target_deficit,
+                    target_pair_limit=int(self.cfg.detection.K_q_max),
+                    deficit_gain=self._hyperedge_deficit_gain,
+                    proxy_floor=self._hyperedge_proxy_floor,
+                    pair_value=pair_value,
+                )
             local_plans.append(plan)
             local_min_proxy.append(float(np.min(
                 plan.proxy_target_value)) if self.Q else 0.0)
@@ -2920,8 +4476,7 @@ class EnvironmentCore:
             consensus_rounds=self._hyperedge_consensus_rounds,
         )
 
-        active = tuple(
-            edge for edge in stable if edge in physical_lookup)
+        active = tuple(stable)
         covered_targets = {target for _, _, target in active}
         coverage = float(
             len(covered_targets) / max(self.Q, 1))
@@ -2930,9 +4485,43 @@ class EnvironmentCore:
             and coverage + 1e-12
             >= self._hyperedge_min_target_coverage
         )
-        selected = active if use_protocol else tuple()
+        if hold_active:
+            # Certificate-light L1 still needs current continuous gains, but
+            # must not churn the frozen discrete L2 structure. The loop above
+            # refreshes each local public-state view; retain the held edges.
+            selected = held
+            active = held
+            coverage = float(len({
+                target for _, _, target in held
+            }) / max(self.Q, 1))
+            use_protocol = True
+        else:
+            selected = active if use_protocol else tuple()
         self._hyperedge_selected_set = selected
-        if use_protocol:
+        if (
+            len(public_coefficient_views) == self.K
+            and len(selected) > 0
+        ):
+            gain_views = np.zeros(
+                (self.K, self.K, self.Q), dtype=np.float64)
+            for viewer, public_coefficient in enumerate(
+                    public_coefficient_views):
+                try:
+                    gain_views[viewer], _ = fixed_owner_gain_matrix(
+                        public_coefficient, selected)
+                except ValueError:
+                    # Incomplete local coverage fails closed for that view;
+                    # it does not receive the environment's true gain graph.
+                    gain_views[viewer] = 0.0
+            self._hyperedge_public_gain_views = gain_views
+            self._hyperedge_public_full_views = np.asarray(
+                public_full_views, dtype=bool)
+        else:
+            self._hyperedge_public_gain_views = np.zeros(
+                (self.K, self.K, self.Q), dtype=np.float64)
+            self._hyperedge_public_full_views = np.zeros(
+                self.K, dtype=bool)
+        if use_protocol and not hold_active:
             self._hyperedge_last_update_frame = int(self.t)
         self._hyperedge_metrics = {
             'hyperedge_enabled': 1.0,
@@ -2947,13 +4536,19 @@ class EnvironmentCore:
             'hyperedge_protocol_used': float(use_protocol),
             'hyperedge_safety_fallback': float(
                 not use_protocol and self._hyperedge_safety_fallback),
-            'hyperedge_assignment_reused': 0.0,
-            'hyperedge_assignment_age_frames': 0.0,
+            'hyperedge_assignment_reused': float(hold_active),
+            'hyperedge_assignment_age_frames': float(
+                self.t - self._hyperedge_last_update_frame
+                if hold_active else 0),
             'hyperedge_assignment_hold_frames': float(
                 self._hyperedge_assignment_hold_frames),
             'hyperedge_consensus_rounds': float(
                 self._hyperedge_consensus_rounds),
             'hyperedge_pair_score_mode': self._hyperedge_pair_score_mode,
+            'hyperedge_coordination_mode': (
+                self._hyperedge_coordination_mode),
+            'hyperedge_local_belief_target_state': float(
+                self._distributed_coordination_use_local_belief_targets),
         }
         self._last_isac_metrics.update(self._hyperedge_metrics)
         return selected
@@ -2975,19 +4570,27 @@ class EnvironmentCore:
         """Power-independent per-watt gain tensor reconstructed from entries.
 
         ``a_ijq = 1[g_dd >= g_min] * chi_rep * alpha^2 * C`` with
-        ``C = T_sym*M*N*G_tx*G_rx*n_CPI/sigma_z^2``.  This is read directly
+        ``C = M*N*G_tx*G_rx*n_CPI/P_noise`` under the dimensionless
+        energy ratio ``E_signal/E_noise``.  This is read directly
         from the entry observables (not from ``d_eff / P_sense``), so it stays
         identified even for edges the learned sensing head left unexcited.
         """
         dc = self.deflection_computer
         scale = float(
-            dc.T_sym * dc.M * dc.N * dc.antenna_gain * dc.n_cpi
+            dc.c_det * dc.M * dc.N * dc.antenna_gain * dc.n_cpi
             / max(dc.noise_power, 1.0e-15)
         )
         coefficient = np.zeros((self.K, self.K, self.Q), dtype=np.float64)
         for entry in entries:
             i, j, q = int(entry.i), int(entry.j), int(entry.q)
             if not (0 <= i < self.K and 0 <= j < self.K and 0 <= q < self.Q):
+                continue
+            if i == j:
+                # audit 2026-08-17 (P2-7): defensive i != j mask.  No current
+                # entry path produces self-loops (geometry/deflection skip
+                # them), but the owner-value and fixed-owner-LP layers all
+                # rely on the tensor having no i == j support, so mask it
+                # explicitly here instead of depending on the caller.
                 continue
             if float(entry.g_dd) >= float(dc.g_min):
                 coefficient[i, j, q] = (
@@ -3032,6 +4635,56 @@ class EnvironmentCore:
             return None, budget
         return gain, budget
 
+    def _finalize_analytical_power_accounting(
+        self,
+        sensing_budget_w: np.ndarray,
+    ) -> None:
+        """Close RF-cap diagnostics and energy after an analytical override.
+
+        ``sensing_budget_w`` is the residual per-UAV cap after communication,
+        not a required equality.  Ordinary monotone max-min happens to admit a
+        saturated optimum; covertness/exposure constraints may require genuine
+        under-use.  This method therefore reports violation and unused power
+        separately and charges only the power that is actually executed.
+        """
+        budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+        used = np.sum(np.asarray(
+            self._current_sensing_power_w, dtype=np.float64), axis=1)
+        if budget.shape != (self.K,) or used.shape != (self.K,):
+            raise ValueError("analytical sensing budget/accounting shape mismatch")
+        violation = np.maximum(used - budget, 0.0)
+        unused = np.maximum(budget - used, 0.0)
+        self._last_analytical_power_balance_error = float(np.max(
+            np.abs(used - budget)))
+        self._last_analytical_power_budget_violation_w = float(np.max(violation))
+        self._last_analytical_unused_power_w = float(np.sum(unused))
+        if self._last_analytical_power_budget_violation_w > 1.0e-9:
+            raise AssertionError("analytical sensing allocation exceeds RF cap")
+
+        before = getattr(self, '_isac_sensing_battery_before', None)
+        if before is not None:
+            before = np.asarray(before, dtype=np.float64).reshape(-1)
+            if before.shape == (self.K,):
+                for k, uav in enumerate(self.uavs):
+                    uav.battery = max(0.0, float(before[k] - used[k] * self.dt))
+
+        allocated = self._current_comm_power_w + used
+        self._last_isac_metrics.update({
+            'isac_comm_power_w': float(np.sum(self._current_comm_power_w)),
+            'isac_sensing_power_w': float(np.sum(used)),
+            # Deprecated compatibility metric: absolute slack or overflow.
+            'isac_max_power_balance_error_w': float(np.max(np.abs(
+                allocated - self._isac_total_power_w))),
+            'isac_max_power_budget_violation_w': float(np.max(np.maximum(
+                allocated - self._isac_total_power_w, 0.0))),
+            'isac_unused_power_w': float(np.sum(np.maximum(
+                self._isac_total_power_w - allocated, 0.0))),
+            'isac_per_uav_comm_power_w': self._current_comm_power_w.copy(),
+            'isac_per_uav_sensing_power_w': used.copy(),
+            'isac_target_power_w': np.sum(
+                self._current_sensing_power_w, axis=0),
+        })
+
     def _initial_analytical_state(
         self,
     ) -> tuple[object | None, tuple]:
@@ -3051,7 +4704,7 @@ class EnvironmentCore:
             uav_v = np.array([u.vel.copy() for u in self.uavs])  # (K, 3)
             tgt_p = np.array([t.get_position_3d() for t in self.targets])
             tgt_v = np.array([
-                np.array([t.state[2], t.state[3], 0.0]) for t in self.targets
+                np.array([*t.get_velocity(), 0.0]) for t in self.targets
             ])
             roles0 = np.full(self.K, 2, dtype=int)  # idle placeholder
             entries = self.deflection_computer.compute(
@@ -3076,6 +4729,1372 @@ class EnvironmentCore:
                                   for e in selected)
         except Exception:
             return None, ()
+
+    def _distributed_id_movement_delta(self) -> dict:
+        """Move each UAV toward its ID-reserved target using local belief.
+
+        UAV ``k`` reads only belief ``(k, k mod Q)``. With ``K == Q`` this
+        provides one persistent geometric custodian per target without a
+        centralized assignment or access to target truth.
+        """
+        if self.belief_mgr is None or self.Q <= 0:
+            return {}
+        out = {}
+        standoff = float(self._distributed_id_movement_standoff_m)
+        for k in range(self.K):
+            q = int(k % self.Q)
+            belief_xy = np.asarray(
+                self.belief_mgr.get_belief(k, q).mean[:2],
+                dtype=np.float64,
+            )
+            if not np.all(np.isfinite(belief_xy)):
+                continue
+            delta = belief_xy - np.asarray(self.uavs[k].pos[:2])
+            distance = float(np.linalg.norm(delta))
+            if distance <= standoff + 1.0e-12:
+                continue
+            step = min(
+                float(self.uavs[k].v_max * self.uavs[k].dt),
+                distance - standoff,
+            )
+            if step > 0.0:
+                out[k] = step * delta / max(distance, 1.0e-12)
+        return out
+
+    def _distributed_tx_role_mask(self) -> np.ndarray:
+        """Return the public, deterministic Tx/Rx partition used by L2/L3."""
+        mask = np.zeros(self.K, dtype=bool)
+        if self._hyperedge_reserved_tx_nodes:
+            mask[np.asarray(
+                self._hyperedge_reserved_tx_nodes,
+                dtype=np.int64,
+            )] = True
+        else:
+            mask = np.arange(self.K, dtype=np.int64) % 2 == 0
+        return mask
+
+    def _distributed_public_desired_movement(
+        self,
+        public_xy: np.ndarray,
+        target_xy: np.ndarray,
+        assignment_vector: np.ndarray,
+        movement_step: float,
+    ) -> Tuple[np.ndarray, Tuple[str, ...]]:
+        """Build one whole-view desired action before the safety projection.
+
+        With AO disabled this is exactly the legacy radial standoff rule.  With
+        AO enabled, each row uses its assigned target and nearest public
+        opposite-role complement.  Hence independently reconstructed complete
+        views agree without reading a global quality/certificate vector.
+        """
+        desired = np.zeros((self.K, 2), dtype=np.float64)
+        states = ['unassigned_hold'] * self.K
+        standoff = float(self._distributed_id_movement_standoff_m)
+        if self._distributed_gain_scheduled_movement_enabled:
+            far_gate = self._distributed_gain_scheduled_far_range_gate_m
+            if far_gate > 0.0:
+                horizontal = np.linalg.norm(
+                    public_xy[:, None, :] - target_xy[None, :, :],
+                    axis=-1,
+                )
+                tx_role = self._distributed_tx_role_mask()
+                target_has_near_tx = np.min(
+                    horizontal[tx_role], axis=0) <= far_gate
+                target_has_near_rx = np.min(
+                    horizontal[~tx_role], axis=0) <= far_gate
+                far_range_phase = bool(np.any(
+                    ~(target_has_near_tx & target_has_near_rx)))
+                if far_range_phase:
+                    for node, target in enumerate(assignment_vector):
+                        target = int(target)
+                        if not 0 <= target < self.Q:
+                            continue
+                        node_delta = target_xy[target] - public_xy[node]
+                        node_distance = float(np.linalg.norm(node_delta))
+                        node_step = min(
+                            movement_step,
+                            max(node_distance - standoff, 0.0),
+                        )
+                        if node_step > 0.0:
+                            desired[node] = (
+                                node_step * node_delta
+                                / max(node_distance, 1.0e-12))
+                            states[node] = 'gain_far_range'
+                        else:
+                            states[node] = 'gain_far_range_hold'
+                    return desired, tuple(states)
+            geometry_phase = bool(
+                self.t
+                % self._distributed_gain_scheduled_period_frames
+                == 0)
+            if not geometry_phase:
+                return desired, tuple(
+                    'gain_strategy_hold' for _ in range(self.K))
+            desired, winners, _gain, _before, _after = (
+                gauss_southwell_bistatic_geometry_sweep(
+                    public_xy,
+                    target_xy,
+                    self._distributed_tx_role_mask(),
+                    height_m=float(self.cfg.scenario.height),
+                    maximum_step_m=movement_step,
+                    standoff_m=standoff,
+                    minimum_log_improvement=(
+                        self._distributed_gain_scheduled_min_log_improvement),
+                    maximum_selected_nodes=(
+                        self._distributed_gain_scheduled_max_selected_nodes),
+                ))
+            if not winners:
+                return desired, tuple(
+                    'gain_no_improvement' for _ in range(self.K))
+            states = ['gain_not_selected'] * self.K
+            for winner in winners:
+                states[int(winner[0])] = 'gain_selected'
+            return desired, tuple(states)
+        if not self._distributed_alternating_optimization_enabled:
+            for node, target in enumerate(assignment_vector):
+                target = int(target)
+                if not 0 <= target < self.Q:
+                    continue
+                node_delta = target_xy[target] - public_xy[node]
+                node_distance = float(np.linalg.norm(node_delta))
+                node_step = min(
+                    movement_step,
+                    max(node_distance - standoff, 0.0),
+                )
+                if node_step > 0.0:
+                    desired[node] = (
+                        node_step * node_delta
+                        / max(node_distance, 1.0e-12))
+                    states[node] = 'legacy_radial'
+                else:
+                    states[node] = 'legacy_hold'
+            return desired, tuple(states)
+
+        cycle = (
+            self._distributed_ao_range_frames
+            + self._distributed_ao_strategy_frames
+        )
+        cycle_frame = int(self.t % cycle)
+        phase = (
+            'range'
+            if cycle_frame < self._distributed_ao_range_frames
+            else 'strategy'
+        )
+        tx_role_mask = self._distributed_tx_role_mask()
+        for node, target in enumerate(assignment_vector):
+            target = int(target)
+            if not 0 <= target < self.Q:
+                continue
+            complements = np.flatnonzero(tx_role_mask != tx_role_mask[node])
+            if complements.size == 0:
+                states[node] = 'strategy_hold'
+                continue
+            complement_distance = np.linalg.norm(
+                public_xy[complements] - target_xy[target], axis=1)
+            complement = int(complements[int(np.argmin(complement_distance))])
+            delta, state = annular_alternating_movement_delta(
+                public_xy[node],
+                target_xy[target],
+                public_xy[complement],
+                phase=phase,
+                inner_radius_m=self._distributed_ao_inner_radius_m,
+                outer_radius_m=self._distributed_ao_outer_radius_m,
+                maximum_step_m=movement_step,
+                desired_bistatic_angle_deg=(
+                    self._distributed_ao_desired_bistatic_angle_deg),
+                orientation_sign=(1 if (node + target) % 2 == 0 else -1),
+            )
+            desired[node] = delta
+            states[node] = state
+        return desired, tuple(states)
+
+    def _role_capacity_desired_movement(
+        self,
+        public_xy: np.ndarray,
+        target_xy: np.ndarray,
+        tx_resp: np.ndarray,
+        rx_resp: np.ndarray,
+        movement_step: float,
+        strategy_phase: bool,
+        standoff: float,
+    ) -> Tuple[np.ndarray, Tuple[str, ...]]:
+        """Whole-view desired action for role-capacity responsibilities.
+
+        In the strategy phase every node holds geometry while the P0 layer
+        refreshes hyperedges and sensing power.  In the range phase each node
+        approaches the responsibility target with the largest current own
+        range (worst-first): with a bounded per-episode travel budget this is
+        a greedy descent on the per-target bottleneck range, and the approach
+        alternates between the two responsibilities as their ranges change.
+        The travelled distance is clamped so the node never enters the
+        standoff disk of any responsibility target.  Nodes without a
+        responsibility hold.
+        """
+        desired = np.zeros((self.K, 2), dtype=np.float64)
+        states = ['rolecap_no_responsibility'] * self.K
+        if strategy_phase:
+            return desired, tuple('rolecap_strategy_hold' for _ in range(self.K))
+        for node in range(self.K):
+            resp = [int(q) for q in range(self.Q)
+                    if tx_resp[node, q] or rx_resp[node, q]]
+            if not resp:
+                continue
+            if len(resp) == 1:
+                target = resp[0]
+            else:
+                # Worst-first: approach the responsibility target whose own
+                # range currently dominates the local bottleneck.
+                own_distance = np.linalg.norm(
+                    public_xy[node, None, :]
+                    - target_xy[np.asarray(resp, dtype=np.int64)],
+                    axis=1,
+                )
+                target = resp[int(np.argmax(own_distance))]
+            delta = target_xy[target] - public_xy[node]
+            distance = float(np.linalg.norm(delta))
+            if distance <= 1.0e-12:
+                states[node] = 'rolecap_strategy_hold'
+                continue
+            unit = delta / distance
+            travel = min(float(movement_step), distance)
+            for q in resp:
+                dq = float(np.linalg.norm(public_xy[node] - target_xy[q]))
+                if dq <= standoff + 1.0e-12:
+                    travel = 0.0
+                    states[node] = 'rolecap_standoff_hold'
+                    break
+                # t^2 + 2 b t + (dq^2 - standoff^2) = 0 with b = unit.(pos - z);
+                # the forward root t* = -b - sqrt(b^2 - dq^2 + standoff^2)
+                # is the travel that first reaches the standoff disk.
+                b = float(unit @ (public_xy[node] - target_xy[q]))
+                discriminant = b * b - dq * dq + standoff * standoff
+                if b < 0.0 and discriminant > 0.0:
+                    t_hit = -b - float(np.sqrt(discriminant))
+                    travel = min(travel, max(t_hit, 0.0))
+            if travel <= 1.0e-12:
+                states[node] = 'rolecap_standoff_hold'
+                continue
+            desired[node] = travel * unit
+            states[node] = 'rolecap_radial'
+        return desired, tuple(states)
+
+    def _distributed_gap_coverage_movement_delta(self) -> dict:
+        """Gap-coverage movement (three-phase policy, Phase A + B safety net).
+
+        Coverage invariant C1: every target must have a Tx endpoint and an Rx
+        endpoint within ``distributed_gap_critical_radius_m`` (the P_D >= 0.6
+        operational radius).  Each viewer reconstructs the public view and
+        runs the deterministic gap-coverage assignment; every uncovered target
+        therefore receives a Tx/Rx responsibility -- the safety net against
+        the missed-target root cause (deep audit 2026-08-25).  The
+        responsibility set is re-evaluated every frame, so a target leaving
+        the critical radius is re-covered immediately instead of waiting for
+        the legacy 150-frame hold.
+
+        Pursuit (fast convergence): each node approaches the responsibility
+        target with the largest remaining gap ``gap = max(0, R - R_crit)`` at
+        full speed -- a greedy descent on the P_D-gate margin -- clamped to
+        the target standoff disks (safety invariant S1).  A node whose
+        responsibilities are all inside the critical radius holds its range
+        (near-field placeholder until the Phase C tangential steps).
+        """
+        from uav_isac.coordination.hyperedge import (
+            gap_coverage_bottleneck_assignment,
+            project_pairwise_safe_movement,
+        )
+
+        safety_diagnostics = []
+        stale_fail_closed_viewers = 0
+        public_view_max_ages = []
+        viewer_states = []
+        uncovered_counts = []
+        if self.Q <= 0:
+            return {}
+        out = {}
+        r_crit = max(1.0, float(self._distributed_gap_critical_radius_m))
+        cap = max(1, int(self._distributed_gap_capacity))
+        standoff = float(self._distributed_gap_standoff_m)
+        movement_step = float(
+            self.uavs[0].v_max * self.uavs[0].dt)
+        role_mask = self._distributed_tx_role_mask()
+        for viewer in range(self.K):
+            target_position_3d, _ = (
+                self._movement_target_state_for_viewer(viewer))
+            target_xy = target_position_3d[:, :2]
+            public_xy = np.zeros((self.K, 2), dtype=np.float64)
+            public_xy[viewer, 0] = (
+                self._hyperedge_local_offer[viewer, 0, 0]
+                * float(self.area_size[0]))
+            public_xy[viewer, 1] = (
+                self._hyperedge_local_offer[viewer, 0, 1]
+                * float(self.area_size[1]))
+            last_seen = self._hyperedge_received_last_seen[viewer]
+            peer_seen = np.all(
+                (last_seen > -10**8)
+                & (
+                    self.t - last_seen
+                    <= self._distributed_movement_public_max_age_frames
+                ),
+                axis=1,
+            )
+            complete = bool(np.sum(peer_seen) >= self.K - 1)
+            if not complete:
+                stale_fail_closed_viewers += 1
+                out[viewer] = np.zeros(2, dtype=np.float64)
+                continue
+            for node in range(self.K):
+                if node == viewer:
+                    continue
+                public_xy[node, 0] = (
+                    self._hyperedge_received_offer[viewer, node, 0, 0]
+                    * float(self.area_size[0]))
+                public_xy[node, 1] = (
+                    self._hyperedge_received_offer[viewer, node, 0, 1]
+                    * float(self.area_size[1]))
+            peer_age = np.zeros(self.K, dtype=np.int64)
+            for node in range(self.K):
+                if node != viewer and peer_seen[node]:
+                    peer_age[node] = int(np.max(self.t - last_seen[node]))
+            view_max_age = int(np.max(peer_age))
+            public_view_max_ages.append(view_max_age)
+
+            local_deficit = None
+            if self._distributed_gap_deficit_priority:
+                local_pd = np.asarray(
+                    self.prev_P_D_local.get(
+                        viewer, np.zeros(self.Q, dtype=np.float64)),
+                    dtype=np.float64,
+                ).reshape(-1)
+                if local_pd.shape == (self.Q,):
+                    local_deficit = np.clip(1.0 - local_pd, 0.0, 1.0)
+            tx_resp, rx_resp, uncovered = gap_coverage_bottleneck_assignment(
+                public_xy,
+                target_xy,
+                role_mask,
+                critical_radius_m=r_crit,
+                capacity=cap,
+                target_deficit=local_deficit,
+            )
+            self._distributed_gap_tx_resp[viewer] = tx_resp
+            self._distributed_gap_rx_resp[viewer] = rx_resp
+            uncovered_counts.append(int(np.sum(uncovered)))
+
+            assignment_vector = np.full(self.K, -1, dtype=np.int64)
+            # Per-target bistatic bottleneck for the pursuit order:
+            #   score_kq = R_kq^2 * min_{opposite role} R_jq^2
+            # chasing the largest product lowers the P_D-gate bottleneck
+            # fastest (P_D monotone in -R_tx^2 R_rx^2).  All quantities come
+            # from the public view.
+            own_range_sq = np.sum(
+                (public_xy[:, None, :] - target_xy[None, :, :]) ** 2,
+                axis=-1,
+            )
+            tx_nodes = np.flatnonzero(role_mask)
+            rx_nodes = np.flatnonzero(~role_mask)
+            opposite_min_sq = np.minimum(
+                np.min(own_range_sq[tx_nodes], axis=0),
+                np.min(own_range_sq[rx_nodes], axis=0),
+            )
+            for node in range(self.K):
+                node_targets = [
+                    int(q) for q in range(self.Q)
+                    if tx_resp[node, q] or rx_resp[node, q]]
+                if not node_targets:
+                    assignment_vector[node] = int(node % self.Q)
+                    continue
+                product = own_range_sq[node][
+                    np.asarray(node_targets, dtype=np.int64)] \
+                    * opposite_min_sq[
+                        np.asarray(node_targets, dtype=np.int64)]
+                primary = node_targets[int(np.argmax(product))]
+                assignment_vector[node] = primary
+            self._distributed_movement_target[viewer] = int(
+                assignment_vector[viewer])
+            self._distributed_movement_local_assignment[viewer] = (
+                np.asarray(assignment_vector, dtype=np.int64))
+            self._distributed_movement_last_update[viewer] = int(self.t)
+
+            desired = np.zeros((self.K, 2), dtype=np.float64)
+            states = ['gap_no_responsibility'] * self.K
+            pursuit_radius = max(
+                1.0, float(self._distributed_gap_pursuit_radius_m))
+            # Near-field focus (Phase B reinforcement), weighted-product form:
+            # a target whose equivalent radius R_eq = (min_tx^2 * min_rx^2)^0.25
+            # exceeds the pass radius while its near endpoint is within the
+            # reachable radius is critical (P_D dragged by the far leg).  Its
+            # responsible product is multiplied by ``focus_weight`` in the
+            # pursuit order -- a soft bias, not a hard lock: the node still
+            # switches to a genuinely worse responsibility, so no other
+            # target is preempted (the hard-lock ablation regressed 3
+            # saturated seeds).
+            focus_mask = np.zeros(self.Q, dtype=bool)
+            if self._distributed_gap_nearfield_focus:
+                nearfield_radius = max(
+                    1.0, float(self._distributed_gap_nearfield_radius_m))
+                pass_radius = max(
+                    1.0, float(self._distributed_gap_complete_radius_m))
+                min_tx_sq = np.min(own_range_sq[tx_nodes], axis=0)
+                min_rx_sq = np.min(own_range_sq[rx_nodes], axis=0)
+                eq_radius = np.power(min_tx_sq * min_rx_sq, 0.25)
+                near_endpoint = np.sqrt(np.minimum(min_tx_sq, min_rx_sq))
+                focus_mask = (eq_radius > pass_radius) & (
+                    near_endpoint <= nearfield_radius)
+            focus_weight = max(
+                1.0, float(self._distributed_gap_focus_weight))
+            for node in range(self.K):
+                node_targets = [
+                    int(q) for q in range(self.Q)
+                    if tx_resp[node, q] or rx_resp[node, q]]
+                if not node_targets:
+                    continue
+                own_range = np.sqrt(
+                    own_range_sq[node][
+                        np.asarray(node_targets, dtype=np.int64)])
+                if float(np.max(own_range)) <= pursuit_radius + 1.0e-9:
+                    states[node] = 'gap_near_hold'
+                    continue
+                product = own_range_sq[node][
+                    np.asarray(node_targets, dtype=np.int64)] \
+                    * opposite_min_sq[
+                        np.asarray(node_targets, dtype=np.int64)]
+                product_focus = product.copy()
+                for idx, q in enumerate(node_targets):
+                    if focus_mask[q]:
+                        product_focus[idx] *= focus_weight
+                target = node_targets[int(np.argmax(product_focus))]
+                if focus_mask[target]:
+                    states[node] = 'gap_focus'
+                delta = target_xy[target] - public_xy[node]
+                distance = float(np.linalg.norm(delta))
+                if distance <= 1.0e-12:
+                    states[node] = 'gap_near_hold'
+                    continue
+                unit = delta / distance
+                travel = min(float(movement_step), distance)
+                for q in node_targets:
+                    dq = float(np.linalg.norm(
+                        public_xy[node] - target_xy[q]))
+                    if dq <= standoff + 1.0e-12:
+                        travel = 0.0
+                        states[node] = 'gap_standoff_hold'
+                        break
+                    b = float(unit @ (public_xy[node] - target_xy[q]))
+                    discriminant = b * b - dq * dq + standoff * standoff
+                    if b < 0.0 and discriminant > 0.0:
+                        t_hit = -b - float(np.sqrt(discriminant))
+                        travel = min(travel, max(t_hit, 0.0))
+                if travel <= 1.0e-12:
+                    if states[node] == 'gap_no_responsibility':
+                        states[node] = 'gap_standoff_hold'
+                    if (states[node] == 'gap_standoff_hold'
+                            and self._distributed_gap_tangential_phase):
+                        # Phase C: radius-preserving tangential step at the
+                        # standoff boundary.  The new position lies on the
+                        # same circle radius R around the pursuit target, so
+                        # the safety invariant S1 (R >= standoff) is
+                        # preserved exactly; the deterministic sign
+                        # (node+target parity) keeps identical public views
+                        # consistent.
+                        radial = public_xy[node] - target_xy[target]
+                        radius = float(np.linalg.norm(radial))
+                        if radius > 1.0e-9:
+                            theta = float(np.arctan2(
+                                radial[1], radial[0]))
+                            sign = 1.0 if (node + target) % 2 == 0 else -1.0
+                            max_angle = float(
+                                self._distributed_gap_tangential_step_rad)
+                            theta_new = theta + sign * min(
+                                max_angle, movement_step / radius)
+                            new_pos = target_xy[target] + radius * np.asarray(
+                                [float(np.cos(theta_new)),
+                                 float(np.sin(theta_new))])
+                            desired[node] = new_pos - public_xy[node]
+                            states[node] = 'gap_tangential'
+                    continue
+                desired[node] = travel * unit
+                states[node] = 'gap_radial'
+            viewer_states.append(states[viewer])
+
+            safe, safety_info = project_pairwise_safe_movement(
+                public_xy,
+                desired,
+                minimum_distance_m=(
+                    float(self.cfg.uav.d_safe)
+                    + self._distributed_movement_safety_margin_m
+                    + self._distributed_movement_safety_margin_per_age_m
+                    * view_max_age),
+                maximum_step_m=movement_step,
+                area_size_xy=(
+                    float(self.area_size[0]),
+                    float(self.area_size[1]),
+                ),
+                return_diagnostics=True,
+                outside_invariant_recovery=(
+                    self._distributed_movement_outside_invariant_recovery_enabled),
+                recovery_gain=(
+                    self._distributed_movement_outside_invariant_recovery_gain),
+                independently_composable=(
+                    self._distributed_movement_independently_composable_safety),
+            )
+            safety_diagnostics.append(safety_info)
+            out[viewer] = safe[viewer].copy()
+
+        if safety_diagnostics:
+            solve_time = float(sum(
+                float(item['solve_time_s'])
+                for item in safety_diagnostics))
+            fail_closed_calls = int(sum(
+                bool(item['fail_closed'])
+                for item in safety_diagnostics))
+            intervention_calls = int(sum(
+                bool(item['intervened'])
+                for item in safety_diagnostics))
+            self._last_movement_safety_metrics.update({
+                'movement_safety_projection_calls': float(
+                    len(safety_diagnostics)),
+                'movement_safety_intervened': float(
+                    intervention_calls > 0),
+                'movement_safety_intervention_call_rate': float(
+                    intervention_calls / len(safety_diagnostics)),
+                'movement_safety_fail_closed': float(
+                    fail_closed_calls > 0),
+                'movement_safety_fail_closed_calls': float(
+                    fail_closed_calls),
+                'movement_safety_solve_time_s': solve_time,
+                'movement_safety_solve_time_s_per_node': float(
+                    solve_time / max(self.K, 1)),
+                'movement_safety_pairwise_constraints_mean': float(np.mean([
+                    float(item['pairwise_constraint_count'])
+                    for item in safety_diagnostics
+                ])),
+            })
+        self._last_movement_safety_metrics.update({
+            'movement_public_view_stale_fail_closed_viewers': float(
+                stale_fail_closed_viewers),
+            'movement_public_view_stale_fail_closed_rate': float(
+                stale_fail_closed_viewers / max(self.K, 1)),
+            'movement_public_view_mean_max_age_frames': float(np.mean(
+                public_view_max_ages or [0.0])),
+            'movement_public_view_max_age_frames': float(max(
+                public_view_max_ages or [0.0])),
+            'movement_gap_uncovered_targets_mean': float(np.mean(
+                uncovered_counts or [0.0])),
+            'movement_gap_uncovered_rate': float(np.mean(
+                [c / max(self.Q, 1) for c in uncovered_counts] or [0.0])),
+        })
+        if viewer_states:
+            denominator = float(len(viewer_states))
+            self._last_movement_safety_metrics.update({
+                'movement_gap_radial_rate': float(
+                    viewer_states.count('gap_radial') / denominator),
+                'movement_gap_near_hold_rate': float(
+                    viewer_states.count('gap_near_hold') / denominator),
+                'movement_gap_standoff_hold_rate': float(
+                    viewer_states.count('gap_standoff_hold') / denominator),
+                'movement_gap_no_responsibility_rate': float(
+                    viewer_states.count('gap_no_responsibility')
+                    / denominator),
+            })
+        # Responsibility agreement across viewers (gap-coverage analogue of
+        # the legacy local-assignment agreement rate).
+        if self.K >= 2:
+            tx_agree = np.zeros((self.K, self.Q), dtype=bool)
+            rx_agree = np.zeros((self.K, self.Q), dtype=bool)
+            for node in range(self.K):
+                for target in range(self.Q):
+                    tx_entries = self._distributed_gap_tx_resp[:, node, target]
+                    rx_entries = self._distributed_gap_rx_resp[:, node, target]
+                    tx_agree[node, target] = bool(
+                        np.all(tx_entries == tx_entries[0]))
+                    rx_agree[node, target] = bool(
+                        np.all(rx_entries == rx_entries[0]))
+            agreement = float(np.mean(np.concatenate(
+                [tx_agree.reshape(-1), rx_agree.reshape(-1)])))
+        else:
+            agreement = 1.0
+        self._last_movement_safety_metrics.update({
+            'movement_gap_responsibility_agreement_rate': agreement,
+        })
+        executed_targets = np.asarray(
+            self._distributed_movement_target, dtype=np.int64)
+        valid_executed = executed_targets[
+            (executed_targets >= 0) & (executed_targets < self.Q)]
+        unique_executed = int(np.unique(valid_executed).size)
+        valid_views = np.asarray(
+            self._distributed_movement_local_assignment,
+            dtype=np.int64,
+        )
+        valid_views = valid_views[np.all(valid_views >= 0, axis=1)]
+        entry_agreements = []
+        if valid_views.shape[0] > 0:
+            for node in range(self.K):
+                _, counts = np.unique(
+                    valid_views[:, node], return_counts=True)
+                entry_agreements.append(
+                    float(np.max(counts) / valid_views.shape[0]))
+        self._last_movement_safety_metrics.update({
+            'movement_executed_assignment_target_coverage': float(
+                unique_executed / max(self.Q, 1)),
+            'movement_executed_assignment_duplicate_rate': float(
+                1.0 - unique_executed / max(valid_executed.size, 1)),
+            'movement_local_assignment_entry_agreement_rate': float(np.mean(
+                entry_agreements or [0.0])),
+        })
+        return out
+
+    def _distributed_role_capacity_movement_delta(self) -> dict:
+        """Role-capacitated Tx/Rx responsibility movement.
+
+        Each viewer reconstructs the public node view from delivered offers and
+        independently solves the two role subproblems of
+        ``role_capacity_bottleneck_assignment`` (Tx set and Rx set, per-node
+        capacity ``ceil(Q/|K_r|)``).  Every target therefore owns exactly one
+        Tx and one Rx responsibility, and no viewer's local matching row is
+        stitched into a fleet action.  A hysteresis rule reassigns a viewer
+        only when the new worst-case responsibility range improves the
+        incumbent by at least ``reassign_threshold`` after at least
+        ``hold_frames``, preventing target-motion chatter.
+
+        The whole-view desired action still passes the ``d_safe`` pairwise
+        projection before execution (always executed, matching the projected
+        public action semantics of the other distributed modes).
+        """
+        from uav_isac.coordination.hyperedge import (
+            project_pairwise_safe_movement,
+            role_capacity_bottleneck_assignment,
+        )
+
+        safety_diagnostics = []
+        stale_fail_closed_viewers = 0
+        public_view_max_ages = []
+        viewer_states = []
+        reassign_count = 0
+        if self.Q <= 0:
+            return {}
+        out = {}
+        standoff = float(self._distributed_role_capacity_standoff_m)
+        range_frames = max(1, int(self._distributed_role_capacity_range_frames))
+        strategy_frames = max(0, int(self._distributed_role_capacity_strategy_frames))
+        cycle = range_frames + max(strategy_frames, 1)
+        strategy_phase = bool(
+            strategy_frames > 0
+            and self.t % cycle >= range_frames)
+        hold_frames = max(1, int(self._distributed_role_capacity_hold_frames))
+        reassign_threshold = max(
+            0.0, float(self._distributed_role_capacity_reassign_threshold))
+        role_mask = self._distributed_tx_role_mask()
+        tx_count = int(np.count_nonzero(role_mask))
+        rx_count = int(self.K - tx_count)
+        tx_capacity = 1
+        rx_capacity = 1
+        if tx_count > 0:
+            tx_capacity = max(
+                1, int(np.ceil(self.Q / float(tx_count))))
+        if rx_count > 0:
+            rx_capacity = max(
+                1, int(np.ceil(self.Q / float(rx_count))))
+        movement_step = float(
+            self.uavs[0].v_max * self.uavs[0].dt)
+        for viewer in range(self.K):
+            target_position_3d, _ = (
+                self._movement_target_state_for_viewer(viewer))
+            target_xy = target_position_3d[:, :2]
+            public_xy = np.zeros((self.K, 2), dtype=np.float64)
+            public_xy[viewer, 0] = (
+                self._hyperedge_local_offer[viewer, 0, 0]
+                * float(self.area_size[0]))
+            public_xy[viewer, 1] = (
+                self._hyperedge_local_offer[viewer, 0, 1]
+                * float(self.area_size[1]))
+            last_seen = self._hyperedge_received_last_seen[viewer]
+            peer_seen = np.all(
+                (last_seen > -10**8)
+                & (
+                    self.t - last_seen
+                    <= self._distributed_movement_public_max_age_frames
+                ),
+                axis=1,
+            )
+            complete = bool(np.sum(peer_seen) >= self.K - 1)
+            if not complete:
+                # No reconstructed public view means no responsibility set:
+                # fail closed to a hold (never release the unverified actor
+                # movement), independent of the stale-fail-closed flag.
+                stale_fail_closed_viewers += 1
+                out[viewer] = np.zeros(2, dtype=np.float64)
+                continue
+            for node in range(self.K):
+                if node == viewer:
+                    continue
+                public_xy[node, 0] = (
+                    self._hyperedge_received_offer[viewer, node, 0, 0]
+                    * float(self.area_size[0]))
+                public_xy[node, 1] = (
+                    self._hyperedge_received_offer[viewer, node, 0, 1]
+                    * float(self.area_size[1]))
+            peer_age = np.zeros(self.K, dtype=np.int64)
+            for node in range(self.K):
+                if node != viewer and peer_seen[node]:
+                    peer_age[node] = int(np.max(self.t - last_seen[node]))
+            view_max_age = int(np.max(peer_age))
+            public_view_max_ages.append(view_max_age)
+
+            current_bottleneck = float(
+                self._distributed_role_capacity_bottleneck[viewer])
+            has_current = bool(np.isfinite(current_bottleneck))
+            since_reassign = int(
+                self.t - self._distributed_role_capacity_last_reassign[viewer])
+            recompute = not has_current
+            if (not recompute
+                    and since_reassign >= hold_frames):
+                new_tx, new_rx, new_cost = (
+                    role_capacity_bottleneck_assignment(
+                        public_xy,
+                        target_xy,
+                        role_mask,
+                        height_m=float(self.cfg.scenario.height),
+                        capacity=(tx_capacity, rx_capacity),
+                    ))
+                if (
+                    new_cost
+                    < current_bottleneck * (1.0 - reassign_threshold)
+                ):
+                    self._distributed_role_capacity_tx_resp[viewer] = new_tx
+                    self._distributed_role_capacity_rx_resp[viewer] = new_rx
+                    self._distributed_role_capacity_bottleneck[viewer] = (
+                        new_cost)
+                    self._distributed_role_capacity_last_reassign[viewer] = (
+                        int(self.t))
+                    reassign_count += 1
+            if recompute:
+                new_tx, new_rx, new_cost = (
+                    role_capacity_bottleneck_assignment(
+                        public_xy,
+                        target_xy,
+                        role_mask,
+                        height_m=float(self.cfg.scenario.height),
+                        capacity=(tx_capacity, rx_capacity),
+                    ))
+                self._distributed_role_capacity_tx_resp[viewer] = new_tx
+                self._distributed_role_capacity_rx_resp[viewer] = new_rx
+                self._distributed_role_capacity_bottleneck[viewer] = new_cost
+                self._distributed_role_capacity_last_reassign[viewer] = (
+                    int(self.t))
+                reassign_count += 1
+
+            tx_resp = self._distributed_role_capacity_tx_resp[viewer]
+            rx_resp = self._distributed_role_capacity_rx_resp[viewer]
+            assignment_vector = np.full(self.K, -1, dtype=np.int64)
+            for node in range(self.K):
+                node_targets = [
+                    int(q) for q in range(self.Q)
+                    if tx_resp[node, q] or rx_resp[node, q]]
+                if not node_targets:
+                    assignment_vector[node] = int(node % self.Q)
+                    continue
+                node_distance = np.linalg.norm(
+                    public_xy[node, None, :]
+                    - target_xy[np.asarray(node_targets, dtype=np.int64)],
+                    axis=1,
+                )
+                assignment_vector[node] = node_targets[
+                    int(np.argmin(node_distance))]
+            self._distributed_movement_target[viewer] = int(
+                assignment_vector[viewer])
+            self._distributed_movement_local_assignment[viewer] = (
+                np.asarray(assignment_vector, dtype=np.int64))
+            self._distributed_movement_last_update[viewer] = int(self.t)
+
+            desired, movement_states = self._role_capacity_desired_movement(
+                public_xy,
+                target_xy,
+                tx_resp,
+                rx_resp,
+                movement_step,
+                strategy_phase,
+                standoff,
+            )
+            viewer_states.append(movement_states[viewer])
+            safe, safety_info = project_pairwise_safe_movement(
+                public_xy,
+                desired,
+                minimum_distance_m=(
+                    float(self.cfg.uav.d_safe)
+                    + self._distributed_movement_safety_margin_m
+                    + self._distributed_movement_safety_margin_per_age_m
+                    * view_max_age),
+                maximum_step_m=movement_step,
+                area_size_xy=(
+                    float(self.area_size[0]),
+                    float(self.area_size[1]),
+                ),
+                return_diagnostics=True,
+                outside_invariant_recovery=(
+                    self._distributed_movement_outside_invariant_recovery_enabled),
+                recovery_gain=(
+                    self._distributed_movement_outside_invariant_recovery_gain),
+                independently_composable=(
+                    self._distributed_movement_independently_composable_safety),
+            )
+            safety_diagnostics.append(safety_info)
+            out[viewer] = safe[viewer].copy()
+
+        if safety_diagnostics:
+            solve_time = float(sum(
+                float(item['solve_time_s'])
+                for item in safety_diagnostics))
+            fail_closed_calls = int(sum(
+                bool(item['fail_closed'])
+                for item in safety_diagnostics))
+            intervention_calls = int(sum(
+                bool(item['intervened'])
+                for item in safety_diagnostics))
+            self._last_movement_safety_metrics.update({
+                'movement_safety_projection_calls': float(
+                    len(safety_diagnostics)),
+                'movement_safety_intervened': float(
+                    intervention_calls > 0),
+                'movement_safety_intervention_call_rate': float(
+                    intervention_calls / len(safety_diagnostics)),
+                'movement_safety_fail_closed': float(
+                    fail_closed_calls > 0),
+                'movement_safety_fail_closed_calls': float(
+                    fail_closed_calls),
+                'movement_safety_solve_time_s': solve_time,
+                'movement_safety_solve_time_s_per_node': float(
+                    solve_time / max(self.K, 1)),
+                'movement_safety_pairwise_constraints_mean': float(np.mean([
+                    float(item['pairwise_constraint_count'])
+                    for item in safety_diagnostics
+                ])),
+            })
+        self._last_movement_safety_metrics.update({
+            'movement_public_view_stale_fail_closed_viewers': float(
+                stale_fail_closed_viewers),
+            'movement_public_view_stale_fail_closed_rate': float(
+                stale_fail_closed_viewers / max(self.K, 1)),
+            'movement_public_view_mean_max_age_frames': float(np.mean(
+                public_view_max_ages or [0.0])),
+            'movement_public_view_max_age_frames': float(max(
+                public_view_max_ages or [0.0])),
+            'movement_role_capacity_reassign_count': float(
+                reassign_count),
+            'movement_role_capacity_strategy_phase': float(strategy_phase),
+        })
+        if viewer_states:
+            denominator = float(len(viewer_states))
+            self._last_movement_safety_metrics.update({
+                'movement_role_capacity_radial_rate': float(
+                    viewer_states.count('rolecap_radial') / denominator),
+                'movement_role_capacity_strategy_hold_rate': float(
+                    viewer_states.count('rolecap_strategy_hold')
+                    / denominator),
+                'movement_role_capacity_standoff_hold_rate': float(
+                    viewer_states.count('rolecap_standoff_hold')
+                    / denominator),
+                'movement_role_capacity_no_responsibility_rate': float(
+                    viewer_states.count('rolecap_no_responsibility')
+                    / denominator),
+            })
+        # Responsibility agreement across viewers: the fraction of
+        # (node, target) entries whose Tx and Rx responsibility flags agree
+        # between the two reconstructed views -- the role-capacity analogue of
+        # the legacy local-assignment agreement rate.
+        if self.K >= 2:
+            tx_agree = np.zeros((self.K, self.Q), dtype=bool)
+            rx_agree = np.zeros((self.K, self.Q), dtype=bool)
+            for node in range(self.K):
+                for target in range(self.Q):
+                    tx_entries = self._distributed_role_capacity_tx_resp[
+                        :, node, target]
+                    rx_entries = self._distributed_role_capacity_rx_resp[
+                        :, node, target]
+                    tx_agree[node, target] = bool(
+                        np.all(tx_entries == tx_entries[0]))
+                    rx_agree[node, target] = bool(
+                        np.all(rx_entries == rx_entries[0]))
+            agreement = float(np.mean(
+                np.concatenate([tx_agree.reshape(-1), rx_agree.reshape(-1)])))
+        else:
+            agreement = 1.0
+        self._last_movement_safety_metrics.update({
+            'movement_role_capacity_responsibility_agreement_rate': agreement,
+        })
+        executed_targets = np.asarray(
+            self._distributed_movement_target, dtype=np.int64)
+        valid_executed = executed_targets[
+            (executed_targets >= 0) & (executed_targets < self.Q)]
+        unique_executed = int(np.unique(valid_executed).size)
+        valid_views = np.asarray(
+            self._distributed_movement_local_assignment,
+            dtype=np.int64,
+        )
+        valid_views = valid_views[np.all(valid_views >= 0, axis=1)]
+        entry_agreements = []
+        if valid_views.shape[0] > 0:
+            for node in range(self.K):
+                _, counts = np.unique(
+                    valid_views[:, node], return_counts=True)
+                entry_agreements.append(
+                    float(np.max(counts) / valid_views.shape[0]))
+        self._last_movement_safety_metrics.update({
+            'movement_executed_assignment_target_coverage': float(
+                unique_executed / max(self.Q, 1)),
+            'movement_executed_assignment_duplicate_rate': float(
+                1.0 - unique_executed / max(valid_executed.size, 1)),
+            'movement_local_assignment_entry_agreement_rate': float(np.mean(
+                entry_agreements or [0.0])),
+        })
+        return out
+
+    def _distributed_greedy_matching_movement_delta(self) -> dict:
+        """Compute a matching from one UAV's delivered public-state cache.
+
+        Each node independently sorts public node-target distances and accepts
+        the first pair whose node and target are both unmatched.  Complete
+        caches therefore reproduce the same assignment without an assignment
+        server.  A node with an incomplete cache fails over to its persistent
+        ID target, so packet loss cannot reveal a centralized state table.
+        """
+        safety_diagnostics = []
+        stale_fail_closed_viewers = 0
+        public_view_max_ages = []
+        ao_viewer_states = []
+        ao_cycle = (
+            self._distributed_ao_range_frames
+            + self._distributed_ao_strategy_frames
+        )
+        ao_strategy_phase = bool(
+            self.t % ao_cycle >= self._distributed_ao_range_frames)
+        gain_geometry_phase = bool(
+            self.t
+            % self._distributed_gain_scheduled_period_frames
+            == 0)
+        self._last_movement_safety_metrics = {
+            'movement_safety_projection_enabled': float(
+                self._distributed_movement_safety_projection_enabled),
+            'movement_safety_projection_calls': 0.0,
+            'movement_safety_intervened': 0.0,
+            'movement_safety_intervention_call_rate': 0.0,
+            'movement_safety_fail_closed': 0.0,
+            'movement_safety_fail_closed_calls': 0.0,
+            'movement_safety_fail_closed_outside_invariant_calls': 0.0,
+            'movement_safety_outside_invariant_calls': 0.0,
+            'movement_safety_recovery_pair_count': 0.0,
+            'movement_safety_solve_time_s': 0.0,
+            'movement_safety_solve_time_s_per_node': 0.0,
+            'movement_safety_pairwise_constraints_mean': 0.0,
+            'movement_public_view_stale_fail_closed_viewers': 0.0,
+            'movement_public_view_stale_fail_closed_rate': 0.0,
+            'movement_executed_assignment_target_coverage': 0.0,
+            'movement_executed_assignment_duplicate_rate': 0.0,
+            'movement_local_assignment_entry_agreement_rate': 0.0,
+            'movement_anchor_target_coverage': 0.0,
+            'movement_ao_enabled': float(
+                self._distributed_alternating_optimization_enabled),
+            'movement_ao_strategy_phase': float(ao_strategy_phase),
+            'movement_ao_evaluated_viewers': 0.0,
+            'movement_ao_far_recovery_rate': 0.0,
+            'movement_ao_near_recovery_rate': 0.0,
+            'movement_ao_range_hold_rate': 0.0,
+            'movement_ao_strategy_tangent_rate': 0.0,
+            'movement_ao_strategy_hold_rate': 0.0,
+            'movement_ao_inner_radius_m': float(
+                self._distributed_ao_inner_radius_m),
+            'movement_ao_outer_radius_m': float(
+                self._distributed_ao_outer_radius_m),
+            'movement_gain_schedule_enabled': float(
+                self._distributed_gain_scheduled_movement_enabled),
+            'movement_gain_schedule_geometry_phase': float(
+                gain_geometry_phase),
+            'movement_gain_schedule_evaluated_viewers': 0.0,
+            'movement_gain_schedule_selected_self_rate': 0.0,
+            'movement_gain_schedule_strategy_hold_rate': 0.0,
+            'movement_gain_schedule_no_improvement_rate': 0.0,
+            'movement_gain_schedule_far_range_rate': 0.0,
+        }
+        if self.Q <= 0:
+            return {}
+        out = {}
+        standoff = float(self._distributed_id_movement_standoff_m)
+        for viewer in range(self.K):
+            target_position_3d, _ = (
+                self._movement_target_state_for_viewer(viewer))
+            target_xy = target_position_3d[:, :2]
+            held_target = int(self._distributed_movement_target[viewer])
+            held = bool(
+                0 <= held_target < self.Q
+                and self.t - int(
+                    self._distributed_movement_last_update[viewer])
+                < self._distributed_greedy_matching_hold_frames
+            )
+            if held:
+                q = held_target
+            else:
+                q = int(viewer % self.Q)
+            public_xy = np.zeros((self.K, 2), dtype=np.float64)
+            public_xy[viewer, 0] = (
+                self._hyperedge_local_offer[viewer, 0, 0]
+                * float(self.area_size[0]))
+            public_xy[viewer, 1] = (
+                self._hyperedge_local_offer[viewer, 0, 1]
+                * float(self.area_size[1]))
+            last_seen = self._hyperedge_received_last_seen[viewer]
+            peer_seen = np.all(
+                (last_seen > -10**8)
+                & (
+                    self.t - last_seen
+                    <= self._distributed_movement_public_max_age_frames
+                ),
+                axis=1,
+            )
+            complete = bool(np.sum(peer_seen) >= self.K - 1)
+            peer_age = np.zeros(self.K, dtype=np.int64)
+            for node in range(self.K):
+                if node != viewer and peer_seen[node]:
+                    peer_age[node] = int(np.max(
+                        self.t - last_seen[node]))
+            view_max_age = int(np.max(peer_age))
+            if complete and not held:
+                for node in range(self.K):
+                    if node == viewer:
+                        continue
+                    public_xy[node, 0] = (
+                        self._hyperedge_received_offer[
+                            viewer, node, 0, 0]
+                        * float(self.area_size[0])
+                    )
+                    public_xy[node, 1] = (
+                        self._hyperedge_received_offer[
+                            viewer, node, 0, 1]
+                        * float(self.area_size[1])
+                    )
+                distance = np.linalg.norm(
+                    public_xy[:, None, :] - target_xy[None, :, :],
+                    axis=-1,
+                )
+                if self._distributed_bistatic_bottleneck_movement_enabled:
+                    tx_role_mask = self._distributed_tx_role_mask()
+                    gate_threshold = self._distributed_bistatic_tail_gate_ratio
+                    if (gate_threshold > 0.0
+                            and self._distributed_bistatic_gate_latch[viewer] < 0):
+                        tail_ratio = bistatic_geometry_tail_ratio(
+                            public_xy, target_xy, tx_role_mask,
+                            height_m=float(self.cfg.scenario.height))
+                        self._distributed_bistatic_gate_latch[viewer] = int(
+                            tail_ratio >= gate_threshold)
+                    gate_open = bool(
+                        gate_threshold <= 0.0
+                        or self._distributed_bistatic_gate_latch[viewer] == 1)
+                    if gate_open:
+                        bistatic_cost = role_aware_bistatic_movement_cost(
+                            public_xy,
+                            target_xy,
+                            tx_role_mask,
+                            height_m=float(self.cfg.scenario.height),
+                            movement_step_m=float(
+                                self.uavs[viewer].v_max * self.uavs[viewer].dt),
+                            standoff_m=standoff,
+                            complement_exponent=(
+                                self._distributed_bistatic_complement_exponent),
+                        )
+                        assignment_vector = (
+                            deterministic_bottleneck_cost_assignment(
+                                bistatic_cost))
+                    else:
+                        assignment_vector = deterministic_bottleneck_matching(
+                            public_xy, target_xy)
+                    assigned = int(assignment_vector[viewer])
+                    q = int(assigned if assigned >= 0 else viewer % self.Q)
+                elif self._distributed_bottleneck_matching_movement_enabled:
+                    assignment_vector = deterministic_bottleneck_matching(
+                        public_xy, target_xy)
+                    assigned = int(assignment_vector[viewer])
+                    q = int(assigned if assigned >= 0 else viewer % self.Q)
+                else:
+                    pairs = sorted(
+                        (float(distance[node, target]), int(node), int(target))
+                        for node in range(self.K)
+                        for target in range(self.Q)
+                    )
+                    assigned_node = set()
+                    assigned_target = set()
+                    assignment = {}
+                    for _distance, node, target in pairs:
+                        if (node in assigned_node
+                                or target in assigned_target):
+                            continue
+                        assignment[node] = target
+                        assigned_node.add(node)
+                        assigned_target.add(target)
+                    assignment_vector = np.full(
+                        self.K, -1, dtype=np.int64)
+                    for node, target in assignment.items():
+                        assignment_vector[int(node)] = int(target)
+                    q = int(assignment.get(viewer, viewer % self.Q))
+                if (
+                    self._distributed_gain_scheduled_movement_enabled
+                    and self._distributed_gain_scheduled_far_assignment_mode
+                    == 'fixed_id'
+                ):
+                    assignment_vector = (
+                        np.arange(self.K, dtype=np.int64) % self.Q)
+                    q = int(assignment_vector[viewer])
+                self._distributed_movement_target[viewer] = q
+                self._distributed_movement_local_assignment[viewer] = (
+                    np.asarray(assignment_vector, dtype=np.int64))
+                self._distributed_movement_last_update[viewer] = int(self.t)
+                if self._distributed_movement_safety_projection_enabled:
+                    public_view_max_ages.append(view_max_age)
+                    movement_step = float(
+                        self.uavs[viewer].v_max * self.uavs[viewer].dt)
+                    desired, movement_states = (
+                        self._distributed_public_desired_movement(
+                            public_xy,
+                            target_xy,
+                            assignment_vector,
+                            movement_step,
+                        ))
+                    ao_viewer_states.append(movement_states[viewer])
+                    safe, safety_info = project_pairwise_safe_movement(
+                        public_xy,
+                        desired,
+                        minimum_distance_m=(
+                            float(self.cfg.uav.d_safe)
+                            + self._distributed_movement_safety_margin_m
+                            + self._distributed_movement_safety_margin_per_age_m
+                            * view_max_age),
+                        maximum_step_m=movement_step,
+                        area_size_xy=(
+                            float(self.area_size[0]),
+                            float(self.area_size[1]),
+                        ),
+                        return_diagnostics=True,
+                        outside_invariant_recovery=(
+                            self._distributed_movement_outside_invariant_recovery_enabled),
+                        recovery_gain=(
+                            self._distributed_movement_outside_invariant_recovery_gain),
+                        independently_composable=(
+                            self._distributed_movement_independently_composable_safety),
+                    )
+                    safety_diagnostics.append(safety_info)
+                    if (
+                        self._distributed_movement_execute_projected_public_action
+                    ):
+                        # Presence in ``out`` is the override signal.  An
+                        # explicit zero is therefore required for a genuine
+                        # fail-closed hold; omitting the key releases the
+                        # unverified actor movement.
+                        out[viewer] = safe[viewer].copy()
+                        continue
+                    if np.any(np.abs(safe - desired) > 1.0e-9):
+                        out[viewer] = safe[viewer].copy()
+                        continue
+            if (complete and held
+                    and self._distributed_movement_safety_projection_enabled):
+                public_view_max_ages.append(view_max_age)
+                for node in range(self.K):
+                    if node == viewer:
+                        continue
+                    public_xy[node, 0] = (
+                        self._hyperedge_received_offer[
+                            viewer, node, 0, 0]
+                        * float(self.area_size[0])
+                    )
+                    public_xy[node, 1] = (
+                        self._hyperedge_received_offer[
+                            viewer, node, 0, 1]
+                        * float(self.area_size[1])
+                    )
+                if self._distributed_movement_local_assignment_cache_enabled:
+                    assignment_vector = (
+                        self._distributed_movement_local_assignment[
+                            viewer].copy())
+                    if np.any(assignment_vector < 0):
+                        stale_fail_closed_viewers += 1
+                        out[viewer] = np.zeros(2, dtype=np.float64)
+                        continue
+                else:
+                    assignment_vector = (
+                        self._distributed_movement_target.copy())
+                movement_step = float(
+                    self.uavs[viewer].v_max * self.uavs[viewer].dt)
+                desired, movement_states = (
+                    self._distributed_public_desired_movement(
+                        public_xy,
+                        target_xy,
+                        assignment_vector,
+                        movement_step,
+                    ))
+                ao_viewer_states.append(movement_states[viewer])
+                safe, safety_info = project_pairwise_safe_movement(
+                    public_xy,
+                    desired,
+                    minimum_distance_m=(
+                        float(self.cfg.uav.d_safe)
+                        + self._distributed_movement_safety_margin_m
+                        + self._distributed_movement_safety_margin_per_age_m
+                        * view_max_age),
+                    maximum_step_m=movement_step,
+                    area_size_xy=(
+                        float(self.area_size[0]),
+                        float(self.area_size[1]),
+                    ),
+                    return_diagnostics=True,
+                    outside_invariant_recovery=(
+                        self._distributed_movement_outside_invariant_recovery_enabled),
+                    recovery_gain=(
+                        self._distributed_movement_outside_invariant_recovery_gain),
+                    independently_composable=(
+                        self._distributed_movement_independently_composable_safety),
+                )
+                safety_diagnostics.append(safety_info)
+                if self._distributed_movement_execute_projected_public_action:
+                    out[viewer] = safe[viewer].copy()
+                    continue
+                if np.any(np.abs(safe - desired) > 1.0e-9):
+                    out[viewer] = safe[viewer].copy()
+                    continue
+            if not complete and self._distributed_movement_stale_fail_closed:
+                stale_fail_closed_viewers += 1
+                out[viewer] = np.zeros(2, dtype=np.float64)
+                continue
+            delta = target_xy[q] - np.asarray(self.uavs[viewer].pos[:2])
+            distance = float(np.linalg.norm(delta))
+            if distance <= standoff + 1.0e-12:
+                continue
+            step = min(
+                float(self.uavs[viewer].v_max * self.uavs[viewer].dt),
+                distance - standoff,
+            )
+            if step > 0.0:
+                out[viewer] = step * delta / max(distance, 1.0e-12)
+        if safety_diagnostics:
+            solve_time = float(sum(
+                float(item['solve_time_s'])
+                for item in safety_diagnostics))
+            fail_closed_calls = int(sum(
+                bool(item['fail_closed'])
+                for item in safety_diagnostics))
+            fail_closed_outside_invariant_calls = int(sum(
+                bool(item['fail_closed']) and not bool(item['initially_safe'])
+                for item in safety_diagnostics))
+            outside_invariant_calls = int(sum(
+                not bool(item['initially_safe'])
+                for item in safety_diagnostics))
+            recovery_pair_count = int(sum(
+                int(item.get('recovery_pair_count', 0))
+                for item in safety_diagnostics))
+            intervention_calls = int(sum(
+                bool(item['intervened'])
+                for item in safety_diagnostics))
+            self._last_movement_safety_metrics.update({
+                'movement_safety_projection_calls': float(
+                    len(safety_diagnostics)),
+                'movement_safety_intervened': float(
+                    intervention_calls > 0),
+                'movement_safety_intervention_call_rate': float(
+                    intervention_calls / len(safety_diagnostics)),
+                'movement_safety_fail_closed': float(
+                    fail_closed_calls > 0),
+                'movement_safety_fail_closed_calls': float(
+                    fail_closed_calls),
+                'movement_safety_fail_closed_outside_invariant_calls': float(
+                    fail_closed_outside_invariant_calls),
+                'movement_safety_outside_invariant_calls': float(
+                    outside_invariant_calls),
+                'movement_safety_recovery_pair_count': float(
+                    recovery_pair_count),
+                'movement_safety_solve_time_s': solve_time,
+                'movement_safety_solve_time_s_per_node': float(
+                    solve_time / max(self.K, 1)),
+                'movement_safety_pairwise_constraints_mean': float(np.mean([
+                    float(item['pairwise_constraint_count'])
+                    for item in safety_diagnostics
+                ])),
+            })
+        self._last_movement_safety_metrics.update({
+            'movement_public_view_stale_fail_closed_viewers': float(
+                stale_fail_closed_viewers),
+            'movement_public_view_stale_fail_closed_rate': float(
+                stale_fail_closed_viewers / max(self.K, 1)),
+            'movement_public_view_mean_max_age_frames': float(np.mean(
+                public_view_max_ages or [0.0])),
+            'movement_public_view_max_age_frames': float(max(
+                public_view_max_ages or [0.0])),
+        })
+        if ao_viewer_states:
+            denominator = float(len(ao_viewer_states))
+            self._last_movement_safety_metrics.update({
+                'movement_ao_evaluated_viewers': denominator,
+                'movement_ao_far_recovery_rate': float(
+                    ao_viewer_states.count('far_recovery') / denominator),
+                'movement_ao_near_recovery_rate': float(
+                    ao_viewer_states.count('near_recovery') / denominator),
+                'movement_ao_range_hold_rate': float(
+                    ao_viewer_states.count('range_hold') / denominator),
+                'movement_ao_strategy_tangent_rate': float(
+                    ao_viewer_states.count('strategy_tangent') / denominator),
+                'movement_ao_strategy_hold_rate': float(
+                    ao_viewer_states.count('strategy_hold') / denominator),
+                'movement_gain_schedule_evaluated_viewers': denominator,
+                'movement_gain_schedule_selected_self_rate': float(
+                    ao_viewer_states.count('gain_selected') / denominator),
+                'movement_gain_schedule_strategy_hold_rate': float(
+                    ao_viewer_states.count('gain_strategy_hold')
+                    / denominator),
+                'movement_gain_schedule_no_improvement_rate': float(
+                    ao_viewer_states.count('gain_no_improvement')
+                    / denominator),
+                'movement_gain_schedule_far_range_rate': float(
+                    (
+                        ao_viewer_states.count('gain_far_range')
+                        + ao_viewer_states.count('gain_far_range_hold')
+                    ) / denominator),
+            })
+        executed_targets = np.asarray(
+            self._distributed_movement_target, dtype=np.int64)
+        valid_executed = executed_targets[
+            (executed_targets >= 0) & (executed_targets < self.Q)]
+        unique_executed = int(np.unique(valid_executed).size)
+        valid_views = np.asarray(
+            self._distributed_movement_local_assignment,
+            dtype=np.int64,
+        )
+        valid_views = valid_views[np.all(valid_views >= 0, axis=1)]
+        entry_agreements = []
+        if valid_views.shape[0] > 0:
+            for node in range(self.K):
+                _, counts = np.unique(
+                    valid_views[:, node], return_counts=True)
+                entry_agreements.append(
+                    float(np.max(counts) / valid_views.shape[0]))
+        self._last_movement_safety_metrics.update({
+            'movement_executed_assignment_target_coverage': float(
+                unique_executed / max(self.Q, 1)),
+            'movement_executed_assignment_duplicate_rate': float(
+                1.0 - unique_executed / max(valid_executed.size, 1)),
+            'movement_local_assignment_entry_agreement_rate': float(np.mean(
+                entry_agreements or [0.0])),
+            'movement_anchor_target_coverage': float(np.mean(
+                np.sum(
+                    np.any(
+                        (
+                            self._distributed_movement_anchor_last_seen
+                            > -10**8
+                        )
+                        & (
+                            self.t
+                            - self._distributed_movement_anchor_last_seen
+                            <= self._distributed_movement_anchor_max_age_frames
+                        ),
+                        axis=1,
+                    ),
+                    axis=1,
+                ) / max(self.Q, 1)
+            )),
+        })
+        return out
 
     def _analytical_movement_delta(self) -> dict:
         """Receding-horizon capability-guided movement (L3 geometry hook).
@@ -3574,6 +6593,51 @@ class EnvironmentCore:
                 out[k] = best[k]
         return out
 
+    def _serialized_protocol_accounting(
+        self,
+        comm_stats,
+        evidence_transport,
+    ) -> Dict[str, float]:
+        """Unified MAC slot accounting for the two protocol broadcasts.
+
+        The coordination broadcast (learned messages plus the hyperedge state
+        stream) and the evidence/belief broadcast share one frame window.
+        When they are transmitted serially in two sub-slots the total protocol
+        latency is the sum of the two class latencies; the sum must itself fit
+        the frame deadline for the protocol to be certificate-valid.  This is
+        pure latency/bits bookkeeping -- it does not move traffic into a
+        different slot, it makes the slot split explicit and testable.
+        """
+        deadline = max(1.0e-9, float(self._active_comm_deadline_s))
+        coord_latency = float(getattr(comm_stats, 'mean_latency_s', 0.0))
+        coord_p95 = float(getattr(comm_stats, 'p95_latency_s', 0.0))
+        coord_bits = float(getattr(comm_stats, 'total_bits', 0.0))
+        if evidence_transport is None:
+            evidence_latency = 0.0
+            evidence_p95 = 0.0
+            evidence_bits = 0.0
+        else:
+            evidence_latency = float(
+                getattr(evidence_transport, 'mean_latency_s', 0.0))
+            evidence_p95 = float(
+                getattr(evidence_transport, 'p95_latency_s', 0.0))
+            evidence_bits = float(
+                getattr(evidence_transport, 'total_bits', 0.0))
+        serialized_mean = coord_latency + evidence_latency
+        serialized_p95 = coord_p95 + evidence_p95
+        return {
+            'protocol_coord_latency_s': coord_latency,
+            'protocol_evidence_latency_s': evidence_latency,
+            'protocol_total_latency_s': serialized_mean,
+            'protocol_total_p95_latency_s': serialized_p95,
+            'protocol_serialized_bits': coord_bits + evidence_bits,
+            'protocol_frame_deadline_s': deadline,
+            'protocol_total_deadline_violation': float(
+                serialized_mean > deadline),
+            'protocol_total_p95_deadline_violation': float(
+                serialized_p95 > deadline),
+        }
+
     def step(self, actions: Dict[int, Action]) -> Tuple[Dict, Dict, Dict, StepInfo]:
         """Execute one simulation frame.
 
@@ -3596,7 +6660,20 @@ class EnvironmentCore:
         # movement (receding horizon).  Structure (L2) is re-optimised by P0 at
         # the moved geometry later in this frame.
         analytical_delta: dict = {}
-        if self._analytical_movement_enabled:
+        if self._distributed_gap_coverage_movement_enabled:
+            analytical_delta = (
+                self._distributed_gap_coverage_movement_delta())
+        elif self._distributed_role_capacity_movement_enabled:
+            analytical_delta = (
+                self._distributed_role_capacity_movement_delta())
+        elif (self._distributed_bistatic_bottleneck_movement_enabled
+                or self._distributed_bottleneck_matching_movement_enabled
+                or self._distributed_greedy_matching_movement_enabled):
+            analytical_delta = (
+                self._distributed_greedy_matching_movement_delta())
+        elif self._distributed_id_movement_enabled:
+            analytical_delta = self._distributed_id_movement_delta()
+        elif self._analytical_movement_enabled:
             analytical_delta = self._analytical_movement_delta()
 
         # 1. Apply UAV actions
@@ -3627,7 +6704,7 @@ class EnvironmentCore:
 
         target_positions = np.array([t.get_position_3d() for t in self.targets])
         target_velocities = np.array([
-            np.array([t.state[2], t.state[3], 0.0]) for t in self.targets
+            np.array([*t.get_velocity(), 0.0]) for t in self.targets
         ])
 
         # 3. Compute Deflection matrix. When the policy does not choose roles,
@@ -3761,8 +6838,7 @@ class EnvironmentCore:
 
         hyperedge_selected: Tuple[Tuple[int, int, int], ...] = tuple()
         if self._hyperedge_enabled:
-            hyperedge_selected = self._resolve_hyperedge_negotiation(
-                unfiltered_ranking_entries)
+            hyperedge_selected = self._resolve_hyperedge_negotiation()
 
         # 4. Inner P0 solver with assignment hold (reduces reward non-stationarity)
         hold_frames = (
@@ -3770,6 +6846,11 @@ class EnvironmentCore:
             if self._p0_maxmin_pairing_enabled
             else getattr(self.cfg.marl, 'assignment_hold_frames', 1)
         )
+        topology_repair_solution = None
+        topology_repair_started = None
+        topology_replacement_count = 0
+        topology_invalid_edge_count = 0
+        topology_repair_candidate_worst_pd = np.nan
         # Commitments change at communication rate. Reusing an old solution
         # would bypass the current local choices, so always resolve this mode.
         if (self._p0_maxmin_pairing_enabled
@@ -3785,17 +6866,109 @@ class EnvironmentCore:
                 (self.K, self.Q), dtype=np.float64)
             cached_graph_valid = bool(
                 self._cached_p0_solution.selected_set)
+            invalid_cached_edges = []
             for edge in self._cached_p0_solution.selected_set:
                 key = tuple(int(value) for value in edge)
                 if key not in ranking_lookup:
                     cached_graph_valid = False
-                    break
-                cached_receiver_D[key[1], key[2]] += ranking_lookup[key]
-            cached_D_q = (
-                np.max(cached_receiver_D, axis=0)
-                if self._p0_maxmin_local_fusion_enabled
-                else np.sum(cached_receiver_D, axis=0)
-            )
+                    invalid_cached_edges.append(key)
+                else:
+                    cached_receiver_D[key[1], key[2]] += ranking_lookup[key]
+            topology_invalid_edge_count = len(invalid_cached_edges)
+            maximum_hold_due = (
+                self.t - self._last_solve_frame >= hold_frames)
+            if (
+                invalid_cached_edges
+                and self._p0_topology_min_change_repair_enabled
+                and self._p0_budget_coupled_structure_enabled
+                and self._p0_maxmin_local_fusion_enabled
+                and not maximum_hold_due
+            ):
+                topology_repair_started = time.perf_counter()
+                reports_per_receiver = (
+                    max(1, int(
+                        self.cfg.p0_solver.capacity_per_rx
+                        // max(self.cfg.detection.B_q, 1)))
+                    if self.ground_communication_enabled
+                    else self.Q * self.cfg.detection.K_q_max
+                )
+                repair = repair_invalid_local_only_edges_min_change(
+                    unit_deflection_tensor(
+                        ranking_entries, self.K, self.Q),
+                    self._cached_p0_solution.selected_set,
+                    np.sum(self._current_sensing_power_w, axis=1),
+                    P_FA=self.cfg.detection.P_FA,
+                    target_pair_limit=self.cfg.detection.K_q_max,
+                    reports_per_receiver=reports_per_receiver,
+                )
+                if repair is not None:
+                    topology_repair_candidate_worst_pd = float(
+                        np.min(repair.P_D_q))
+                    z_repaired = np.zeros(
+                        (self.K, self.K, self.Q), dtype=np.int32)
+                    for i, j, q in repair.selected_set:
+                        z_repaired[i, j, q] = 1
+                    topology_repair_solution = P0Solution(
+                        z_selected=z_repaired,
+                        D_q_star=np.asarray(
+                            repair.D_q, dtype=np.float64),
+                        U_q=compute_target_utilities(
+                            repair.D_q, self.cfg.detection.P_FA),
+                        selected_set=list(repair.selected_set),
+                        total_bits=float(
+                            len(repair.selected_set)
+                            * self.cfg.detection.B_q),
+                        total_latency=(
+                            self._cached_p0_solution.total_latency),
+                    )
+                    topology_replacement_count = len(invalid_cached_edges)
+                    ranking_lookup = {
+                        (int(entry.i), int(entry.j), int(entry.q)):
+                            float(entry.d_eff)
+                        for entry in ranking_entries
+                        if float(entry.d_eff) > 0.0
+                    }
+                    cached_graph_valid = True
+                    cached_receiver_D.fill(0.0)
+                    for edge in repair.selected_set:
+                        i, j, q = (int(value) for value in edge)
+                        if (i, j, q) not in ranking_lookup:
+                            cached_graph_valid = False
+                            break
+                        cached_receiver_D[j, q] += ranking_lookup[(i, j, q)]
+            if (cached_graph_valid
+                    and self._p0_budget_coupled_structure_enabled):
+                # Scale-safe event certificate: the ranking entries are
+                # per-watt gains, so evaluating their raw sum would silently
+                # restore the old fictitious unit-power assumption.  Re-solve
+                # the cheap fixed-structure LP under the current per-UAV RF
+                # budget and trigger only when that executable structure can
+                # no longer meet the task floor.
+                cached_gain = np.zeros(
+                    (self.K, self.Q), dtype=np.float64)
+                certificate_selected = (
+                    topology_repair_solution.selected_set
+                    if topology_repair_solution is not None
+                    else self._cached_p0_solution.selected_set
+                )
+                for edge in certificate_selected:
+                    i, j, q = (int(value) for value in edge)
+                    cached_gain[i, q] = ranking_lookup[(i, j, q)]
+                try:
+                    cached_power = _solve_fixed_structure_maxmin_power_lp(
+                        cached_gain,
+                        np.sum(self._current_sensing_power_w, axis=1),
+                    )
+                    cached_D_q = cached_power.deflection
+                except RuntimeError:
+                    cached_graph_valid = False
+                    cached_D_q = np.zeros(self.Q, dtype=np.float64)
+            else:
+                cached_D_q = (
+                    np.max(cached_receiver_D, axis=0)
+                    if self._p0_maxmin_local_fusion_enabled
+                    else np.sum(cached_receiver_D, axis=0)
+                )
             cached_worst_pd = float(np.min(
                 compute_detection_probabilities(
                     cached_D_q, self.cfg.detection.P_FA)))
@@ -3803,10 +6976,11 @@ class EnvironmentCore:
                 self.cfg.marl, "comm_qos_worst_min", 0.60))
             event_due = (
                 not cached_graph_valid
-                or cached_worst_pd < event_floor
+                or (
+                    self._p0_maxmin_event_qos_enabled
+                    and cached_worst_pd < event_floor
+                )
             )
-            maximum_hold_due = (
-                self.t - self._last_solve_frame >= hold_frames)
             should_resolve = bool(event_due or maximum_hold_due)
         else:
             should_resolve = (
@@ -3860,14 +7034,18 @@ class EnvironmentCore:
                     for entry in unfiltered_ranking_entries
                     if float(entry.d_eff) > 0.0
                 }
-                selected = tuple(
-                    edge for edge in hyperedge_selected if edge in lookup)
+                # Protocol membership is authoritative for the discrete
+                # schedule.  A mutually retained edge that is absent from the
+                # current physical table remains scheduled and realizes zero
+                # gain below; silently deleting it here would give the
+                # distributed protocol an oracle truth-set filter.
+                selected = tuple(hyperedge_selected)
                 hyperedge_D_q = np.zeros(self.Q, dtype=np.float64)
                 z_selected = np.zeros(
                     (self.K, self.K, self.Q), dtype=np.int32)
                 for i, j, q in selected:
                     z_selected[i, j, q] = 1
-                    hyperedge_D_q[q] += lookup[(i, j, q)]
+                    hyperedge_D_q[q] += lookup.get((i, j, q), 0.0)
                 p0_solution = P0Solution(
                     z_selected=z_selected,
                     D_q_star=hyperedge_D_q,
@@ -3999,6 +7177,34 @@ class EnvironmentCore:
                             if self._p0_maxmin_local_fusion_enabled
                             else "central_oracle"
                         ),
+                        per_uav_sensing_budget_w=(
+                            np.sum(self._current_sensing_power_w, axis=1)
+                            if (
+                                self._p0_budget_coupled_structure_enabled
+                                and
+                                self._p0_maxmin_local_fusion_enabled
+                                and self._analytical_sensing_power_enabled
+                            )
+                            else None
+                        ),
+                        joint_time_limit_s=(
+                            self._p0_budget_coupled_time_limit_s),
+                        joint_secondary_objective_enabled=(
+                            self._p0_budget_coupled_secondary_enabled),
+                        joint_solver_mode=(
+                            self._p0_budget_coupled_solver_mode),
+                        task_qos_floors=(
+                            getattr(
+                                self.cfg.marl,
+                                "p0_legacy_guard_qos_floors",
+                                None,
+                            )
+                            or getattr(
+                                self.cfg.marl,
+                                "task_constrained_qos_floors",
+                                None,
+                            )
+                        ),
                     )
                 z_selected = np.zeros(
                     (self.K, self.K, self.Q), dtype=np.int32)
@@ -4038,11 +7244,42 @@ class EnvironmentCore:
             self._last_solve_frame = self.t
             self._last_p0_solve_time_s = float(
                 time.perf_counter() - p0_solve_started)
+        elif topology_repair_solution is not None:
+            p0_solution = topology_repair_solution
+            self._assignment_switched = True
+            self._last_p0_solve_time_s = float(
+                time.perf_counter() - topology_repair_started)
         else:
             p0_solution = self._cached_p0_solution
             self._assignment_switched = False
             self._last_p0_solve_time_s = 0.0
-        self._last_selected_set = p0_solution.selected_set  # for next obs
+        self._last_isac_metrics.update({
+            "p0_topology_invalid_edge_count": float(
+                topology_invalid_edge_count),
+            "p0_topology_invalid_frame": float(
+                topology_invalid_edge_count > 0),
+            "p0_topology_min_change_repair_applied": float(
+                topology_repair_solution is not None and not should_resolve),
+            "p0_topology_min_change_replacement_count": float(
+                topology_replacement_count
+                if topology_repair_solution is not None and not should_resolve
+                else 0),
+            "p0_topology_repair_candidate_worst_pd": float(
+                topology_repair_candidate_worst_pd),
+            "p0_topology_full_fallback": float(
+                topology_invalid_edge_count > 0 and should_resolve),
+        })
+        # A topology bridge is a fast physical-execution repair, not a slow
+        # L2 commitment.  Feeding its one-frame edge into the next frame's L3
+        # geometry controller violates the intended time-scale separation and
+        # can turn a sparse DD-support loss into a persistent trajectory shift.
+        # Keep L3 anchored to the hold-window structure; only a scheduled/full
+        # P0 solve is allowed to change that slow coordination state.
+        self._last_selected_set = (
+            self._cached_p0_solution.selected_set
+            if topology_repair_solution is not None and not should_resolve
+            else p0_solution.selected_set
+        )
 
         # ── D0.89: analytical inner sensing power ──
         # The learned per-target sensing head is ignored for execution; after
@@ -4075,14 +7312,102 @@ class EnvironmentCore:
             if gain is not None:
                 self._last_analytical_gain = gain.copy()
                 self._last_analytical_budget = budget.copy()
+                replicated_power = None
+                if self._distributed_replicated_power_enabled:
+                    # Every transmitter independently solves from its own
+                    # quantized public-state cache and executes only its row.
+                    # The fixed sensing PA cap is public; the final row is
+                    # projected onto the actual post-communication budget.
+                    public_budget = np.full(
+                        self.K,
+                        float(self._sensing_power_cap_w),
+                        dtype=np.float64,
+                    )
+                    incomplete_prior = None
+                    if (
+                        self._distributed_replicated_power_local_range_fallback_enabled
+                    ):
+                        transmitter_positions = np.asarray([
+                            uav.pos for uav in self.uavs
+                        ], dtype=np.float64)
+                        fallback_targets = np.asarray([
+                            target.get_position_3d() for target in self.targets
+                        ], dtype=np.float64)
+                        incomplete_prior = local_transmitter_range_minimax_share(
+                            transmitter_positions,
+                            fallback_targets,
+                        )
+                    replicated_solve_started = time.perf_counter()
+                    replicated_power = replicated_local_row_maxmin_power(
+                        self._hyperedge_public_gain_views,
+                        public_budget,
+                        budget,
+                        self._distributed_replicated_power_unknown_target_reserve,
+                        incomplete_prior,
+                    )
+                    replicated_solve_time_s = float(
+                        time.perf_counter() - replicated_solve_started)
+                    self._current_sensing_power_w = (
+                        blend_row_feasible_power_with_inertia(
+                            replicated_power.power_w,
+                            self._distributed_replicated_previous_power,
+                            budget,
+                            self._distributed_replicated_power_inertia,
+                        ))
+                    self._distributed_replicated_previous_power = (
+                        self._current_sensing_power_w.copy())
+                    self._last_analytical_power_balance_error = float(np.max(
+                        np.abs(np.sum(
+                            self._current_sensing_power_w, axis=1) - budget)))
+                    self._last_analytical_dual_prices = None
+                    self._lex_mode = 'distributed_replicated'
+                    self._lex_t_star = None
+                    self._last_isac_metrics.update({
+                        'distributed_replicated_power_enabled': 1.0,
+                        'distributed_replicated_power_inertia': float(
+                            self._distributed_replicated_power_inertia),
+                        'distributed_replicated_power_unknown_target_reserve': (
+                            float(
+                                self._distributed_replicated_power_unknown_target_reserve)),
+                        'distributed_replicated_power_local_range_fallback': (
+                            float(
+                                self._distributed_replicated_power_local_range_fallback_enabled)),
+                        'distributed_replicated_power_solve_time_s': (
+                            replicated_solve_time_s),
+                        'distributed_replicated_power_per_node_solve_time_s': (
+                            replicated_solve_time_s / max(self.K, 1)),
+                        'distributed_replicated_power_common_view': float(
+                            replicated_power.common_view),
+                        'distributed_replicated_power_full_view_fraction': (
+                            float(np.mean(
+                                self._hyperedge_public_full_views))),
+                        'distributed_replicated_power_local_coverage': float(
+                            np.mean(
+                                replicated_power.local_full_coverage)),
+                        'distributed_replicated_power_local_worst_mean': float(
+                            np.mean(
+                                replicated_power.local_worst_deflection)),
+                        'distributed_replicated_power_local_worst_min': float(
+                            np.min(
+                                replicated_power.local_worst_deflection)),
+                    })
                 # D1.1-D live covertness (T3): max-min subject to the
                 # counter-detection hard bound P_{D,w}^I <= eps.  When the
                 # constrained LP is feasible it REPLACES the power path; the
                 # dual price mu is the opponent-detection cost per watt.
                 intercept_lp = None
-                if self._intercept_constrained_power_enabled:
+                if (
+                    replicated_power is None
+                    and self._intercept_constrained_power_enabled
+                ):
                     intercept_lp = self._solve_intercept_power(gain, budget)
-                if intercept_lp is not None:
+                    if intercept_lp is None:
+                        raise RuntimeError(
+                            "covertness-constrained power solve failed; "
+                            "refusing unconstrained fallback")
+                if replicated_power is not None:
+                    pass
+                elif intercept_lp is not None:
                     lp = intercept_lp
                     self._current_sensing_power_w = lp.power_w.copy()
                     self._last_analytical_power_balance_error = float(np.max(
@@ -4252,6 +7577,7 @@ class EnvironmentCore:
                     sensing_power_w=self._current_sensing_power_w,
                 )
                 self._last_deflection_entries = deflection_entries
+            self._finalize_analytical_power_accounting(budget)
 
         # Realized per-target deflection = TRUE d_eff of the SELECTED pairs.
         if self.p0_uses_belief or self._joint_isac_power_enabled:
@@ -4279,6 +7605,25 @@ class EnvironmentCore:
             for k in range(self.K):
                 self.uavs[k].role = int(derived[k])
             roles = derived
+            # V3-C0 (advice 015, 2026-08-17): with learn_roles=False the policy
+            # role was the idle placeholder, so apply_action charged NO radio
+            # energy -- but the P0-derived roles actually transmit.  Charge the
+            # radio energy against the EXECUTED role here (TX transmits the
+            # sensing waveform P_sense*dt, RX reports P_report*dt; code 3 dual
+            # endpoint charges the TX sub-slot -- the RX sub-slot is passive
+            # listening of the same broadcast).  No double charge: the
+            # placeholder role charged zero above.  The joint-ISAC path charges
+            # energy from the actual LP power instead (comm/evidence transport).
+            if not self._joint_isac_power_enabled:
+                for k in range(self.K):
+                    if derived[k] in (0, 3):
+                        self.uavs[k].battery -= (
+                            self.cfg.uav.P_sense * self.cfg.scenario.dt)
+                    elif derived[k] == 1:
+                        self.uavs[k].battery -= (
+                            self.cfg.uav.P_report * self.cfg.scenario.dt)
+                    if self.uavs[k].battery < 0.0:
+                        self.uavs[k].battery = 0.0
 
         # ── Layer 4: Event-triggered active probing ──
         # Probe only when a target's accumulated risk score exceeds threshold.
@@ -4366,15 +7711,69 @@ class EnvironmentCore:
         # 5. Resolve the evidence boundary before computing any detector,
         #    reward, constraint, or tracking statistic. P0 remains a scheduler;
         #    its cumulative score is not permission to fuse receiver evidence.
-        receiver_D = receiver_deflection_from_selected(
+        if self._passive_multireceiver_evidence_enabled:
+            receiver_D = receiver_deflection_from_broadcast_waveforms(
+                p0_solution.selected_set,
+                deflection_entries,
+                self.K,
+                self.Q,
+            )
+        else:
+            receiver_D = receiver_deflection_from_selected(
+                p0_solution.selected_set,
+                deflection_entries,
+                self.K,
+                self.Q,
+            )
+        central_D = np.sum(receiver_D, axis=0)
+        # The public sensing schedule, not the simulator's receiver-quality
+        # matrix, defines the fusion directory.  Keep this value as the sole
+        # owner source for execution, diagnostics, and calibration traces.
+        evidence_owner = scheduled_fusion_owner(
             p0_solution.selected_set,
-            deflection_entries,
             self.K,
             self.Q,
         )
-        central_D = np.sum(receiver_D, axis=0)
+        belief_schedule_mask = None
+        if self._u2u_belief_feedback_schedule == 'freshness':
+            # Replicate the evidence selection the router will compute so the
+            # freshness top-ups are disjoint from it (evidence entries
+            # free-ride the posterior; only top-ups pay).
+            owned_target = evidence_owner >= 0
+            owner_selection_mask = np.zeros(
+                (self.K, self.Q), dtype=bool)
+            owner_selection_mask[
+                evidence_owner[owned_target],
+                np.arange(self.Q)[owned_target],
+            ] = True
+            selection_quality = receiver_D.copy()
+            selection_quality[:, ~owned_target] = 0.0
+            if self._evidence_owner_aware:
+                selection_quality[owner_selection_mask] = 0.0
+            evidence_selection = local_quality_topk_mask(
+                selection_quality, self._evidence_topk)
+            if self._evidence_ambiguity_top2_enabled:
+                evidence_selection = local_ambiguity_top2_mask(
+                    selection_quality,
+                    base_topk=self._evidence_topk,
+                    second_ratio=self._evidence_ambiguity_ratio,
+                    second_min_deflection=(
+                        self._evidence_ambiguity_min_deflection),
+                )
+            belief_schedule_mask = self._belief_freshness_schedule_mask(
+                evidence_owner, evidence_selection)
         evidence_transport = None
         evidence_detection = None
+        belief_feedback_source_mean = None
+        belief_feedback_source_covariance = None
+        belief_feedback_source_aoi = None
+        if self._u2u_belief_feedback_enabled:
+            assert self.belief_mgr is not None
+            belief_feedback_source_mean = (
+                self.belief_mgr.mean[:, :, :4].copy())
+            belief_feedback_source_covariance = (
+                self.belief_mgr.cov[:, :, :4, :4].copy())
+            belief_feedback_source_aoi = self.belief_mgr.aoi.copy()
         if self._detection_fusion_mode == 'u2u_distributed':
             assert self._inter_uav_comm is not None
             assert self._evidence_packet_layout is not None
@@ -4397,7 +7796,14 @@ class EnvironmentCore:
                 llr_bits=self._evidence_llr_bits,
                 layout=self._evidence_packet_layout,
                 link_model=self._inter_uav_comm,
+                fusion_owner=evidence_owner,
                 owner_aware=self._evidence_owner_aware,
+                ambiguity_second_ratio=(
+                    self._evidence_ambiguity_ratio
+                    if self._evidence_ambiguity_top2_enabled else None),
+                ambiguity_second_min_deflection=(
+                    self._evidence_ambiguity_min_deflection),
+                belief_selected_mask=belief_schedule_mask,
             )
             evidence_detection = estimate_quantized_evidence_detection(
                 receiver_D,
@@ -4435,11 +7841,12 @@ class EnvironmentCore:
                 detection_D_q, self.cfg.detection.P_FA)
         self._last_isac_metrics.update({
             'detection_fusion_mode': self._detection_fusion_mode,
+            'passive_multireceiver_evidence_enabled': float(
+                self._passive_multireceiver_evidence_enabled),
             'detection_deflection_q': detection_D_q.copy(),
             'detection_central_oracle_deflection_q': central_D.copy(),
             'detection_receiver_deflection': receiver_D.copy(),
-            'detection_fusion_owner': np.argmax(
-                receiver_D, axis=0).astype(np.int64),
+            'detection_fusion_owner': evidence_owner.copy(),
         })
         if evidence_transport is not None and evidence_detection is not None:
             self._last_isac_metrics.update(
@@ -4475,6 +7882,9 @@ class EnvironmentCore:
                 'evidence_packet_content_mode': (
                     self._evidence_content_mode),
             })
+        self._last_isac_metrics.update(
+            self._serialized_protocol_accounting(
+                comm_stats, evidence_transport))
 
         # 6. Check constraints
         batteries = np.array([u.battery for u in self.uavs])
@@ -4646,9 +8056,25 @@ class EnvironmentCore:
         if self.tracking_enabled:
             self.belief_mgr.step()  # CV predict + increment AoI
 
+        belief_feedback_metrics = self._apply_u2u_belief_feedback(
+            evidence_transport,
+            belief_feedback_source_mean,
+            belief_feedback_source_covariance,
+            belief_feedback_source_aoi,
+        ) if self._u2u_belief_feedback_enabled else {
+            'belief_feedback_enabled': 0.0,
+            'belief_feedback_fused_entries': 0.0,
+            'belief_feedback_receivers': 0.0,
+            'belief_feedback_disagreement_before_m': 0.0,
+            'belief_feedback_disagreement_after_m': 0.0,
+            'belief_feedback_contraction_ratio': 1.0,
+            'belief_feedback_truth_rmse_before_m': 0.0,
+            'belief_feedback_truth_rmse_after_m': 0.0,
+        }
+
         # Kalman update for observed targets (noisy measurement of true state)
         true_states = np.array([
-            [t.state[0], t.state[1], t.state[2], t.state[3]]
+            [t.state[0], t.state[1], *t.get_velocity()]
             for t in self.targets
         ])
         # B7: optionally gate the belief update by a detection event. With
@@ -4658,19 +8084,72 @@ class EnvironmentCore:
         # optimistic (selected pair always observes).
         detected_q: Dict[int, bool] = {}
         if self.tracking_enabled:
-            for (i, j, q) in p0_solution.selected_set:
-                if q not in detected_q:
-                    if self.belief_detection_sampling:
-                        detected_q[q] = bool(self.rng.random() < float(P_D_q[q]))
-                    else:
-                        detected_q[q] = True
-                obs = detected_q[q]
-                ts = true_states[q]
-                self.belief_mgr.update_after_observation(i, q, obs, ts)
-                self.belief_mgr.update_after_observation(j, q, obs, ts)
+            if self._passive_multireceiver_belief_update_enabled:
+                local_detection_probability = compute_detection_probabilities(
+                    receiver_D, self.cfg.detection.P_FA)
+                for receiver in range(self.K):
+                    for q in range(self.Q):
+                        if receiver_D[receiver, q] <= 0.0:
+                            continue
+                        obs = bool(
+                            self.rng.random()
+                            < float(local_detection_probability[receiver, q])
+                        ) if self.belief_detection_sampling else True
+                        detected_q[q] = bool(
+                            detected_q.get(q, False) or obs)
+                        self.belief_mgr.update_after_observation(
+                            receiver, q, obs, true_states[q])
+            else:
+                for (i, j, q) in p0_solution.selected_set:
+                    if q not in detected_q:
+                        if self.belief_detection_sampling:
+                            detected_q[q] = bool(
+                                self.rng.random() < float(P_D_q[q]))
+                        else:
+                            detected_q[q] = True
+                    obs = detected_q[q]
+                    ts = true_states[q]
+                    self.belief_mgr.update_after_observation(i, q, obs, ts)
+                    self.belief_mgr.update_after_observation(j, q, obs, ts)
+
+            true_position = true_states[:, :2]
+            belief_position_error = (
+                self.belief_mgr.mean[:, :, :2]
+                - true_position[None, :, :]
+            )
+            position_error_norm = np.linalg.norm(
+                belief_position_error, axis=-1)
+            belief_feedback_metrics.update({
+                'belief_position_rmse_m': float(np.sqrt(np.mean(
+                    position_error_norm * position_error_norm))),
+                'belief_position_error_p95_m': float(np.percentile(
+                    position_error_norm, 95)),
+                'belief_position_error_max_m': float(np.max(
+                    position_error_norm, initial=0.0)),
+                'belief_position_rmse_per_target_m': np.sqrt(np.mean(
+                    position_error_norm * position_error_norm,
+                    axis=0,
+                )),
+                'belief_target_aoi_mean_frames': float(np.mean(
+                    self.belief_mgr.aoi)),
+                'belief_target_aoi_p95_frames': float(np.percentile(
+                    self.belief_mgr.aoi, 95)),
+                'belief_target_aoi_max_frames': float(np.max(
+                    self.belief_mgr.aoi, initial=0)),
+                'belief_target_aoi_per_target_frames': np.mean(
+                    self.belief_mgr.aoi, axis=0),
+                'belief_position_disagreement_end_m': (
+                    self._belief_position_disagreement(
+                        self.belief_mgr.mean)),
+            })
+        self._last_isac_metrics.update(belief_feedback_metrics)
 
         # ── Layer 4: Trust feedback — update trust based on post-measurement NIS ──
-        if self.trust_gate_enabled and self._trust_manager is not None:
+        if (
+            self.trust_gate_enabled
+            and self._trust_manager is not None
+            and not self._passive_multireceiver_belief_update_enabled
+        ):
             for (i, j, q) in p0_solution.selected_set:
                 if q in detected_q and detected_q[q]:
                     # Use the NIS just computed in update_after_observation
@@ -4698,6 +8177,10 @@ class EnvironmentCore:
                         "lex_t_star": self._lex_t_star,
                         "balance_error_w": float(
                             self._last_analytical_power_balance_error),
+                        "budget_violation_w": float(
+                            self._last_analytical_power_budget_violation_w),
+                        "unused_power_w": float(
+                            self._last_analytical_unused_power_w),
                         "P_D_q": [float(v) for v in P_D_q],
                         "comm_power_w": [
                             float(v) for v in self._current_comm_power_w],
@@ -4798,6 +8281,7 @@ class EnvironmentCore:
             learned_comm={
                 **comm_stats.as_dict(),
                 **self._last_isac_metrics,
+                **self._last_movement_safety_metrics,
                 'learned_comm_channel_profile': (
                     self._active_comm_channel_profile),
                 'learned_comm_channel_snr_threshold_db': (
@@ -5033,7 +8517,7 @@ class EnvironmentCore:
         oracle_targets = None
         if oracle:
             oracle_targets = np.array([
-                [t.state[0], t.state[1], t.state[2], t.state[3]]
+                [t.state[0], t.state[1], *t.get_velocity()]
                 for t in self.targets
             ], dtype=np.float64)
 
@@ -5118,6 +8602,12 @@ class EnvironmentCore:
         """
         return {
             't': self.t,
+            'cached_p0_solution': copy.deepcopy(self._cached_p0_solution),
+            'last_solve_frame': int(self._last_solve_frame),
+            'assignment_switched': bool(self._assignment_switched),
+            'last_p0_solve_time_s': float(self._last_p0_solve_time_s),
+            'last_selected_set': copy.deepcopy(getattr(
+                self, '_last_selected_set', [])),
             'prev_P_D': None if self.prev_P_D is None else self.prev_P_D.copy(),
             'coord_pd_ema': (None if self._coord_pd_ema is None
                              else self._coord_pd_ema.copy()),
@@ -5175,6 +8665,8 @@ class EnvironmentCore:
             'pending_hyperedge_protocol': {
                 k: v.copy()
                 for k, v in self._pending_hyperedge_protocol.items()},
+            'pending_hyperedge_protocol_frame': dict(
+                self._pending_hyperedge_protocol_frame),
             'hyperedge_local_offer': self._hyperedge_local_offer.copy(),
             'hyperedge_received_offer': (
                 self._hyperedge_received_offer.copy()),
@@ -5187,13 +8679,54 @@ class EnvironmentCore:
             'hyperedge_last_update_frame': int(
                 self._hyperedge_last_update_frame),
             'hyperedge_metrics': copy.deepcopy(self._hyperedge_metrics),
+            'hyperedge_public_gain_views': (
+                self._hyperedge_public_gain_views.copy()),
+            'hyperedge_public_full_views': (
+                self._hyperedge_public_full_views.copy()),
+            'distributed_movement_target': (
+                self._distributed_movement_target.copy()),
+            'distributed_movement_local_assignment': (
+                self._distributed_movement_local_assignment.copy()),
+            'distributed_movement_last_update': (
+                self._distributed_movement_last_update.copy()),
+            'distributed_movement_anchor_target_xy': (
+                self._distributed_movement_anchor_target_xy.copy()),
+            'distributed_movement_anchor_last_seen': (
+                self._distributed_movement_anchor_last_seen.copy()),
+            'distributed_bistatic_gate_latch': (
+                self._distributed_bistatic_gate_latch.copy()),
+            'distributed_role_capacity_tx_resp': (
+                self._distributed_role_capacity_tx_resp.copy()),
+            'distributed_role_capacity_rx_resp': (
+                self._distributed_role_capacity_rx_resp.copy()),
+            'distributed_role_capacity_bottleneck': (
+                self._distributed_role_capacity_bottleneck.copy()),
+            'distributed_role_capacity_last_reassign': (
+                self._distributed_role_capacity_last_reassign.copy()),
+            'distributed_gap_tx_resp': (
+                self._distributed_gap_tx_resp.copy()),
+            'distributed_gap_rx_resp': (
+                self._distributed_gap_rx_resp.copy()),
             'pending_comm_power_fractions': dict(
                 self._pending_comm_power_fractions),
             'pending_sensing_weights': {
                 k: v.copy() for k, v in self._pending_sensing_weights.items()},
             'current_comm_power_w': self._current_comm_power_w.copy(),
             'current_sensing_power_w': self._current_sensing_power_w.copy(),
+            'distributed_replicated_previous_power': (
+                self._distributed_replicated_previous_power.copy()),
+            'isac_sensing_battery_before': (
+                None if self._isac_sensing_battery_before is None
+                else self._isac_sensing_battery_before.copy()),
+            'last_analytical_power_balance_error': float(
+                self._last_analytical_power_balance_error),
+            'last_analytical_power_budget_violation_w': float(
+                self._last_analytical_power_budget_violation_w),
+            'last_analytical_unused_power_w': float(
+                self._last_analytical_unused_power_w),
             'last_isac_metrics': copy.deepcopy(self._last_isac_metrics),
+            'last_movement_safety_metrics': copy.deepcopy(
+                self._last_movement_safety_metrics),
             'external_structure_edge_values': (
                 None
                 if self._external_structure_edge_values is None
@@ -5224,6 +8757,9 @@ class EnvironmentCore:
             'received_comm_meta': copy.deepcopy(self._received_comm_meta),
             'comm_mailbox': copy.deepcopy(self._comm_mailbox),
             'last_comm_stats': copy.deepcopy(self._last_comm_stats),
+            'comm_transport_state': (
+                None if self._inter_uav_comm is None
+                else self._inter_uav_comm.get_channel_state()),
             'fc_position': None if self.fc_position is None else self.fc_position.copy(),
             'uavs': copy.deepcopy(self.uavs),
             'targets': copy.deepcopy(self.targets),
@@ -5243,6 +8779,15 @@ class EnvironmentCore:
         desynchronize sampling).
         """
         self.t = state['t']
+        self._cached_p0_solution = copy.deepcopy(
+            state.get('cached_p0_solution'))
+        self._last_solve_frame = int(state.get('last_solve_frame', -1))
+        self._assignment_switched = bool(
+            state.get('assignment_switched', False))
+        self._last_p0_solve_time_s = float(
+            state.get('last_p0_solve_time_s', 0.0))
+        self._last_selected_set = copy.deepcopy(
+            state.get('last_selected_set', []))
         self.prev_P_D = None if state['prev_P_D'] is None else state['prev_P_D'].copy()
         coord_pd_ema = state.get('coord_pd_ema')
         self._coord_pd_ema = (None if coord_pd_ema is None
@@ -5351,6 +8896,10 @@ class EnvironmentCore:
             int(k): np.asarray(v, dtype=np.float64).copy()
             for k, v in state.get(
                 'pending_hyperedge_protocol', {}).items()}
+        self._pending_hyperedge_protocol_frame = {
+            int(k): int(v)
+            for k, v in state.get(
+                'pending_hyperedge_protocol_frame', {}).items()}
         self._hyperedge_local_offer = np.asarray(state.get(
             'hyperedge_local_offer',
             np.zeros((
@@ -5377,6 +8926,63 @@ class EnvironmentCore:
             'hyperedge_last_update_frame', -10**9))
         self._hyperedge_metrics = copy.deepcopy(state.get(
             'hyperedge_metrics', {}))
+        self._hyperedge_public_gain_views = np.asarray(state.get(
+            'hyperedge_public_gain_views',
+            np.zeros((self.K, self.K, self.Q))),
+            dtype=np.float64).copy()
+        self._hyperedge_public_full_views = np.asarray(state.get(
+            'hyperedge_public_full_views',
+            np.zeros(self.K, dtype=bool)),
+            dtype=bool).copy()
+        self._distributed_movement_target = np.asarray(state.get(
+            'distributed_movement_target',
+            np.full(self.K, -1, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._distributed_movement_local_assignment = np.asarray(state.get(
+            'distributed_movement_local_assignment',
+            np.full((self.K, self.K), -1, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._distributed_movement_last_update = np.asarray(state.get(
+            'distributed_movement_last_update',
+            np.full(self.K, -10**9, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._distributed_movement_anchor_target_xy = np.asarray(state.get(
+            'distributed_movement_anchor_target_xy',
+            np.zeros((self.K, self.K, self.Q, 2), dtype=np.float64)),
+            dtype=np.float64).copy()
+        self._distributed_movement_anchor_last_seen = np.asarray(state.get(
+            'distributed_movement_anchor_last_seen',
+            np.full(
+                (self.K, self.K, self.Q), -10**9, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._distributed_bistatic_gate_latch = np.asarray(state.get(
+            'distributed_bistatic_gate_latch',
+            np.full(self.K, -1, dtype=np.int8)),
+            dtype=np.int8).copy()
+        self._distributed_role_capacity_tx_resp = np.asarray(state.get(
+            'distributed_role_capacity_tx_resp',
+            np.zeros((self.K, self.K, self.Q), dtype=np.int8)),
+            dtype=np.int8).copy()
+        self._distributed_role_capacity_rx_resp = np.asarray(state.get(
+            'distributed_role_capacity_rx_resp',
+            np.zeros((self.K, self.K, self.Q), dtype=np.int8)),
+            dtype=np.int8).copy()
+        self._distributed_role_capacity_bottleneck = np.asarray(state.get(
+            'distributed_role_capacity_bottleneck',
+            np.full(self.K, np.inf, dtype=np.float64)),
+            dtype=np.float64).copy()
+        self._distributed_role_capacity_last_reassign = np.asarray(state.get(
+            'distributed_role_capacity_last_reassign',
+            np.full(self.K, -10**9, dtype=np.int64)),
+            dtype=np.int64).copy()
+        self._distributed_gap_tx_resp = np.asarray(state.get(
+            'distributed_gap_tx_resp',
+            np.zeros((self.K, self.K, self.Q), dtype=np.int8)),
+            dtype=np.int8).copy()
+        self._distributed_gap_rx_resp = np.asarray(state.get(
+            'distributed_gap_rx_resp',
+            np.zeros((self.K, self.K, self.Q), dtype=np.int8)),
+            dtype=np.int8).copy()
         self._pending_comm_power_fractions = dict(
             state.get('pending_comm_power_fractions', {}))
         self._pending_sensing_weights = {
@@ -5386,10 +8992,26 @@ class EnvironmentCore:
             'current_comm_power_w', np.zeros(self.K)), dtype=np.float64).copy()
         self._current_sensing_power_w = np.asarray(state.get(
             'current_sensing_power_w', np.full(
-                (self.K, self.Q), self.cfg.uav.P_sense)),
+                (self.K, self.Q),
+                self._sensing_power_cap_w / max(self.Q, 1))),
             dtype=np.float64).copy()
+        self._distributed_replicated_previous_power = np.asarray(state.get(
+            'distributed_replicated_previous_power',
+            self._current_sensing_power_w), dtype=np.float64).copy()
+        battery_before = state.get('isac_sensing_battery_before')
+        self._isac_sensing_battery_before = (
+            None if battery_before is None
+            else np.asarray(battery_before, dtype=np.float64).copy())
+        self._last_analytical_power_balance_error = float(state.get(
+            'last_analytical_power_balance_error', 0.0))
+        self._last_analytical_power_budget_violation_w = float(state.get(
+            'last_analytical_power_budget_violation_w', 0.0))
+        self._last_analytical_unused_power_w = float(state.get(
+            'last_analytical_unused_power_w', 0.0))
         self._last_isac_metrics = copy.deepcopy(
             state.get('last_isac_metrics', {}))
+        self._last_movement_safety_metrics = copy.deepcopy(
+            state.get('last_movement_safety_metrics', {}))
         external_structure = state.get(
             'external_structure_edge_values')
         self._external_structure_edge_values = (
@@ -5439,6 +9061,12 @@ class EnvironmentCore:
         self._comm_mailbox = copy.deepcopy(state.get('comm_mailbox', []))
         self._last_comm_stats = copy.deepcopy(
             state.get('last_comm_stats', CommunicationStepStats()))
+        if self._inter_uav_comm is not None:
+            transport_state = state.get('comm_transport_state')
+            if transport_state is None:
+                self._inter_uav_comm.reset_channel_state(self.K)
+            else:
+                self._inter_uav_comm.set_channel_state(transport_state)
         self.fc_position = None if state['fc_position'] is None else state['fc_position'].copy()
         self.uavs = copy.deepcopy(state['uavs'])
         self.targets = copy.deepcopy(state['targets'])
@@ -5464,13 +9092,17 @@ class EnvironmentCore:
         uav_states = [u.get_state() for u in self.uavs]
         target_positions = np.array([t.get_position_3d() for t in self.targets])
         target_velocities = np.array([
-            np.array([t.state[2], t.state[3], 0.0]) for t in self.targets
+            np.array([*t.get_velocity(), 0.0]) for t in self.targets
         ])
         time_frac = self.t / max(self.T, 1)
         # Per-target mean belief uncertainty (trace of covariance)
+        # Audit 2026-08-17: the comment says "mean over UAVs" but only UAV-0's
+        # trace was fed to the centralized critic; average over all UAVs.
         if self.belief_mgr is not None:
             belief_cov_trace = np.array([
-                np.trace(self.belief_mgr.cov[0, q]) for q in range(self.Q)
+                np.mean([np.trace(self.belief_mgr.cov[k, q])
+                         for k in range(self.K)])
+                for q in range(self.Q)
             ])
         else:
             belief_cov_trace = None

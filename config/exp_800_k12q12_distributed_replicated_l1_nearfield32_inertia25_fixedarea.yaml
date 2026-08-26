@@ -1,0 +1,5 @@
+# Fixed-area counterpart for the K=Q=12 tail seed.
+extends: exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+scenario:
+  region_size: [800, 800]

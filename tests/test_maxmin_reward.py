@@ -9,9 +9,30 @@ from uav_isac.environment.maxmin_reward import (
     softmin_bottleneck_weights,
 )
 from uav_isac.coordination.maxmin_power import (
+    canonical_maxmin_dual_prices,
     optimal_maxmin_dual_prices,
     solve_fixed_structure_maxmin_power_lp,
 )
+
+
+def test_canonical_dual_is_uniform_on_symmetric_optimal_face():
+    gain = np.ones((3, 4), dtype=np.float64)
+    budget = np.ones(3, dtype=np.float64)
+    prices, value = canonical_maxmin_dual_prices(gain, budget)
+    assert value == pytest.approx(0.75)
+    np.testing.assert_allclose(prices, np.full(4, 0.25), atol=1e-7)
+
+
+def test_canonical_dual_is_permutation_equivariant():
+    rng = np.random.default_rng(123)
+    gain = rng.uniform(0.2, 2.0, size=(4, 5))
+    budget = rng.uniform(0.3, 1.0, size=4)
+    permutation = np.asarray([2, 4, 0, 1, 3])
+    base, value = canonical_maxmin_dual_prices(gain, budget)
+    permuted, permuted_value = canonical_maxmin_dual_prices(
+        gain[:, permutation], budget)
+    assert permuted_value == pytest.approx(value, rel=1e-7, abs=1e-9)
+    np.testing.assert_allclose(permuted, base[permutation], atol=2e-6)
 
 
 def test_concave_utility_monotone_and_concave():
@@ -164,4 +185,3 @@ def test_maxmin_dual_reward_env_integration():
     assert np.isfinite(float(info["team_reward"]))
     assert float(info["team_reward"]) >= 0.0
     env.close()
-

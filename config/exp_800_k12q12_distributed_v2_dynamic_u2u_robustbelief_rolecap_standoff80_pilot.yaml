@@ -1,0 +1,14 @@
+# Target-side standoff (covertness) variant (audit priority #4).
+#
+# The stable baseline's target minimum dwell distance is 0 and d_safe only
+# constrains UAV-UAV separation, so the model drives UAVs as close to targets
+# as the geometry allows.  This variant adds a target-side minimum distance:
+# the role-capacity movement clamps every node outside the standoff disks of
+# its responsibility targets, so no responsible Tx/Rx endpoint approaches a
+# target closer than 80 m.  The power layer keeps optimizing sensing within
+# that covertness envelope (a full intercept-probability objective is a
+# separate, not-yet-enabled branch).
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_rolecap_pilot.yaml
+
+marl:
+  distributed_role_capacity_standoff_m: 80.0

@@ -43,7 +43,9 @@ def test_observable_reconstruction_covers_zero_power_counterfactual_edges():
         n_cpi=1,
         g_min=0.5,
     )
-    scale = 1.0e-4 * 4 * 2 / (4.0e-21 * 1.0e6)
+    # Energy normalization divides signal and noise energies by the same
+    # T_sym, leaving a dimensionless M*N processing gain over noise power.
+    scale = 4 * 2 / (4.0e-21 * 1.0e6)
     np.testing.assert_allclose(
         coefficient[0, 1], alpha[0, 1] ** 2 * scale)
     assert coefficient[1, 0, 0] == 0.0

@@ -1,0 +1,18 @@
+# P1-3 (advice 014 §七, 2026-08-17): 6/6 independent-sampling blind
+# certification of the current frozen Student + analytical stack (the D1.6
+# candidate, worst 0.751-0.910 / QoS 0.65-0.90 on 20 clean selection seeds).
+# Bank: config/stratified_seeds_980_k6q6_blind.json -- 100 seeds drawn from the
+# 980_k6q6 geometry pool, excluding all bank splits, all exposed seeds and the
+# quarantine list (draw seed 20260828).  Decision rule (advice 014 §七): if
+# p_QoS >= 0.70 and LCB >= 0.70, Student calibration is not needed; if it fails
+# and the teacher passes on the same seeds, Student calibration is the next
+# scientific bottleneck.
+extends: exp_800_k6q6_analytical_l0l1_movement_lex_candidates_v2.yaml
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_980_k6q6_blind.json
+  training_seed_bank_path: config/stratified_seeds_980_k6q6_blind.json
+  eval_seed_split: test
+  final_eval_seed_split: test
+  checkpoint_confirmation_enabled: false
+  eval_independent_env: true

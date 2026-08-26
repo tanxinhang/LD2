@@ -36,7 +36,24 @@ from uav_isac.agents.frozen_structure_student import (
     save_cardinality_residual_structure_student,
     save_frozen_structure_student,
 )
+from uav_isac.coordination.structure_regret import (
+    dual_edge_weights,
+    tstar_of,
+)
 from uav_isac.physical.detection import compute_detection_probabilities
+
+# Gate 2 (advice/016 §4.1 + §6): torch-differentiable P_D for the task-regret
+# hinge.  Q(x) = 0.5*erfc(x/sqrt(2)); Q^-1(p) = sqrt(2)*erfinv(1-2p).
+import torch.special as _torch_special
+
+
+def _torch_pd_from_deflection(D_q: torch.Tensor, p_fa: float) -> torch.Tensor:
+    """Differentiable P_D = Q(Q^-1(P_FA) - sqrt(D)) over (..., Q)."""
+    q_inv = float(np.sqrt(2.0) * _torch_special.erfinv(
+        torch.as_tensor(1.0 - 2.0 * float(p_fa), dtype=torch.float64)))
+    sqrt_d = torch.sqrt(torch.clamp(D_q, min=1.0e-10))
+    z = (q_inv - sqrt_d) / float(np.sqrt(2.0))
+    return 0.5 * torch.erfc(z)
 
 
 @dataclass
@@ -55,6 +72,11 @@ class ScaleDataset:
     preserve_log: dict[str, np.ndarray | None]
     preserve_protocol: dict[str, np.ndarray | None]
     excluded_seeds: np.ndarray
+    # Gate 2 (advice/016 §6): per-frame edge task-sensitivity w_iq = pi_q*p_iq
+    # and per-frame teacher max-min t* (deflection units) + feasibility.
+    dual_weight: dict[str, np.ndarray] | None = None
+    teacher_tstar: dict[str, np.ndarray] | None = None
+    teacher_feasible: dict[str, np.ndarray] | None = None
 
     @property
     def name(self) -> str:
@@ -108,10 +130,60 @@ def _teacher_easy_mask(
     return np.min(target_pd, axis=-1) >= floor
 
 
+def _deflection_floor_for_pd(pd_floor: float, p_fa: float) -> float:
+    """Invert P_D = Q(Q^-1(P_FA) - sqrt(D)): D = (Q^-1(P_FA) - Q^-1(P_D))^2."""
+    from uav_isac.utils.math_utils import Q_inverse
+    root = max(float(Q_inverse(np.asarray(p_fa)))
+               - float(Q_inverse(np.asarray(pd_floor))), 0.0)
+    return root ** 2
+
+
+def _teacher_frame_gain(
+    data: dict[str, np.ndarray],
+    indices: np.ndarray,
+) -> np.ndarray:
+    """Per-frame teacher per-watt gain matrix (K,Q) from the trace.
+
+    Reconstructed from the trace's own physics: Deflection is linear in
+    sensing power (``d_eff = a_iq * p_iq``), so the per-watt gain on the
+    teacher-selected (i,owner_q,q) edge is ``a_iq = d_eff / p_iq``.  This
+    works uniformly across traces/cardinalities (the raw chi/alpha/g_dd
+    coefficient reconstruction degenerates on some traces, e.g. the 4/4
+    gate100 trace stores near-zero alpha while d_eff is physical).  The
+    global config scale is already inside d_eff, so t* and the dual weights
+    are in the same physical deflection units the QoS floor uses.
+    """
+    deff = np.asarray(data["privileged_d_eff"], dtype=np.float64)
+    weights = np.asarray(data["sensing_weights"], dtype=np.float64)
+    comm_fraction = np.asarray(
+        data.get("comm_fraction", np.zeros((len(deff), deff.shape[1]))),
+        dtype=np.float64)
+    budget = np.clip(1.0 - comm_fraction, 0.0, 1.0)
+    pair = np.asarray(data["teacher_pair"], dtype=np.float64)
+    owners = np.asarray(data["teacher_receiver_owner"], dtype=np.int64)
+    K = int(np.asarray(data["num_uavs"]).reshape(-1)[0])
+    Q = int(np.asarray(data["num_targets"]).reshape(-1)[0])
+    gain = np.zeros((len(indices), K, Q), dtype=np.float64)
+    for t, f in enumerate(indices):
+        for q in range(Q):
+            j = int(owners[f][q])
+            if not (0 <= j < K):
+                continue
+            for i in range(K):
+                if pair[f, i, j, q]:
+                    # The trace stores normalized target weights, not watts.
+                    # Actual p_iq is residual sensing budget times that weight.
+                    denom = max(
+                        float(budget[f, i] * weights[f, i, q]), 1.0e-9)
+                    gain[t, i, q] += float(deff[f, i, j, q]) / denom
+    return gain
+
+
 def _make_dataset(
     path: Path,
     preservation_student: FrozenStructureStudent | None,
     excluded_seeds: np.ndarray | None = None,
+    task_regret: bool = False,
 ) -> ScaleDataset:
     data = _load_trace(path)
     K = int(np.asarray(data["num_uavs"]).reshape(-1)[0])
@@ -127,6 +199,15 @@ def _make_dataset(
     easy: dict[str, np.ndarray] = {}
     preserve_log: dict[str, np.ndarray | None] = {}
     preserve_protocol: dict[str, np.ndarray | None] = {}
+    dual_weight: dict[str, np.ndarray] = {}
+    teacher_tstar: dict[str, np.ndarray] = {}
+    teacher_feasible: dict[str, np.ndarray] = {}
+    comm_fraction = np.asarray(
+        data.get("comm_fraction", np.zeros((len(data["seed"]), K))),
+        dtype=np.float64)
+    budget_all = np.clip(1.0 - comm_fraction, 0.0, 1.0)
+    if task_regret:
+        gain_all = _teacher_frame_gain(data, np.arange(len(data["seed"])))
     preserve_here = (
         preservation_student is not None
         and preservation_student.num_uavs == K
@@ -144,6 +225,24 @@ def _make_dataset(
         easy[split] = _teacher_easy_mask(data, indices)
         preserve_log[split] = None
         preserve_protocol[split] = None
+        if task_regret:
+            gain = gain_all[indices]
+            d_req = float(np.asarray(data["qos_floor"]).reshape(-1)[0])
+            d_req_deflection = float(
+                _deflection_floor_for_pd(d_req, float(data["p_fa"][0])))
+            dual_weight[split] = np.stack([
+                dual_edge_weights(
+                    gain[t], budget_all[indices[t]], min_power_floor=1e-3)
+                for t in range(len(indices))
+            ], axis=0).astype(np.float32)
+            teacher_tstar[split] = np.asarray([
+                tstar_of(gain[t], budget_all[indices[t]])
+                for t in range(len(indices))
+            ], dtype=np.float32)
+            # feasibility in deflection units: t*(A) >= d_req floor
+            teacher_feasible[split] = np.asarray(
+                teacher_tstar[split] >= d_req_deflection - 1e-9,
+                dtype=np.float32)
         if preserve_here:
             preserve_log[split] = np.log1p(
                 preservation_student.predict(features[split])).astype(
@@ -166,6 +265,9 @@ def _make_dataset(
         preserve_log=preserve_log,
         preserve_protocol=preserve_protocol,
         excluded_seeds=excluded,
+        dual_weight=dual_weight if task_regret else None,
+        teacher_tstar=teacher_tstar if task_regret else None,
+        teacher_feasible=teacher_feasible if task_regret else None,
     )
 
 
@@ -236,6 +338,8 @@ def _batch_loss(
     preservation_scope: str,
     preservation_endpoint_scale: torch.Tensor,
     selection_weight: float,
+    dual_weight_coef: float = 0.0,
+    task_regret_coef: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     feature = _tensor(dataset.features[split][indices])
     normalized = (feature - feature_mean) / feature_scale
@@ -248,6 +352,12 @@ def _batch_loss(
     valid = torch.as_tensor(~np.eye(K, dtype=bool))[None, :, :, None]
     valid = valid.expand_as(prediction)
     weight = target_weight[:, None, None, :] * (1.0 + 5.0 * selected)
+    # Gate 2 (advice/016 §6): dual-consistent edge weights w_iq = pi_q*p_iq.
+    # The envelope-theorem sensitivity is per (i,q); broadcast over the
+    # receiver axis j.  Combined with the target weight and selection bias.
+    if dual_weight_coef > 0.0 and dataset.dual_weight is not None:
+        dual_w = _tensor(dataset.dual_weight[split][indices])  # (F,K,Q)
+        weight = weight * (1.0 + dual_weight_coef * dual_w[:, :, None, :])
     under = (prediction < target).to(prediction.dtype) * selected
     weight = weight * (1.0 + under)
     error = torch.nn.functional.smooth_l1_loss(
@@ -270,6 +380,50 @@ def _batch_loss(
         dim=-1)
     selection = (cross_entropy * target_weight).sum() / (
         target_weight.sum().clamp_min(1.0))
+
+    # Gate 2 (advice/016 §4.1): lexicographic task-regret surrogate.
+    #   R_gamma = mean over frames where the teacher is feasible of
+    #             relu(d_req - t*(student structure)) in P_D space
+    #   R_t     = mean over frames where BOTH feasible of
+    #             relu(t*(teacher) - t*(student)) in P_D space
+    # P_D-domain: d_req is the deflection floor for the QoS P_D floor;
+    # the per-frame teacher max-min t* is precomputed from the trace.
+    task_regret = prediction.new_zeros(())
+    if task_regret_coef > 0.0 and dataset.teacher_tstar is not None:
+        p_fa = float(np.asarray(dataset.data["p_fa"]).reshape(-1)[0])
+        qos_floor_pd = float(np.asarray(
+            dataset.data["qos_floor"]).reshape(-1)[0])
+        d_req = float(_deflection_floor_for_pd(
+            qos_floor_pd, p_fa))
+        # Differentiable Student-decoded structure: select one edge per target
+        # with a softmax relaxation of the deployment argmax.  The previous
+        # implementation multiplied by the TEACHER selected mask, so its
+        # purported Student regret could not penalize a Student structure flip.
+        pred_d = torch.expm1(prediction.clamp_min(0.0)).clamp_min(0.0)
+        pred_d_flat = pred_d.permute(0, 3, 1, 2).reshape(F, Q, -1)
+        soft_structure = torch.softmax(prediction_logits, dim=-1)
+        target_d = torch.sum(soft_structure * pred_d_flat, dim=-1)
+        student_pd = _torch_pd_from_deflection(target_d, p_fa)
+        student_min_pd = student_pd.min(dim=-1).values  # (F,)
+        teacher_t = _tensor(dataset.teacher_tstar[split][indices])
+        teacher_feas = _tensor(dataset.teacher_feasible[split][indices])
+        # R_gamma: teacher feasible but student drops below the QoS floor.
+        floor_mask = teacher_feas
+        r_gamma = (
+            floor_mask
+            * torch.relu(qos_floor_pd - student_min_pd)
+        ).mean()
+        # R_t: both feasible; residual max-min loss in P_D space.  The
+        # teacher's max-min t* is in deflection units; invert to P_D so the
+        # regret is comparable to the student's P_D.
+        teacher_pd = _torch_pd_from_deflection(
+            teacher_t.clamp_min(0.0), p_fa)
+        r_t = (
+            teacher_feas
+            * (student_min_pd >= qos_floor_pd).to(prediction.dtype)
+            * torch.relu(teacher_pd - student_min_pd)
+        ).mean()
+        task_regret = task_regret_coef * (r_gamma + r_t)
 
     preservation = prediction.new_zeros(())
     protocol_preservation = prediction.new_zeros(())
@@ -300,12 +454,14 @@ def _batch_loss(
     total = (
         regression
         + float(selection_weight) * selection
+        + task_regret
         + float(preservation_weight) * preservation
         + float(protocol_preservation_weight) * protocol_preservation
     )
     return total, {
         "regression": float(regression.detach()),
         "selection": float(selection.detach()),
+        "task_regret": float(task_regret.detach()),
         "preservation": float(preservation.detach()),
         "protocol_preservation": float(protocol_preservation.detach()),
     }
@@ -425,6 +581,8 @@ def train(
     recalibrate_endpoint_scale: bool,
     cardinality_residual: bool,
     seed: int,
+    dual_weight_coef: float = 0.0,
+    task_regret_coef: float = 0.0,
 ) -> dict[str, Any]:
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
@@ -441,7 +599,8 @@ def train(
         excluded = np.asarray(
             sorted(available & used_seed_values), dtype=np.int64)
         datasets.append(_make_dataset(
-            path, preservation_student, excluded_seeds=excluded))
+            path, preservation_student, excluded_seeds=excluded,
+            task_regret=(dual_weight_coef > 0.0 or task_regret_coef > 0.0)))
         used_seed_values.update(available - set(excluded.tolist()))
     cardinalities = {(data.K, data.Q) for data in datasets}
     if len(cardinalities) != len(datasets):
@@ -559,6 +718,8 @@ def train(
                     preservation_endpoint_scale=(
                         preservation_endpoint_scale),
                     selection_weight=selection_weight,
+                    dual_weight_coef=dual_weight_coef,
+                    task_regret_coef=task_regret_coef,
                 )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -694,6 +855,14 @@ def main() -> None:
     parser.add_argument("--recalibrate-endpoint-scale", action="store_true")
     parser.add_argument("--cardinality-residual", action="store_true")
     parser.add_argument("--seed", type=int, default=20260801)
+    parser.add_argument(
+        "--dual-weight-coef", type=float, default=0.0,
+        help="Gate 2 (advice/016 §6): envelope dual edge weights "
+             "w_iq = pi_q*p_iq multiplier on the regression loss")
+    parser.add_argument(
+        "--task-regret-coef", type=float, default=0.0,
+        help="Gate 2 (advice/016 §4.1): lexicographic task-regret "
+             "(R_gamma feasibility-flip + R_t max-min residual) multiplier")
     args = parser.parse_args()
     result = train(
         args.trace,
@@ -711,6 +880,8 @@ def main() -> None:
         recalibrate_endpoint_scale=args.recalibrate_endpoint_scale,
         cardinality_residual=args.cardinality_residual,
         seed=args.seed,
+        dual_weight_coef=args.dual_weight_coef,
+        task_regret_coef=args.task_regret_coef,
     )
     print(json.dumps({
         "output": result["output"],

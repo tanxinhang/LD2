@@ -1,0 +1,6 @@
+# Physical U2U stress diagnostic: same certificate-light algorithm, but the
+# packet deadline is reduced from 5 ms to 3 ms. No artificial packet erasure.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32.yaml
+
+marl:
+  comm_deadline_s: 0.003

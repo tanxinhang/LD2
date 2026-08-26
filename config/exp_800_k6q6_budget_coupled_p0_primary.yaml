@@ -1,0 +1,10 @@
+# Scale-safe 6x6 P0: jointly select roles/owners/edges and physically feasible
+# sensing power.  Primary-only keeps the max-min model while avoiding the
+# optional second MILP; a time-limited result is accepted only after an
+# independent full primal-feasibility and integrality check.
+extends: exp_800_k6q6_analytical_l0l1_movement_lex_candidates_v2_blind_indep.yaml
+
+marl:
+  p0_budget_coupled_structure_enabled: true
+  p0_budget_coupled_time_limit_s: 5.0
+  p0_budget_coupled_secondary_enabled: false

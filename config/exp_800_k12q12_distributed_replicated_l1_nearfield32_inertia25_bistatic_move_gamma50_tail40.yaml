@@ -1,0 +1,6 @@
+# Development candidate: activate role-aware L3 only for an episode-level
+# severe bistatic geometry tail reconstructed from the common public view.
+extends: exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50.yaml
+
+marl:
+  distributed_bistatic_tail_gate_ratio: 40.0

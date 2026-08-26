@@ -1,0 +1,5 @@
+# Log-domain midpoint between single-endpoint range and full bistatic product.
+extends: exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25_bistatic_move.yaml
+
+marl:
+  distributed_bistatic_complement_exponent: 0.50

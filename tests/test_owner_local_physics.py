@@ -280,7 +280,7 @@ def test_action_alignment_matches_speed_clip_bounce_and_target_cv():
 
     # First displacement is clipped from norm 5 to norm 1: [0.6,-0.8].
     assert np.allclose(result.uav_position_m[0], [99.6, 0.6, 10.0])
-    assert np.allclose(result.uav_velocity_mps[0], [6.0, -8.0, 0.0])
+    assert np.allclose(result.uav_velocity_mps[0], [-6.0, 8.0, 0.0])
     assert np.allclose(result.uav_position_m[1], [20.3, 20.4, 10.0])
     assert np.allclose(
         result.target_mean_by_owner[:, 0, :2], [[10.2, 99.9], [10.2, 99.9]])

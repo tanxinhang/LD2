@@ -55,6 +55,7 @@ def per_watt_deflection_tensor_from_observables(
     g_rx_dbi: float,
     n_cpi: int,
     g_min: float,
+    c_det: float = 1.0,
     use_swerling: bool = False,
 ) -> np.ndarray:
     """Reconstruct power-independent Deflection gain from observables.
@@ -82,8 +83,13 @@ def per_watt_deflection_tensor_from_observables(
         float(kT), float(bandwidth_hz), float(noise_figure_db))
     antenna_gain = float(10.0 ** (
         (float(g_tx_dbi) + float(g_rx_dbi)) / 10.0))
+    if float(T_sym) <= 0.0:
+        raise ValueError("T_sym must be positive for energy normalization")
+    detector_scale = float(c_det)
+    if not np.isfinite(detector_scale) or detector_scale <= 0.0:
+        raise ValueError("c_det must be finite and positive")
     scale = float(
-        float(T_sym) * int(M) * int(N) * antenna_gain * int(n_cpi)
+        detector_scale * int(M) * int(N) * antenna_gain * int(n_cpi)
         / max(noise, 1.0e-15)
     )
     K = path.shape[0]
@@ -107,6 +113,7 @@ def evaluate_physical_feasibility_oracles(
     p_fa: float,
     total_power_w: float,
     communication_reserve_w: float,
+    sensing_power_cap_w: float | None = None,
     target_pair_limit: int,
     reports_per_receiver: int,
     seed: int,
@@ -134,6 +141,7 @@ def evaluate_physical_feasibility_oracles(
         "P_FA": float(p_fa),
         "total_power_w": float(total_power_w),
         "communication_reserve_w": float(communication_reserve_w),
+        "sensing_power_cap_w": sensing_power_cap_w,
         "target_pair_limit": int(target_pair_limit),
         "reports_per_receiver": int(reports_per_receiver),
         "alternating_iterations": 4,
@@ -159,6 +167,7 @@ def evaluate_physical_feasibility_oracles(
         P_FA=float(p_fa),
         total_power_w=float(total_power_w),
         communication_reserve_w=float(communication_reserve_w),
+        sensing_power_cap_w=sensing_power_cap_w,
         fusion_mode=str(detection_fusion_mode),
     )
     deployed = np.asarray(deployed_pd, dtype=np.float64)

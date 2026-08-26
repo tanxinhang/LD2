@@ -1,0 +1,6 @@
+# Gate C: hard 3 ms serialization/deadline stress without random shadowing.
+extends: exp_800_k12q12_distributed_v2_fbl5ms.yaml
+
+marl:
+  comm_deadline_s: 0.003
+

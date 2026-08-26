@@ -1,0 +1,7 @@
+# Diagnostic only: isolates packet-loss effects while retaining the deployed
+# four-bit endpoint-state quantizer.  Not a deployable headline result.
+extends: exp_800_k6q6_distributed_budget_reconstructable.yaml
+
+marl:
+  comm_eval_force_rate_bits: 4
+  comm_deadline_s: 0.05

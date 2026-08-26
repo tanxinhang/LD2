@@ -251,10 +251,17 @@ def validate_frozen_compute_energy_epoch(
             f"energy train/calibration/validation leakage: {sorted(overlap)}")
     scores = episode_compute_energy_scores(
         observations, expected_episode_ids=validation_ids)
-    failures = tuple(
-        score.episode_id for score in scores
-        if score.package_energy_upper_j > epoch.package_energy_bound_j
-    )
+    # Audit 2026-08-17: a non-finite package_energy_bound_j (rank > n, or a
+    # censored window scoring inf) made the comparison never True -> the epoch
+    # was reported clean with zero failures.  Fail closed instead.
+    bound = epoch.package_energy_bound_j
+    if not math.isfinite(bound):
+        failures = tuple(score.episode_id for score in scores)
+    else:
+        failures = tuple(
+            score.episode_id for score in scores
+            if score.package_energy_upper_j > bound
+        )
     return ComputeEnergyValidation(
         validation_episode_ids=validation_ids,
         failure_episode_ids=failures,

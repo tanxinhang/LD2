@@ -1,4 +1,4 @@
-﻿"""Deterministic fingerprint of the U2U protocol implementation and config."""
+"""Deterministic fingerprint of the U2U protocol implementation and config."""
 
 # ----------------------------------------------------------------------
 # AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)

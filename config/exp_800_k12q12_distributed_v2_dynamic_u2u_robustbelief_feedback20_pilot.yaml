@@ -1,0 +1,7 @@
+# Intermediate-timescale feedback ablation: four 5-frame hyperedge/power
+# updates per movement-responsibility reassignment.  This tests whether the
+# feedback5 tail gain can be retained without its assignment-chattering cost.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 20

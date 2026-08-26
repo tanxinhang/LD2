@@ -1,0 +1,9 @@
+# Phase C ablation: tangential phase ON at a 60 m standoff.  At the standoff
+# boundary nodes take radius-preserving tangential steps (safety invariant
+# S1 preserved exactly) to improve the near-field bistatic geometry.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_pilot.yaml
+
+marl:
+  distributed_gap_standoff_m: 60.0
+  distributed_gap_tangential_phase: true
+  distributed_gap_tangential_step_rad: 0.02

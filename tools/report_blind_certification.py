@@ -49,7 +49,7 @@ def main(argv=None) -> int:
     print("=" * 62)
     print(f"blind seeds          : {n} (never seen in any run/bank)")
     print(f"QoS feasible rate    : {p_hat:.3f}  (PRIMARY criterion)")
-    print(f"Wilson LCB (95%, 1s) : {lcb:.3f}  (PRIMARY criterion)")
+    print(f"Wilson lower endpoint (95% two-sided) : {lcb:.3f}  (PRIMARY criterion)")
     print(f"Gate (point estimate): "
           f"{'PASS' if p_hat >= 0.70 else 'FAIL'}")
     print(f"Gate (LCB enforced)  : "

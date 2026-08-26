@@ -1,4 +1,4 @@
-﻿"""Measured concurrent execution of independent owner-local ranking jobs."""
+"""Measured concurrent execution of independent owner-local ranking jobs."""
 
 # ----------------------------------------------------------------------
 # AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)

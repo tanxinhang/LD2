@@ -1,0 +1,6 @@
+# Certificate-free local temporal regularization. Each UAV mixes its current
+# replicated-LP row with 10% of its own previous feasible row; no message added.
+extends: exp_800_k6q6_distributed_replicated_l1_nearfield32.yaml
+
+marl:
+  distributed_replicated_power_inertia: 0.10

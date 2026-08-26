@@ -1,0 +1,9 @@
+# Dynamic-task feedback ablation.  The original 150-frame movement assignment
+# hold equals the complete episode length and therefore creates an open-loop
+# geometry controller.  Reconstruct the public matching every five frames,
+# aligned with the deployed hyperedge hold, while preserving the baseline
+# radial movement, communication, sensing, and power laws.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 5

@@ -142,6 +142,19 @@ class Target:
 
     def _bounce(self):
         px, py = self.state[0], self.state[1]
+        # Audit 2026-08-17: CT stores [px, py, speed, heading, turn_rate] --
+        # the velocity reflection must mirror the HEADING (theta), not the
+        # speed/heading entries like CV/CA velocities.  Reflect the heading on
+        # wall contact so the target bounces away instead of oscillating.
+        if self.model == "CT":
+            theta = self.state[3]
+            if px < 0 or px > self.area_w:
+                self.state[3] = (np.pi - theta) % (2 * np.pi)
+                self.state[0] = -px if px < 0 else 2 * self.area_w - px
+            if py < 0 or py > self.area_h:
+                self.state[3] = (-theta) % (2 * np.pi)
+                self.state[1] = -py if py < 0 else 2 * self.area_h - py
+            return
         if px < 0:
             self.state[0] = -px
             if self.model in ("CV", "CA"): self.state[2] = abs(self.state[2])

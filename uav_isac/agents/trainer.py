@@ -887,7 +887,12 @@ def compute_robust_checkpoint_statistics(
         & (worst >= targets[2] - tol))
     successes = int(np.sum(feasible))
     p_hat = successes / n
-    z = NormalDist().inv_cdf(1.0 - alpha)
+    # Audit 2026-08-25: the project convention (docs/README.md, tests) is the
+    # 95% two-sided Wilson lower endpoint, z = inv_cdf(1-alpha/2) = 1.96, not
+    # the one-sided z = inv_cdf(1-alpha) = 1.645.  The old one-sided value could
+    # flip a 0.70 gate (e.g. 78/100 -> 0.705 vs 0.689) and disagreed with the
+    # formal gate tools.  Aligned with the documented standard.
+    z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
     denom = 1.0 + z * z / n
     center = p_hat + z * z / (2.0 * n)
     radius = z * np.sqrt(
@@ -2075,11 +2080,22 @@ class MAPPTrainer:
             # Filter empty groups
             param_groups = [g for g in param_groups if len(g['params']) > 0]
             agents[0].actor_optimizer = torch.optim.Adam(param_groups)
+            # Audit 2026-08-25: the episode LR scheduler below used to overwrite
+            # every param-group lr, silently erasing this per-module isolation
+            # (enc 1e-5 / attn 0-or-1e-5 / head 5e-5) from the first scheduled
+            # update onward.  Record the explicit per-group lrs so the scheduler
+            # preserves them (they are an ablation contract, not a default).
+            self._actor_param_group_lr = {
+                id(g): float(g['lr'])
+                for g in agents[0].actor_optimizer.param_groups}
             frozen_count = sum(1 for p in agents[0].actor.parameters() if not p.requires_grad)
             print(f'[S1] comm={self._comm_mode} freeze_attn={freeze_attn} '
                   f'per_module_lr={use_per_lr or freeze_attn} '
                   f'enc_lr=1e-5 attn_lr={attn_lr} head_lr=5e-5 '
                   f'frozen={frozen_count} params')
+        else:
+            # Default single-LR optimizer: the scheduler may overwrite lr freely.
+            self._actor_param_group_lr = None
 
         # CVaR target-tail-risk constraint
         self._cvar_tau = getattr(ma, 'cvar_tau', 0.0)
@@ -3870,8 +3886,9 @@ class MAPPTrainer:
                 target_floor=self._risk_target_floor,
                 scalar_mix=self._risk_scalar_mix,
             )
-            metrics['risk_advantage_tail_fraction'] = (
-                self._risk_tail_fraction)
+            # NOTE: risk_advantage_tail_fraction is a per-update scalar (not a
+            # per-minibatch loss); it is added AFTER the averaging loop below so
+            # it is not divided by n_minibatches (audit 2026-08-17).
 
         # ═══════════════════════════════════════════════════════════════
         # P0 ASSERTION: old-log-prob consistency check.
@@ -4328,6 +4345,9 @@ class MAPPTrainer:
         n_actual = max(metrics.pop('_n_minibatches', 1), 1)
         for k in metrics:
             metrics[k] /= max(n_actual, 1)
+        if getattr(self, '_risk_tail_fraction', None) is not None:
+            metrics['risk_advantage_tail_fraction'] = (
+                self._risk_tail_fraction)
         metrics.update(causal_ccp_metrics)
 
         # One full-team auxiliary step preserves the (transition, UAV) grouping
@@ -4891,13 +4911,22 @@ class MAPPTrainer:
                     print(f'[FREEZE VIOLATION] Ep {self._oracle_ep_count}: hash changed! {self._freeze_hash}→{cur_hash}')
                     self._freeze_hash = cur_hash
         else:
+            # Audit 2026-08-17: the old `if current_actor_lr > 1e-4:` guard made
+            # the final 3e-5 stage unreachable (after lr reached exactly 1e-4 the
+            # guard was False forever).  Schedule by episode count instead; skip
+            # only when the actor is frozen (lr already 0).
             current_actor_lr = self.agents[0].actor_optimizer.param_groups[0]['lr']
-            if current_actor_lr > 1e-4:
+            if current_actor_lr > 0.0:
                 if self._oracle_ep_count < 100: lr = 3e-4
                 elif self._oracle_ep_count < 200: lr = 1e-4
                 else: lr = 3e-5
+                lr_map = getattr(self, '_actor_param_group_lr', None)
                 for agent in self.agents:
-                    for pg in agent.actor_optimizer.param_groups: pg['lr'] = lr
+                    # Audit 2026-08-25: preserve explicitly configured per-module
+                    # lr groups (use_per_module_lr / freeze_attention ablation);
+                    # the schedule only governs default single-LR groups.
+                    for pg in agent.actor_optimizer.param_groups:
+                        pg['lr'] = lr_map.get(id(pg), lr) if lr_map is not None else lr
                     for pg in agent.critic_optimizer.param_groups: pg['lr'] = lr * 5.0
         return metrics
 
@@ -4969,6 +4998,7 @@ class MAPPTrainer:
                   physical_oracle_stride: int = 0,
                   evidence_trace_output: Optional[str] = None,
                   structure_teacher_trace_output: Optional[str] = None,
+                  structure_trace_run_binding: Optional[Dict] = None,
                   n5_counterfactual_output: Optional[str] = None,
                   n5_counterfactual_max_events: int = 0,
                   n5_counterfactual_target_mode: str = "both",
@@ -5020,9 +5050,17 @@ class MAPPTrainer:
         eval_comm_bits = []
         eval_comm_energy = []
         eval_comm_latency = []
+        eval_comm_p95_latency = []
+        eval_comm_mean_bler = []
+        eval_comm_max_bler = []
+        eval_comm_reliability_violation = []
+        eval_comm_burst_failure = []
+        eval_comm_burst_bad_link = []
         eval_comm_delivery = []
         eval_comm_active = []
         eval_comm_violation = []
+        eval_comm_snr_violation = []
+        eval_comm_delivery_failure = []
         eval_structure_payload_bits = []
         eval_structure_atomic_delivery = []
         eval_structure_selected_bits = []
@@ -5031,6 +5069,12 @@ class MAPPTrainer:
         eval_structure_insufficient_cache = []
         eval_p0_resolved = []
         eval_p0_solve_time = []
+        eval_p0_topology_invalid = []
+        eval_p0_topology_invalid_edges = []
+        eval_p0_topology_repair = []
+        eval_p0_topology_replacements = []
+        eval_p0_topology_repair_worst_pd = []
+        eval_p0_topology_full_fallback = []
         eval_local_search_candidates = []
         eval_local_search_verifications = []
         eval_local_search_accepted = []
@@ -5047,14 +5091,40 @@ class MAPPTrainer:
         eval_evidence_comm_delivery = []
         eval_evidence_comm_active = []
         eval_evidence_comm_violation = []
+        eval_evidence_comm_failure = []
+        eval_evidence_comm_snr_failure = []
+        eval_evidence_comm_reliability_failure = []
+        eval_evidence_comm_burst_failure = []
+        eval_evidence_comm_burst_bad = []
         eval_evidence_utilization = []
         eval_evidence_transmitted_entries = []
         eval_evidence_useful_entries = []
         eval_evidence_pfa = []
+        eval_belief_feedback_entries = []
+        eval_belief_feedback_receivers = []
+        eval_belief_feedback_before = []
+        eval_belief_feedback_after = []
+        eval_belief_feedback_contraction = []
+        eval_belief_feedback_truth_rmse_before = []
+        eval_belief_feedback_truth_rmse_after = []
+        eval_belief_position_rmse = []
+        eval_belief_position_p95 = []
+        eval_belief_position_rmse_per_target = []
+        eval_belief_target_aoi_mean = []
+        eval_belief_target_aoi_p95 = []
+        eval_belief_target_aoi_per_target = []
+        eval_belief_disagreement_end = []
         eval_isac_comm_power = []
         eval_isac_sensing_power = []
         eval_isac_balance_error = []
+        eval_isac_budget_violation = []
+        eval_isac_unused_power = []
         eval_isac_target_power = []
+        eval_replicated_common_view = []
+        eval_replicated_full_view = []
+        eval_replicated_local_coverage = []
+        eval_replicated_solve_time = []
+        eval_replicated_per_node_solve_time = []
         eval_hyperedge_visible_peers = []
         eval_hyperedge_mutual_edges = []
         eval_hyperedge_active_edges = []
@@ -5062,6 +5132,7 @@ class MAPPTrainer:
         eval_hyperedge_protocol_used = []
         eval_hyperedge_safety_fallback = []
         eval_hyperedge_assignment_reused = []
+        eval_p0_target_selected_mask = []
         eval_cacsr_gate_rate = []
         eval_cacsr_delta_abs = []
         eval_risk_residual_gate = []
@@ -5084,6 +5155,42 @@ class MAPPTrainer:
         executed_move_collision = []
         executed_target_choice_counts = np.zeros((K, Q), dtype=np.int64)
         ep_nearest_target_distance = []
+        # Physical post-step separation audit.  Unlike the actor/executed
+        # target-choice diagnostics above, these values are read back from the
+        # environment after every movement override has actually been applied.
+        eval_inter_uav_min_distance = []
+        eval_inter_uav_separation_violation = []
+        ep_min_inter_uav_distance = []
+        eval_inter_uav_continuous_min_distance = []
+        eval_inter_uav_continuous_separation_violation = []
+        ep_min_inter_uav_continuous_distance = []
+        eval_movement_safety_intervened = []
+        eval_movement_safety_intervention_call_rate = []
+        eval_movement_safety_fail_closed = []
+        eval_movement_safety_fail_closed_calls = []
+        eval_movement_safety_fail_closed_outside_invariant_calls = []
+        eval_movement_safety_outside_invariant_calls = []
+        eval_movement_safety_recovery_pair_count = []
+        eval_movement_safety_solve_time_s = []
+        eval_movement_safety_solve_time_s_per_node = []
+        eval_movement_safety_projection_calls = []
+        eval_movement_public_view_stale_fail_closed_rate = []
+        eval_movement_public_view_mean_max_age = []
+        eval_movement_public_view_max_age = []
+        # Unified MAC slot accounting (audit priority #5): serialized
+        # coordination + evidence/belief latency against the frame deadline.
+        eval_protocol_total_latency = []
+        eval_protocol_total_p95_latency = []
+        eval_protocol_serialized_bits = []
+        eval_protocol_total_deadline_violation = []
+        eval_movement_assignment_target_coverage = []
+        eval_movement_assignment_duplicate_rate = []
+        eval_movement_assignment_entry_agreement = []
+        eval_movement_anchor_target_coverage = []
+        eval_movement_gain_schedule_selected_self_rate = []
+        eval_movement_gain_schedule_strategy_hold_rate = []
+        eval_movement_gain_schedule_no_improvement_rate = []
+        eval_movement_gain_schedule_far_range_rate = []
         rate_levels = list(getattr(
             self.cfg.marl, 'comm_rate_bits_per_dim', [0, 4, 8, 16]))
         eval_comm_rate_counts = np.zeros(len(rate_levels), dtype=np.int64)
@@ -5109,6 +5216,7 @@ class MAPPTrainer:
         eval_evidence_top2_histories = []
         eval_evidence_reconstruction_errors = []
         evidence_trace_receiver_d = []
+        evidence_trace_owner = []
         evidence_trace_episode = []
         evidence_trace_frame = []
         evidence_trace_positions = []
@@ -5126,7 +5234,17 @@ class MAPPTrainer:
         structure_trace_comm_fraction = []
         structure_trace_sensing_weights = []
         structure_trace_uav_positions = []
+        structure_trace_uav_velocities = []
         structure_trace_target_states = []
+        structure_trace_target_positions = []
+        structure_trace_target_velocities = []
+        structure_trace_sensing_power = []
+        structure_trace_comm_power = []
+        structure_trace_sensing_budget = []
+        structure_trace_per_watt_coefficient = []
+        structure_trace_task_mean_pd = []
+        structure_trace_task_weak3_pd = []
+        structure_trace_task_worst_pd = []
         structure_trace_local_pd = []
         structure_trace_coord_pd_ema = []
         structure_trace_coord_pd_ema_valid = []
@@ -5155,6 +5273,8 @@ class MAPPTrainer:
             pd_hist = []   # list of mean P_D_q per frame
             pd_per_target = []  # list of (Q,) per frame
             nearest_target_distance = []  # list of (Q,) per frame
+            episode_inter_uav_min_distance = []
+            episode_inter_uav_continuous_min_distance = []
             # P0 FIX: streaming GRU + TICA window during eval
             eval_h_prev = None
             eval_movement_phase = 0
@@ -5969,8 +6089,132 @@ class MAPPTrainer:
                             # step, so every forced branch shares the complete
                             # simulator and RNG state.
                             n5_pre_step_env = deepcopy(eval_env)
+                    pre_step_xy = np.asarray([
+                        uav.pos[:2] for uav in eval_env.core.uavs
+                    ], dtype=np.float64)
                     obs, eval_rewards, term, trunc, info = eval_env.step(
                         actions)
+                    post_step_xy = np.asarray([
+                        uav.pos[:2] for uav in eval_env.core.uavs
+                    ], dtype=np.float64)
+                    if K >= 2:
+                        pairwise_distance = np.linalg.norm(
+                            post_step_xy[:, None, :]
+                            - post_step_xy[None, :, :],
+                            axis=-1,
+                        )
+                        frame_min_separation = float(np.min(
+                            pairwise_distance[
+                                np.triu_indices(K, k=1)]))
+                    else:
+                        frame_min_separation = float('inf')
+                    episode_inter_uav_min_distance.append(
+                        frame_min_separation)
+                    eval_inter_uav_min_distance.append(
+                        frame_min_separation)
+                    eval_inter_uav_separation_violation.append(float(
+                        frame_min_separation
+                        < float(self.cfg.uav.d_safe) - 1.0e-9))
+                    if K >= 2:
+                        pair_i, pair_j = np.triu_indices(K, k=1)
+                        relative_start = (
+                            pre_step_xy[pair_i] - pre_step_xy[pair_j])
+                        relative_end = (
+                            post_step_xy[pair_i] - post_step_xy[pair_j])
+                        relative_delta = relative_end - relative_start
+                        delta_sq = np.sum(relative_delta ** 2, axis=1)
+                        closest_time = np.zeros_like(delta_sq)
+                        moving_pair = delta_sq > 1.0e-18
+                        closest_time[moving_pair] = np.clip(
+                            -np.sum(
+                                relative_start[moving_pair]
+                                * relative_delta[moving_pair],
+                                axis=1,
+                            ) / delta_sq[moving_pair],
+                            0.0,
+                            1.0,
+                        )
+                        continuous_pair_distance = np.linalg.norm(
+                            relative_start
+                            + closest_time[:, None] * relative_delta,
+                            axis=1,
+                        )
+                        frame_continuous_min_separation = float(np.min(
+                            continuous_pair_distance))
+                    else:
+                        frame_continuous_min_separation = float('inf')
+                    episode_inter_uav_continuous_min_distance.append(
+                        frame_continuous_min_separation)
+                    eval_inter_uav_continuous_min_distance.append(
+                        frame_continuous_min_separation)
+                    eval_inter_uav_continuous_separation_violation.append(
+                        float(
+                            frame_continuous_min_separation
+                            < float(self.cfg.uav.d_safe) - 1.0e-9))
+                    eval_movement_safety_intervened.append(float(
+                        info.get('movement_safety_intervened', 0.0)))
+                    eval_movement_safety_intervention_call_rate.append(float(
+                        info.get(
+                            'movement_safety_intervention_call_rate', 0.0)))
+                    eval_movement_safety_fail_closed.append(float(
+                        info.get('movement_safety_fail_closed', 0.0)))
+                    eval_movement_safety_fail_closed_calls.append(float(
+                        info.get('movement_safety_fail_closed_calls', 0.0)))
+                    eval_movement_safety_fail_closed_outside_invariant_calls.append(
+                        float(info.get(
+                            'movement_safety_fail_closed_outside_invariant_calls',
+                            0.0)))
+                    eval_movement_safety_outside_invariant_calls.append(float(
+                        info.get('movement_safety_outside_invariant_calls', 0.0)))
+                    eval_movement_safety_recovery_pair_count.append(float(
+                        info.get('movement_safety_recovery_pair_count', 0.0)))
+                    eval_movement_safety_solve_time_s.append(float(
+                        info.get('movement_safety_solve_time_s', 0.0)))
+                    eval_movement_safety_solve_time_s_per_node.append(float(
+                        info.get(
+                            'movement_safety_solve_time_s_per_node', 0.0)))
+                    eval_movement_safety_projection_calls.append(float(
+                        info.get('movement_safety_projection_calls', 0.0)))
+                    eval_movement_public_view_stale_fail_closed_rate.append(
+                        float(info.get(
+                            'movement_public_view_stale_fail_closed_rate',
+                            0.0)))
+                    eval_movement_public_view_mean_max_age.append(float(
+                        info.get(
+                            'movement_public_view_mean_max_age_frames', 0.0)))
+                    eval_movement_public_view_max_age.append(float(info.get(
+                        'movement_public_view_max_age_frames', 0.0)))
+                    eval_movement_assignment_target_coverage.append(float(
+                        info.get(
+                            'movement_executed_assignment_target_coverage',
+                            0.0)))
+                    eval_movement_assignment_duplicate_rate.append(float(
+                        info.get(
+                            'movement_executed_assignment_duplicate_rate',
+                            0.0)))
+                    eval_movement_assignment_entry_agreement.append(float(
+                        info.get(
+                            'movement_local_assignment_entry_agreement_rate',
+                            0.0)))
+                    eval_movement_anchor_target_coverage.append(float(
+                        info.get(
+                            'movement_anchor_target_coverage', 0.0)))
+                    eval_movement_gain_schedule_selected_self_rate.append(
+                        float(info.get(
+                            'movement_gain_schedule_selected_self_rate',
+                            0.0)))
+                    eval_movement_gain_schedule_strategy_hold_rate.append(
+                        float(info.get(
+                            'movement_gain_schedule_strategy_hold_rate',
+                            0.0)))
+                    eval_movement_gain_schedule_no_improvement_rate.append(
+                        float(info.get(
+                            'movement_gain_schedule_no_improvement_rate',
+                            0.0)))
+                    eval_movement_gain_schedule_far_range_rate.append(
+                        float(info.get(
+                            'movement_gain_schedule_far_range_rate',
+                            0.0)))
                     if (
                         n5_pre_step_env is not None
                         and bool(info.get('p0_resolved', False))
@@ -6048,6 +6292,8 @@ class MAPPTrainer:
                                     eval_env.core._isac_total_power_w),
                                 communication_reserve_w=float(
                                     np.mean(current_comm_power)),
+                                sensing_power_cap_w=float(
+                                    self.cfg.uav.P_sense_max),
                                 target_pair_limit=int(
                                     self.cfg.detection.K_q_max),
                                 reports_per_receiver=reports_per_receiver,
@@ -6067,9 +6313,26 @@ class MAPPTrainer:
                         self.cfg.detection.P_FA,
                     )
                     if evidence_trace_output:
+                        executed_receiver_d = np.asarray(
+                            (
+                                eval_env.current_step_info.learned_comm or {}
+                            ).get(
+                                'detection_receiver_deflection',
+                                evidence_oracle['receiver_deflection'],
+                            ),
+                            dtype=np.float64,
+                        )
                         evidence_trace_receiver_d.append(
-                            evidence_oracle[
-                                'receiver_deflection'].copy())
+                            executed_receiver_d.copy())
+                        evidence_trace_owner.append(np.asarray(
+                            (
+                                eval_env.current_step_info.learned_comm or {}
+                            ).get(
+                                'evidence_owner',
+                                np.full(Q, -1, dtype=np.int64),
+                            ),
+                            dtype=np.int64,
+                        ).copy())
                         evidence_trace_episode.append(
                             len(eval_evidence_global_histories))
                         evidence_trace_frame.append(
@@ -6128,6 +6391,10 @@ class MAPPTrainer:
                             eval_env.core.uavs[k].pos
                             for k in range(K)
                         ]).astype(np.float32))
+                        structure_trace_uav_velocities.append(np.stack([
+                            eval_env.core.uavs[k].vel
+                            for k in range(K)
+                        ]).astype(np.float32))
                         structure_trace_target_states.append(np.stack([
                             np.concatenate([
                                 target.get_position_3d()[:2],
@@ -6135,6 +6402,47 @@ class MAPPTrainer:
                             ])
                             for target in eval_env.core.targets
                         ]).astype(np.float32))
+                        structure_trace_target_positions.append(np.stack([
+                            target.get_position_3d()
+                            for target in eval_env.core.targets
+                        ]).astype(np.float32))
+                        structure_trace_target_velocities.append(np.stack([
+                            np.asarray([
+                                *target.get_velocity(), 0.0
+                            ], dtype=np.float32)
+                            for target in eval_env.core.targets
+                        ]))
+                        deployed_sensing_power = np.asarray(
+                            eval_env.core._current_sensing_power_w,
+                            dtype=np.float64).copy()
+                        deployed_comm_power = np.asarray(
+                            eval_env.core._current_comm_power_w,
+                            dtype=np.float64).copy()
+                        structure_trace_sensing_power.append(
+                            deployed_sensing_power)
+                        structure_trace_comm_power.append(
+                            deployed_comm_power)
+                        structure_trace_sensing_budget.append(np.minimum(
+                            np.maximum(
+                                float(eval_env.core._isac_total_power_w)
+                                - deployed_comm_power,
+                                0.0,
+                            ),
+                            float(eval_env.core._sensing_power_cap_w),
+                        ))
+                        structure_trace_per_watt_coefficient.append(
+                            eval_env.core._per_watt_coefficient_from_entries(
+                                eval_env.current_step_info.deflection_entries
+                            ).copy())
+                        task_pd = np.asarray(pd_q, dtype=np.float64)
+                        weak_count = min(3, Q)
+                        structure_trace_task_mean_pd.append(float(
+                            np.mean(task_pd)))
+                        structure_trace_task_weak3_pd.append(float(np.mean(
+                            np.partition(task_pd, weak_count - 1)[
+                                :weak_count])))
+                        structure_trace_task_worst_pd.append(float(
+                            np.min(task_pd)))
                         structure_trace_local_pd.append(np.stack([
                             eval_env.core.prev_P_D_local.get(
                                 k, np.zeros(Q, dtype=np.float64))
@@ -6305,14 +6613,33 @@ class MAPPTrainer:
                     if attempted > 0.0:
                         eval_comm_latency.append(float(
                             info.get('learned_comm_mean_latency_s', 0.0)))
+                        eval_comm_p95_latency.append(float(
+                            info.get('learned_comm_p95_latency_s', 0.0)))
+                        eval_comm_mean_bler.append(float(info.get(
+                            'learned_comm_mean_packet_error_probability', 0.0)))
+                        eval_comm_max_bler.append(float(info.get(
+                            'learned_comm_max_packet_error_probability', 0.0)))
+                        eval_comm_reliability_violation.append(float(info.get(
+                            'learned_comm_reliability_violation_rate', 0.0)))
+                        eval_comm_burst_failure.append(float(info.get(
+                            'learned_comm_burst_failure_rate', 0.0)))
+                        eval_comm_burst_bad_link.append(float(info.get(
+                            'learned_comm_burst_bad_link_rate', 0.0)))
                         eval_comm_delivery.append(float(
                             info.get('learned_comm_delivery_rate', 0.0)))
                         eval_comm_violation.append(float(info.get(
                             'learned_comm_deadline_violation_rate', 0.0)))
+                        eval_comm_snr_violation.append(float(info.get(
+                            'learned_comm_snr_violation_rate', 0.0)))
+                        eval_comm_delivery_failure.append(float(info.get(
+                            'learned_comm_delivery_failure_rate', 0.0)))
                     eval_comm_active.append(float(
                         info.get('learned_comm_active_senders', 0.0)))
                     eval_structure_payload_bits.append(float(info.get(
                         'structure_student_payload_bits', 0.0)))
+                    eval_p0_target_selected_mask.append(np.asarray(
+                        info.get('p0_target_selected_mask', np.zeros(Q)),
+                        dtype=np.float64))
                     if float(info.get(
                             'structure_student_atomic_attempted_senders',
                             0.0)) > 0.0:
@@ -6331,6 +6658,21 @@ class MAPPTrainer:
                         info.get('p0_resolved', False)))
                     eval_p0_solve_time.append(float(
                         info.get('p0_solve_time_s', 0.0)))
+                    eval_p0_topology_invalid.append(float(info.get(
+                        'p0_topology_invalid_frame', 0.0)))
+                    eval_p0_topology_invalid_edges.append(float(info.get(
+                        'p0_topology_invalid_edge_count', 0.0)))
+                    repair_applied = float(info.get(
+                        'p0_topology_min_change_repair_applied', 0.0))
+                    eval_p0_topology_repair.append(repair_applied)
+                    eval_p0_topology_replacements.append(float(info.get(
+                        'p0_topology_min_change_replacement_count', 0.0)))
+                    repair_worst = float(info.get(
+                        'p0_topology_repair_candidate_worst_pd', np.nan))
+                    if repair_applied > 0.0 and np.isfinite(repair_worst):
+                        eval_p0_topology_repair_worst_pd.append(repair_worst)
+                    eval_p0_topology_full_fallback.append(float(info.get(
+                        'p0_topology_full_fallback', 0.0)))
                     if float(info.get('local_search_resolved', 0.0)) > 0.0:
                         eval_local_search_candidates.append(float(info.get(
                             'local_search_candidate_count', 0.0)))
@@ -6360,6 +6702,14 @@ class MAPPTrainer:
                                 0.0)))
                     eval_evidence_comm_bits.append(float(
                         info.get('evidence_comm_bits', 0.0)))
+                    eval_protocol_total_latency.append(float(
+                        info.get('protocol_total_latency_s', 0.0)))
+                    eval_protocol_total_p95_latency.append(float(
+                        info.get('protocol_total_p95_latency_s', 0.0)))
+                    eval_protocol_serialized_bits.append(float(
+                        info.get('protocol_serialized_bits', 0.0)))
+                    eval_protocol_total_deadline_violation.append(float(
+                        info.get('protocol_total_deadline_violation', 0.0)))
                     eval_evidence_comm_energy.append(float(
                         info.get('evidence_comm_energy_j', 0.0)))
                     evidence_attempted = float(info.get(
@@ -6371,6 +6721,18 @@ class MAPPTrainer:
                             'evidence_comm_delivery_rate', 0.0)))
                         eval_evidence_comm_violation.append(float(info.get(
                             'evidence_comm_deadline_violation_rate', 0.0)))
+                        eval_evidence_comm_failure.append(float(info.get(
+                            'evidence_comm_delivery_failure_rate', 0.0)))
+                        eval_evidence_comm_snr_failure.append(float(info.get(
+                            'evidence_comm_snr_violation_rate', 0.0)))
+                        eval_evidence_comm_reliability_failure.append(float(
+                            info.get(
+                                'evidence_comm_reliability_violation_rate',
+                                0.0)))
+                        eval_evidence_comm_burst_failure.append(float(info.get(
+                            'evidence_comm_burst_failure_rate', 0.0)))
+                        eval_evidence_comm_burst_bad.append(float(info.get(
+                            'evidence_comm_burst_bad_link_rate', 0.0)))
                     eval_evidence_comm_active.append(float(info.get(
                         'evidence_comm_active_senders', 0.0)))
                     eval_evidence_utilization.append(float(info.get(
@@ -6383,6 +6745,37 @@ class MAPPTrainer:
                         'evidence_detection_aggregate_pfa',
                         self.cfg.detection.P_FA,
                     )))
+                    eval_belief_feedback_entries.append(float(info.get(
+                        'belief_feedback_fused_entries', 0.0)))
+                    eval_belief_feedback_receivers.append(float(info.get(
+                        'belief_feedback_receivers', 0.0)))
+                    eval_belief_feedback_before.append(float(info.get(
+                        'belief_feedback_disagreement_before_m', 0.0)))
+                    eval_belief_feedback_after.append(float(info.get(
+                        'belief_feedback_disagreement_after_m', 0.0)))
+                    eval_belief_feedback_contraction.append(float(info.get(
+                        'belief_feedback_contraction_ratio', 1.0)))
+                    eval_belief_feedback_truth_rmse_before.append(float(
+                        info.get('belief_feedback_truth_rmse_before_m', 0.0)))
+                    eval_belief_feedback_truth_rmse_after.append(float(
+                        info.get('belief_feedback_truth_rmse_after_m', 0.0)))
+                    if 'belief_position_rmse_m' in info:
+                        eval_belief_position_rmse.append(float(
+                            info['belief_position_rmse_m']))
+                        eval_belief_position_p95.append(float(
+                            info['belief_position_error_p95_m']))
+                        eval_belief_position_rmse_per_target.append(np.asarray(
+                            info['belief_position_rmse_per_target_m'],
+                            dtype=np.float64))
+                        eval_belief_target_aoi_mean.append(float(
+                            info['belief_target_aoi_mean_frames']))
+                        eval_belief_target_aoi_p95.append(float(
+                            info['belief_target_aoi_p95_frames']))
+                        eval_belief_target_aoi_per_target.append(np.asarray(
+                            info['belief_target_aoi_per_target_frames'],
+                            dtype=np.float64))
+                        eval_belief_disagreement_end.append(float(
+                            info['belief_position_disagreement_end_m']))
                     if self._joint_isac_power_enabled:
                         eval_isac_comm_power.append(float(
                             info.get('isac_comm_power_w', 0.0)))
@@ -6390,9 +6783,33 @@ class MAPPTrainer:
                             info.get('isac_sensing_power_w', 0.0)))
                         eval_isac_balance_error.append(float(
                             info.get('isac_max_power_balance_error_w', 0.0)))
+                        eval_isac_budget_violation.append(float(
+                            info.get(
+                                'isac_max_power_budget_violation_w', 0.0)))
+                        eval_isac_unused_power.append(float(
+                            info.get('isac_unused_power_w', 0.0)))
                         eval_isac_target_power.append(np.asarray(
                             info.get('isac_target_power_w', np.zeros(Q)),
                             dtype=np.float64))
+                        if float(info.get(
+                            'distributed_replicated_power_enabled', 0.0
+                        )) > 0.0:
+                            eval_replicated_common_view.append(float(info.get(
+                                'distributed_replicated_power_common_view',
+                                0.0)))
+                            eval_replicated_full_view.append(float(info.get(
+                                'distributed_replicated_power_full_view_fraction',
+                                0.0)))
+                            eval_replicated_local_coverage.append(float(info.get(
+                                'distributed_replicated_power_local_coverage',
+                                0.0)))
+                            eval_replicated_solve_time.append(float(info.get(
+                                'distributed_replicated_power_solve_time_s',
+                                0.0)))
+                            eval_replicated_per_node_solve_time.append(float(
+                                info.get(
+                                    'distributed_replicated_power_per_node_solve_time_s',
+                                    0.0)))
                     if float(info.get('hyperedge_enabled', 0.0)) > 0.0:
                         eval_hyperedge_visible_peers.append(float(info.get(
                             'hyperedge_visible_peers_per_uav', 0.0)))
@@ -6450,6 +6867,11 @@ class MAPPTrainer:
                     eval_episode_realized_worst.append(float(sorted_q[0]))
                 steady_distance = np.array(nearest_target_distance[-w:]).mean(axis=0)
                 ep_nearest_target_distance.append(steady_distance)
+                ep_min_inter_uav_distance.append(float(np.min(
+                    episode_inter_uav_min_distance or [float('inf')])))
+                ep_min_inter_uav_continuous_distance.append(float(np.min(
+                    episode_inter_uav_continuous_min_distance
+                    or [float('inf')])))
             eval_responsibility_episodes.append(
                 episode_responsibility_records)
             eval_responsibility_pd_histories.append(np.asarray(
@@ -6577,6 +6999,8 @@ class MAPPTrainer:
                 trace_path,
                 receiver_deflection=np.asarray(
                     evidence_trace_receiver_d, dtype=np.float64),
+                fusion_owner=np.asarray(
+                    evidence_trace_owner, dtype=np.int64),
                 episode_index=np.asarray(
                     evidence_trace_episode, dtype=np.int32),
                 frame_index=np.asarray(
@@ -6592,11 +7016,27 @@ class MAPPTrainer:
                 num_targets=np.asarray(Q, dtype=np.int32),
             )
         if structure_teacher_trace_output:
+            from uav_isac.evaluation.layer_provenance import (
+                LAYER_TRACE_SCHEMA_VERSION,
+                build_layer_trace_provenance,
+                physics_contract_from_environment,
+            )
             trace_path = os.path.abspath(structure_teacher_trace_output)
             os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+            trace_provenance = build_layer_trace_provenance(
+                run_binding=structure_trace_run_binding or {},
+                physics_contract=physics_contract_from_environment(
+                    eval_env.core, self.cfg),
+            )
             np.savez_compressed(
                 trace_path,
-                schema_version=np.asarray([2], dtype=np.int16),
+                schema_version=np.asarray(
+                    [LAYER_TRACE_SCHEMA_VERSION], dtype=np.int16),
+                provenance_json=np.asarray([
+                    json.dumps(
+                        trace_provenance, sort_keys=True,
+                        separators=(",", ":"), ensure_ascii=False)
+                ]),
                 num_uavs=np.asarray([K], dtype=np.int16),
                 num_targets=np.asarray([Q], dtype=np.int16),
                 episode=np.asarray(structure_trace_episode, dtype=np.int32),
@@ -6622,8 +7062,14 @@ class MAPPTrainer:
                     structure_trace_sensing_weights, dtype=np.float32),
                 uav_positions=np.asarray(
                     structure_trace_uav_positions, dtype=np.float32),
+                uav_velocities=np.asarray(
+                    structure_trace_uav_velocities, dtype=np.float32),
                 target_states=np.asarray(
                     structure_trace_target_states, dtype=np.float32),
+                target_positions=np.asarray(
+                    structure_trace_target_positions, dtype=np.float32),
+                target_velocities=np.asarray(
+                    structure_trace_target_velocities, dtype=np.float32),
                 local_pd=np.asarray(
                     structure_trace_local_pd, dtype=np.float32),
                 coord_pd_ema=np.asarray(
@@ -6642,6 +7088,21 @@ class MAPPTrainer:
                     structure_trace_receiver_owner, dtype=np.int16),
                 teacher_role=np.asarray(
                     structure_trace_role, dtype=np.int8),
+                deployed_selected=np.asarray(
+                    structure_trace_pair, dtype=np.uint8),
+                deployed_receiver_owner=np.asarray(
+                    structure_trace_receiver_owner, dtype=np.int16),
+                deployed_role=np.asarray(
+                    structure_trace_role, dtype=np.int8),
+                deployed_sensing_power_w=np.asarray(
+                    structure_trace_sensing_power, dtype=np.float64),
+                deployed_comm_power_w=np.asarray(
+                    structure_trace_comm_power, dtype=np.float64),
+                frame_sensing_budget_w=np.asarray(
+                    structure_trace_sensing_budget, dtype=np.float64),
+                per_watt_coefficient=np.asarray(
+                    structure_trace_per_watt_coefficient,
+                    dtype=np.float64),
                 privileged_candidate=np.asarray(
                     structure_trace_candidate, dtype=np.uint8),
                 privileged_d_eff=np.asarray(
@@ -6656,6 +7117,12 @@ class MAPPTrainer:
                     structure_trace_chi_rep, dtype=np.float64),
                 physical_pd=np.asarray(
                     structure_trace_physical_pd, dtype=np.float64),
+                task_mean_pd=np.asarray(
+                    structure_trace_task_mean_pd, dtype=np.float64),
+                task_weak3_pd=np.asarray(
+                    structure_trace_task_weak3_pd, dtype=np.float64),
+                task_worst_pd=np.asarray(
+                    structure_trace_task_worst_pd, dtype=np.float64),
                 local_search_rebootstrap_attempted=np.asarray(
                     structure_trace_rebootstrap_attempted,
                     dtype=np.uint8),
@@ -6683,6 +7150,12 @@ class MAPPTrainer:
                 reports_per_receiver=np.asarray([
                     Q * self.cfg.detection.K_q_max
                 ], dtype=np.int16),
+                rf_total_power_cap_w=np.asarray([
+                    float(eval_env.core._isac_total_power_w)
+                ], dtype=np.float64),
+                sensing_power_cap_w=np.asarray([
+                    float(eval_env.core._sensing_power_cap_w)
+                ], dtype=np.float64),
             )
         n5_counterfactual_stats: Dict[str, float] = {}
         if n5_counterfactual_output:
@@ -6814,6 +7287,74 @@ class MAPPTrainer:
             'eval_episode_worst_nearest_distance_m': [
                 float(np.max(value))
                 for value in ep_nearest_target_distance],
+            'eval_inter_uav_min_distance_m': float(np.min(
+                eval_inter_uav_min_distance or [float('inf')])),
+            'eval_inter_uav_mean_frame_min_distance_m': float(np.mean(
+                eval_inter_uav_min_distance or [float('inf')])),
+            'eval_inter_uav_separation_violation_rate': float(np.mean(
+                eval_inter_uav_separation_violation or [0.0])),
+            'eval_episode_min_inter_uav_distance_m': [
+                float(value) for value in ep_min_inter_uav_distance],
+            'eval_inter_uav_continuous_min_distance_m': float(np.min(
+                eval_inter_uav_continuous_min_distance
+                or [float('inf')])),
+            'eval_inter_uav_continuous_mean_frame_min_distance_m': float(
+                np.mean(
+                    eval_inter_uav_continuous_min_distance
+                    or [float('inf')])),
+            'eval_inter_uav_continuous_separation_violation_rate': float(
+                np.mean(
+                    eval_inter_uav_continuous_separation_violation
+                    or [0.0])),
+            'eval_episode_min_inter_uav_continuous_distance_m': [
+                float(value)
+                for value in ep_min_inter_uav_continuous_distance],
+            'eval_movement_safety_intervention_frame_rate': float(np.mean(
+                eval_movement_safety_intervened or [0.0])),
+            'eval_movement_safety_intervention_call_rate': float(np.mean(
+                eval_movement_safety_intervention_call_rate or [0.0])),
+            'eval_movement_safety_fail_closed_frame_rate': float(np.mean(
+                eval_movement_safety_fail_closed or [0.0])),
+            'eval_movement_safety_fail_closed_calls': float(np.sum(
+                eval_movement_safety_fail_closed_calls or [0.0])),
+            'eval_movement_safety_fail_closed_outside_invariant_calls': float(
+                np.sum(
+                    eval_movement_safety_fail_closed_outside_invariant_calls
+                    or [0.0])),
+            'eval_movement_safety_outside_invariant_calls': float(np.sum(
+                eval_movement_safety_outside_invariant_calls or [0.0])),
+            'eval_movement_safety_recovery_pair_count': float(np.sum(
+                eval_movement_safety_recovery_pair_count or [0.0])),
+            'eval_movement_safety_mean_solve_time_s_per_frame': float(np.mean(
+                eval_movement_safety_solve_time_s or [0.0])),
+            'eval_movement_safety_mean_solve_time_s_per_node': float(np.mean(
+                eval_movement_safety_solve_time_s_per_node or [0.0])),
+            'eval_movement_safety_mean_projection_calls_per_frame': float(
+                np.mean(eval_movement_safety_projection_calls or [0.0])),
+            'eval_movement_public_view_stale_fail_closed_rate': float(
+                np.mean(
+                    eval_movement_public_view_stale_fail_closed_rate
+                    or [0.0])),
+            'eval_movement_public_view_mean_max_age_frames': float(np.mean(
+                eval_movement_public_view_mean_max_age or [0.0])),
+            'eval_movement_public_view_max_age_frames': float(max(
+                eval_movement_public_view_max_age or [0.0])),
+            'eval_movement_assignment_target_coverage': float(np.mean(
+                eval_movement_assignment_target_coverage or [0.0])),
+            'eval_movement_assignment_duplicate_rate': float(np.mean(
+                eval_movement_assignment_duplicate_rate or [0.0])),
+            'eval_movement_assignment_entry_agreement_rate': float(np.mean(
+                eval_movement_assignment_entry_agreement or [0.0])),
+            'eval_movement_anchor_target_coverage': float(np.mean(
+                eval_movement_anchor_target_coverage or [0.0])),
+            'eval_movement_gain_schedule_selected_self_rate': float(np.mean(
+                eval_movement_gain_schedule_selected_self_rate or [0.0])),
+            'eval_movement_gain_schedule_strategy_hold_rate': float(np.mean(
+                eval_movement_gain_schedule_strategy_hold_rate or [0.0])),
+            'eval_movement_gain_schedule_no_improvement_rate': float(np.mean(
+                eval_movement_gain_schedule_no_improvement_rate or [0.0])),
+            'eval_movement_gain_schedule_far_range_rate': float(np.mean(
+                eval_movement_gain_schedule_far_range_rate or [0.0])),
             **risk_stats,
             **responsibility_stats,
             **temporal_credit_stats,
@@ -6862,11 +7403,27 @@ class MAPPTrainer:
             'eval_comm_energy_j_per_frame': float(np.mean(eval_comm_energy)),
             'eval_comm_mean_latency_s': float(np.mean(
                 eval_comm_latency or [0.0])),
+            'eval_comm_p95_latency_s': float(np.mean(
+                eval_comm_p95_latency or [0.0])),
+            'eval_comm_mean_packet_error_probability': float(np.mean(
+                eval_comm_mean_bler or [0.0])),
+            'eval_comm_max_packet_error_probability': float(np.max(
+                eval_comm_max_bler or [0.0])),
+            'eval_comm_reliability_violation_rate': float(np.mean(
+                eval_comm_reliability_violation or [0.0])),
+            'eval_comm_burst_failure_rate': float(np.mean(
+                eval_comm_burst_failure or [0.0])),
+            'eval_comm_burst_bad_link_rate': float(np.mean(
+                eval_comm_burst_bad_link or [0.0])),
             'eval_comm_delivery_rate': float(np.mean(
                 eval_comm_delivery or [1.0])),
             'eval_comm_active_senders': float(np.mean(eval_comm_active)),
             'eval_comm_deadline_violation_rate': float(
                 np.mean(eval_comm_violation or [0.0])),
+            'eval_comm_snr_violation_rate': float(np.mean(
+                eval_comm_snr_violation or [0.0])),
+            'eval_comm_delivery_failure_rate': float(np.mean(
+                eval_comm_delivery_failure or [0.0])),
             'eval_structure_student_payload_bits_per_frame': float(np.mean(
                 eval_structure_payload_bits or [0.0])),
             'eval_structure_student_atomic_delivery_rate': float(np.mean(
@@ -6893,6 +7450,24 @@ class MAPPTrainer:
             'eval_p0_solve_time_s_per_resolve': float(
                 np.sum(eval_p0_solve_time)
                 / max(np.sum(eval_p0_resolved), 1.0)),
+            'eval_p0_topology_invalid_frame_rate': float(np.mean(
+                eval_p0_topology_invalid or [0.0])),
+            'eval_p0_topology_invalid_edges_per_frame': float(np.mean(
+                eval_p0_topology_invalid_edges or [0.0])),
+            'eval_p0_topology_repair_frame_rate': float(np.mean(
+                eval_p0_topology_repair or [0.0])),
+            'eval_p0_topology_replacements_per_repair': float(
+                np.sum(eval_p0_topology_replacements)
+                / max(np.sum(eval_p0_topology_repair), 1.0)),
+            'eval_p0_topology_repair_candidate_worst_pd': float(np.mean(
+                eval_p0_topology_repair_worst_pd or [0.0])),
+            'eval_p0_topology_full_fallback_rate': float(np.mean(
+                eval_p0_topology_full_fallback or [0.0])),
+            'eval_p0_per_target_selection_rate': (
+                np.mean(np.asarray(eval_p0_target_selected_mask),
+                        axis=0).tolist()
+                if eval_p0_target_selected_mask
+                else np.zeros(Q).tolist()),
             'eval_local_search_candidate_evaluations_per_resolve': float(
                 np.mean(eval_local_search_candidates or [0.0])),
             'eval_local_search_exact_verifications_per_resolve': float(
@@ -6922,6 +7497,14 @@ class MAPPTrainer:
                     eval_local_search_rebootstrap_blocked_no_deficit or [0.0])),
             'eval_evidence_comm_bits_per_frame': float(np.mean(
                 eval_evidence_comm_bits or [0.0])),
+            'eval_protocol_total_latency_mean_s': float(np.mean(
+                eval_protocol_total_latency or [0.0])),
+            'eval_protocol_total_p95_latency_s': float(np.mean(
+                eval_protocol_total_p95_latency or [0.0])),
+            'eval_protocol_serialized_bits_per_frame': float(np.mean(
+                eval_protocol_serialized_bits or [0.0])),
+            'eval_protocol_total_deadline_violation_rate': float(np.mean(
+                eval_protocol_total_deadline_violation or [0.0])),
             'eval_evidence_comm_energy_j_per_frame': float(np.mean(
                 eval_evidence_comm_energy or [0.0])),
             'eval_evidence_comm_mean_latency_s': float(np.mean(
@@ -6932,6 +7515,16 @@ class MAPPTrainer:
                 eval_evidence_comm_active or [0.0])),
             'eval_evidence_comm_deadline_violation_rate': float(np.mean(
                 eval_evidence_comm_violation or [0.0])),
+            'eval_evidence_comm_delivery_failure_rate': float(np.mean(
+                eval_evidence_comm_failure or [0.0])),
+            'eval_evidence_comm_snr_violation_rate': float(np.mean(
+                eval_evidence_comm_snr_failure or [0.0])),
+            'eval_evidence_comm_reliability_violation_rate': float(np.mean(
+                eval_evidence_comm_reliability_failure or [0.0])),
+            'eval_evidence_comm_burst_failure_rate': float(np.mean(
+                eval_evidence_comm_burst_failure or [0.0])),
+            'eval_evidence_comm_burst_bad_link_rate': float(np.mean(
+                eval_evidence_comm_burst_bad or [0.0])),
             'eval_evidence_utilization_frame_mean': float(np.mean(
                 eval_evidence_utilization or [0.0])),
             'eval_evidence_utilization': float(
@@ -6946,6 +7539,43 @@ class MAPPTrainer:
                 + np.mean(eval_evidence_comm_bits or [0.0])),
             'eval_evidence_detection_pfa': float(np.mean(
                 eval_evidence_pfa or [self.cfg.detection.P_FA])),
+            'eval_belief_feedback_fused_entries_per_frame': float(np.mean(
+                eval_belief_feedback_entries or [0.0])),
+            'eval_belief_feedback_receivers_per_frame': float(np.mean(
+                eval_belief_feedback_receivers or [0.0])),
+            'eval_belief_feedback_disagreement_before_m': float(np.mean(
+                eval_belief_feedback_before or [0.0])),
+            'eval_belief_feedback_disagreement_after_m': float(np.mean(
+                eval_belief_feedback_after or [0.0])),
+            'eval_belief_feedback_contraction_ratio': float(np.mean(
+                eval_belief_feedback_contraction or [1.0])),
+            'eval_belief_feedback_contraction_frame_rate': float(np.mean(
+                np.asarray(eval_belief_feedback_contraction or [1.0])
+                < 1.0)),
+            'eval_belief_feedback_truth_rmse_before_m': float(np.mean(
+                eval_belief_feedback_truth_rmse_before or [0.0])),
+            'eval_belief_feedback_truth_rmse_after_m': float(np.mean(
+                eval_belief_feedback_truth_rmse_after or [0.0])),
+            'eval_belief_position_rmse_m': float(np.mean(
+                eval_belief_position_rmse or [0.0])),
+            'eval_belief_position_p95_m': float(np.mean(
+                eval_belief_position_p95 or [0.0])),
+            'eval_belief_position_rmse_per_target_m': (
+                np.mean(np.asarray(eval_belief_position_rmse_per_target),
+                        axis=0).tolist()
+                if eval_belief_position_rmse_per_target
+                else np.zeros(Q).tolist()),
+            'eval_belief_target_aoi_mean_frames': float(np.mean(
+                eval_belief_target_aoi_mean or [0.0])),
+            'eval_belief_target_aoi_p95_frames': float(np.mean(
+                eval_belief_target_aoi_p95 or [0.0])),
+            'eval_belief_target_aoi_per_target_frames': (
+                np.mean(np.asarray(eval_belief_target_aoi_per_target),
+                        axis=0).tolist()
+                if eval_belief_target_aoi_per_target
+                else np.zeros(Q).tolist()),
+            'eval_belief_position_disagreement_end_m': float(np.mean(
+                eval_belief_disagreement_end or [0.0])),
             'eval_comm_rate_distribution': rate_dist.tolist(),
             'eval_comm_mean_bits_per_dim': float(np.dot(
                 rate_dist, np.asarray(rate_levels, dtype=np.float64))),
@@ -6959,9 +7589,24 @@ class MAPPTrainer:
                 eval_isac_sensing_power or [0.0])),
             'eval_isac_max_power_balance_error_w': float(np.max(
                 eval_isac_balance_error or [0.0])),
+            'eval_isac_max_power_budget_violation_w': float(np.max(
+                eval_isac_budget_violation or [0.0])),
+            'eval_isac_unused_power_w_per_frame': float(np.mean(
+                eval_isac_unused_power or [0.0])),
             'eval_isac_per_target_power_w': (
                 np.mean(np.asarray(eval_isac_target_power), axis=0).tolist()
                 if eval_isac_target_power else np.zeros(Q).tolist()),
+            'eval_distributed_replicated_common_view_rate': float(np.mean(
+                eval_replicated_common_view or [0.0])),
+            'eval_distributed_replicated_full_view_fraction': float(np.mean(
+                eval_replicated_full_view or [0.0])),
+            'eval_distributed_replicated_local_coverage': float(np.mean(
+                eval_replicated_local_coverage or [0.0])),
+            'eval_distributed_replicated_solve_time_s_per_frame': float(
+                np.mean(eval_replicated_solve_time or [0.0])),
+            'eval_distributed_replicated_per_node_solve_time_s_per_frame': (
+                float(np.mean(
+                    eval_replicated_per_node_solve_time or [0.0]))),
             'eval_hyperedge_visible_peers_per_uav': float(np.mean(
                 eval_hyperedge_visible_peers or [0.0])),
             'eval_hyperedge_mutual_edges_per_frame': float(np.mean(
@@ -7025,7 +7670,7 @@ class MAPPTrainer:
         return out
 
     def train(self, num_episodes: Optional[int] = None, log_interval: int = 10,
-              eval_interval: int = 100) -> List[Dict]:
+              eval_interval: Optional[int] = None) -> List[Dict]:
         """Main training loop.
 
         Args:
@@ -7119,7 +7764,11 @@ class MAPPTrainer:
                 )
 
             # ── Convergence-based eval + early stopping ──
-            if self.early_stop and (ep % self.eval_interval == 0 or ep == n_episodes - 1):
+            # Audit 2026-08-17: use the eval_interval parameter (previously the
+            # signature argument was silently ignored in favour of the config
+            # attribute self.eval_interval).
+            cadence = eval_interval if eval_interval is not None else self.eval_interval
+            if self.early_stop and (ep % max(cadence, 1) == 0 or ep == n_episodes - 1):
                 ev = self._evaluate(self.eval_episodes)
                 score = ev['eval_steady_P_D']
                 metrics.update(ev)

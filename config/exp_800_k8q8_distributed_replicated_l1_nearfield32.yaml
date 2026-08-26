@@ -1,0 +1,5 @@
+extends: exp_800_k8q8_distributed_state_beacon8_replicated_l1.yaml
+
+marl:
+  hyperedge_nearfield_residual_enabled: true
+  hyperedge_nearfield_residual_range_m: 32.0

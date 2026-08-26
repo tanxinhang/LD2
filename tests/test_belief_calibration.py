@@ -2,7 +2,40 @@
 
 import numpy as np
 import pytest
-from uav_isac.environment.belief import BeliefManager
+from uav_isac.environment.belief import (
+    BeliefManager,
+    generalized_covariance_intersection,
+)
+
+
+def test_generalized_ci_does_not_double_count_repeated_posterior():
+    mean = np.asarray([10.0, -2.0, 1.0, 0.5])
+    covariance = np.diag([9.0, 16.0, 4.0, 1.0])
+    fused_mean, fused_covariance = generalized_covariance_intersection(
+        np.stack([mean, mean, mean]),
+        np.stack([covariance, covariance, covariance]),
+    )
+    np.testing.assert_allclose(fused_mean, mean, atol=1.0e-12)
+    np.testing.assert_allclose(fused_covariance, covariance, atol=1.0e-12)
+
+
+def test_generalized_ci_is_permutation_invariant_with_equal_weights():
+    means = np.asarray([
+        [0.0, 2.0],
+        [4.0, 0.0],
+        [2.0, 5.0],
+    ])
+    covariances = np.asarray([
+        [[2.0, 0.3], [0.3, 5.0]],
+        [[4.0, -0.2], [-0.2, 3.0]],
+        [[3.0, 0.1], [0.1, 2.0]],
+    ])
+    fused = generalized_covariance_intersection(means, covariances)
+    permuted = generalized_covariance_intersection(
+        means[[2, 0, 1]], covariances[[2, 0, 1]])
+    np.testing.assert_allclose(fused[0], permuted[0], atol=1.0e-12)
+    np.testing.assert_allclose(fused[1], permuted[1], atol=1.0e-12)
+    assert np.min(np.linalg.eigvalsh(fused[1])) > 0.0
 
 
 class TestNISComputation:

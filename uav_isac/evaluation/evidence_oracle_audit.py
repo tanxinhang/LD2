@@ -9,6 +9,7 @@ import numpy as np
 from uav_isac.physical.evidence import (
     local_quality_topk_mask,
     receiver_deflection_from_selected,
+    scheduled_fusion_owner,
 )
 from uav_isac.utils.math_utils import compute_PD
 
@@ -17,14 +18,14 @@ def lossless_quality_topk_pd(
     receiver_deflection: np.ndarray,
     p_fa: float,
     topk: int,
+    fusion_owner: np.ndarray,
 ) -> Dict[str, np.ndarray]:
     """Lossless evidence-routing capacity for a local quality Top-k rule.
 
     Each receiver ranks only its own positive per-target deflections before
-    observing a stochastic LLR.  A target's fusion owner is likewise selected
-    from predicted local deflection, not from realized evidence.  The owner
-    always retains its own statistic and receives every selected peer
-    statistic without quantization, delay, or loss.
+    observing a stochastic LLR. The target owner is supplied by the scheduled
+    hyperedge directory and receives every selected peer statistic without
+    quantization, delay, or loss.
 
     This is intentionally an upper-bound screen for the target-selection rule,
     not a deployable communication result.
@@ -41,11 +42,18 @@ def lossless_quality_topk_pd(
 
     selected = local_quality_topk_mask(receiver_d, topk)
 
-    owner = np.argmax(receiver_d, axis=0).astype(np.int64)
-    fused_d = receiver_d[owner, np.arange(Q)].copy()
+    owner = np.asarray(fusion_owner, dtype=np.int64).reshape(-1)
+    if owner.shape != (Q,):
+        raise ValueError("fusion_owner must have shape (Q,)")
+    if np.any((owner < -1) | (owner >= K)):
+        raise ValueError("fusion_owner contains an invalid receiver index")
+    owned = owner >= 0
+    fused_d = np.zeros(Q, dtype=np.float64)
+    fused_d[owned] = receiver_d[
+        owner[owned], np.arange(Q)[owned]]
     for source in range(K):
         add = selected[source].copy()
-        add &= owner != source
+        add &= owned & (owner != source)
         fused_d[add] += receiver_d[source, add]
     return {
         "pd": compute_PD(fused_d, p_fa),
@@ -80,8 +88,12 @@ def receiver_local_and_global_pd(
         for k in range(num_agents)
     ])
     global_d = np.sum(receiver_d, axis=0)
-    top1 = lossless_quality_topk_pd(receiver_d, p_fa, topk=1)
-    top2 = lossless_quality_topk_pd(receiver_d, p_fa, topk=2)
+    owner = scheduled_fusion_owner(
+        selected_set, num_agents, num_targets)
+    top1 = lossless_quality_topk_pd(
+        receiver_d, p_fa, topk=1, fusion_owner=owner)
+    top2 = lossless_quality_topk_pd(
+        receiver_d, p_fa, topk=2, fusion_owner=owner)
     return {
         "receiver_deflection": receiver_d,
         "receiver_pd": receiver_pd,
@@ -91,7 +103,7 @@ def receiver_local_and_global_pd(
         "lossless_quality_top2_pd": top2["pd"],
         "lossless_quality_top1_mask": top1["selected_mask"],
         "lossless_quality_top2_mask": top2["selected_mask"],
-        "pre_evidence_owner": top1["owner"],
+        "scheduled_evidence_owner": top1["owner"],
     }
 
 
@@ -208,21 +220,37 @@ def summarize_lossless_topk_capacity(
             "eval_evidence_topk_capacity_gate_pass": False,
         }
 
-    global_metrics = np.asarray([
-        _episode_metrics(history, steady_window)
-        for history in global_histories
-    ])
-    local_metrics = np.asarray([
-        _episode_metrics(history, steady_window)
-        for history in local_best_histories
-    ])
+    # Audit 2026-08-25: mirror the empty-history guard of
+    # summarize_evidence_oracle() -- an empty per-episode history previously
+    # flowed into _episode_metrics() and produced NaN/IndexError instead of
+    # a clean fail-closed result.
+    kept_episodes = 0
+    global_metrics = []
+    local_metrics = []
+    for global_history, local_history in zip(
+            global_histories, local_best_histories):
+        if len(global_history) == 0 or len(local_history) == 0:
+            continue
+        kept_episodes += 1
+        global_metrics.append(
+            _episode_metrics(global_history, steady_window))
+        local_metrics.append(
+            _episode_metrics(local_history, steady_window))
     topk_metrics = {
         int(topk): np.asarray([
             _episode_metrics(history, steady_window)
-            for history in histories
+            for history, local in zip(histories, local_best_histories)
+            if len(history) > 0 and len(local) > 0
         ])
         for topk, histories in topk_histories.items()
     }
+    if kept_episodes == 0:
+        return {
+            "eval_evidence_topk_capacity_episode_count": 0,
+            "eval_evidence_topk_capacity_gate_pass": False,
+        }
+    global_metrics = np.asarray(global_metrics)
+    local_metrics = np.asarray(local_metrics)
     metric_names = ("steady", "weak3", "worst")
     rng = np.random.default_rng(int(bootstrap_seed))
     draws = max(1, int(bootstrap_samples))

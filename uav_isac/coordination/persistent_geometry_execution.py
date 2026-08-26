@@ -1,4 +1,4 @@
-﻿"""Persistent execution state for certified slow-geometry joint-plan tubes."""
+"""Persistent execution state for certified slow-geometry joint-plan tubes."""
 
 # ----------------------------------------------------------------------
 # AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)

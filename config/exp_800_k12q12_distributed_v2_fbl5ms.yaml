@@ -1,0 +1,11 @@
+# V2 non-ideal transport gate A: finite-blocklength coding at the nominal
+# 5 ms deadline.  No shadowing/burst process is enabled, so the paired delta
+# isolates channel-dispersion and BLER feasibility.
+extends: exp_800_k12q12_distributed_tail40_safe_v2_selfstabilizing.yaml
+
+marl:
+  comm_finite_blocklength_enabled: true
+  comm_finite_blocklength_target_bler: 0.001
+  comm_finite_blocklength_sample_errors: true
+  analytical_comm_optimal_bw: false
+

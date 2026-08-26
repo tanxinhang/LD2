@@ -19,6 +19,58 @@ from typing import Dict, List, Optional, Tuple
 from uav_isac.utils.types import BeliefState
 
 
+def generalized_covariance_intersection(
+    means: np.ndarray,
+    covariances: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fuse correlated Gaussian estimates without independence claims.
+
+    For convex weights ``omega_s``, generalized covariance intersection uses
+
+    ``Y = sum_s omega_s P_s^{-1}``,
+    ``y = sum_s omega_s P_s^{-1} m_s``.
+
+    It therefore never sums information as if repeated U2U posteriors were
+    independent.  Equal weights are permutation invariant and reduce to a
+    linear consensus step in information coordinates.
+    """
+    values = np.asarray(means, dtype=np.float64)
+    covs = np.asarray(covariances, dtype=np.float64)
+    if values.ndim != 2 or covs.shape != (
+            values.shape[0], values.shape[1], values.shape[1]):
+        raise ValueError('means/covariances have inconsistent shapes')
+    count, dim = values.shape
+    if count < 1 or dim < 1:
+        raise ValueError('at least one non-empty estimate is required')
+    if not (np.all(np.isfinite(values)) and np.all(np.isfinite(covs))):
+        raise ValueError('belief estimates must be finite')
+    if weights is None:
+        omega = np.full(count, 1.0 / count, dtype=np.float64)
+    else:
+        omega = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if omega.shape != (count,) or np.any(~np.isfinite(omega)):
+            raise ValueError('weights must match the estimate count')
+        if np.any(omega < 0.0) or float(np.sum(omega)) <= 0.0:
+            raise ValueError('weights must be non-negative with positive sum')
+        omega = omega / float(np.sum(omega))
+    information = np.zeros((dim, dim), dtype=np.float64)
+    information_mean = np.zeros(dim, dtype=np.float64)
+    for index in range(count):
+        symmetric = 0.5 * (covs[index] + covs[index].T)
+        eigenvalues = np.linalg.eigvalsh(symmetric)
+        if float(np.min(eigenvalues)) <= 0.0:
+            raise ValueError('covariances must be positive definite')
+        precision = np.linalg.inv(symmetric)
+        information += omega[index] * precision
+        information_mean += omega[index] * precision @ values[index]
+    fused_covariance = np.linalg.inv(information)
+    fused_covariance = 0.5 * (
+        fused_covariance + fused_covariance.T)
+    fused_mean = fused_covariance @ information_mean
+    return fused_mean, fused_covariance
+
+
 def _cv_transition_matrix(dt: float) -> np.ndarray:
     """Constant-velocity state transition: [x, y, vx, vy]."""
     return np.array([

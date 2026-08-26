@@ -1,0 +1,6 @@
+# Store-and-forward one cached physical state per beacon. At 8 bits this sends
+# 15 state scalars (own 7 + source ID + relayed 7), still no LP certificate.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25_snr41.yaml
+
+marl:
+  hyperedge_state_relay_enabled: true

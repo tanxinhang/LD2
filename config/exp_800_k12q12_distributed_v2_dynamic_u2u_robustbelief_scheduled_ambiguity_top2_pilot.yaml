@@ -1,0 +1,13 @@
+# Event-triggered short-summary layer for the scheduled fusion directory.
+# A receiver appends its second-ranked local statistic only when its
+# deflection is at least half of the first-ranked statistic.  This is a
+# receiver-local, scale-invariant trigger; no global owner argmax or target
+# quality vector is broadcast.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  evidence_packet_topk: 1
+  evidence_packet_ambiguity_top2_enabled: true
+  evidence_packet_ambiguity_ratio: 0.5
+  evidence_packet_ambiguity_min_deflection: 0.0
+  evidence_packet_calibration_profile: k12-scheduled-owner-ambiguity-top2-pending-recalibration

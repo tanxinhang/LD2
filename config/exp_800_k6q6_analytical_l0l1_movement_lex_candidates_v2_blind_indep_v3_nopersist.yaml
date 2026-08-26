@@ -1,0 +1,12 @@
+# V3-T4 rev3b (advice 015, 2026-08-17): causal isolation of commit persistence.
+#
+# rev2 introduced cache persistence (committed structure executes until the
+# next P0 re-solve) and the 9-seed A/B showed 866 regress -0.267 (QoS
+# PASS->FAIL), vs rev1's single-frame commit at -0.035.  This config keeps
+# EVERYTHING from rev3 (deficit routing, proximal guard, forward-looking
+# gate, hold window) but sets v3_persist_commit=false: the committed structure
+# affects only the commit frame and the next frame reverts to the P0 cache.
+#
+# Diagnostic arm to separate "persistence amplifies trajectory divergence"
+# from "the commit itself is harmful".  OFF arm = parent config.
+extends: exp_800_k6q6_analytical_l0l1_movement_lex_candidates_v2_blind_indep.yaml

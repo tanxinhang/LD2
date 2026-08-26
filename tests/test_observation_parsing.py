@@ -203,6 +203,50 @@ def test_structured_actor_corrected_parser():
         assert cm.shape == (2, 16)
 
 
+def test_corrected_parser_forced_by_default():
+    """Audit 2026-08-17: the legacy interleaved parser is misaligned with the
+    block-wise ObservationBuilder layout (present since the initial commit); it
+    must never be selected even without cross-attention flags."""
+    import torch
+    from uav_isac.agents.networks import StructuredActorNetwork
+    from uav_isac.environment.observation_slices import ObservationSlices
+
+    sl = ObservationSlices.from_config(K=4, Q=4)
+    actor = StructuredActorNetwork(
+        obs_dim=sl.total_dim, K=4, Q=4, entity_dim=64)  # no cross-attn flags
+    assert actor._use_corrected_parser is True
+    assert actor._obs_slices is not None
+    obs = torch.zeros(1, sl.total_dim)
+    with torch.no_grad():
+        dp, _, _, _, _, _ = actor(obs)
+    assert dp.shape == (1, 2)
+
+
+def test_legacy_parser_would_misalign_target_geometry():
+    """Prove the legacy interleaved parser misreads the block-wise layout: a
+    marker in target 0's geometry block must land in target 0's parsed geometry,
+    not in the next target's belief (where the legacy read would find it)."""
+    import torch
+    from uav_isac.agents.networks import StructuredActorNetwork
+    from uav_isac.environment.observation_slices import ObservationSlices
+
+    K, Q = 4, 4
+    sl = ObservationSlices.from_config(K=K, Q=Q, use_rel_features=True)
+    obs = torch.zeros(1, sl.total_dim)
+    marker = 7.0
+    obs[0, sl.geom_start + 0] = marker
+    actor = StructuredActorNetwork(
+        obs_dim=sl.total_dim, K=K, Q=Q, entity_dim=64)
+    parsed = actor._parse_one_corrected(obs, 1)
+    targets = parsed[1]  # (B, Q, 17): belief(9) + geometry(8)
+    assert torch.isclose(
+        targets[0, 0, 9], torch.tensor(marker, dtype=targets.dtype)), (
+        "corrected parser must read target 0's geometry from the geometry block")
+    # the legacy interleaved read would take target 0's first geometry field
+    # from obs[8 + 9] = obs[17] (target 1's belief mean), which is 0 here
+    assert obs[0, 17].item() == 0.0
+
+
 def test_observation_slices_total_dim_matches_env():
     """Slices total dim must match actual env observation dim."""
     from config.params import load_config
@@ -223,3 +267,18 @@ def test_observation_slices_total_dim_matches_env():
         assert slices.total_dim == actual_dim, \
             f"{config_path}: slices.total_dim={slices.total_dim}, env obs_dim={actual_dim}"
         env.close()
+from uav_isac.environment.observation import compress_target_summary
+
+
+def test_large_target_local_summary_compresses_without_free_dimensions():
+    values = np.arange(10, dtype=np.float64)
+    mask = np.zeros(10, dtype=np.float64)
+    mask[[1, 8]] = 1.0
+
+    claims = compress_target_summary(values, slots=8, reduction='mean')
+    active = compress_target_summary(mask, slots=8, reduction='max')
+
+    assert claims.shape == (8,)
+    assert active.shape == (8,)
+    assert np.sum(active) == 2.0
+    np.testing.assert_allclose(claims[:2], [0.5, 2.5])

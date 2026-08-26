@@ -1,0 +1,9 @@
+# Experimental two-time-scale topology bridge.  It replaces only invalid
+# cached edges, preserves roles/owners/capacities, and exact-LP certifies the
+# current RF budget.  It is deliberately not the final dev controller: dev10
+# QoS was 8/10 before repair-aware fine-tuning; ft20 recovered 9/10 but moved
+# the failure to seed 274 and remained below the hard-trigger mean.
+extends: exp_800_k6q6_budget_coupled_p0_satisficing_event.yaml
+
+marl:
+  p0_topology_min_change_repair_enabled: true

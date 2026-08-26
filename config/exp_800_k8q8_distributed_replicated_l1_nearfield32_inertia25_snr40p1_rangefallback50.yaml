@@ -1,0 +1,7 @@
+# Partial-view fallback derived from the bistatic range upper bound: preserve
+# 50% uniform exploration and allocate 50% proportional to local R_iq^2.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25_snr40p1.yaml
+
+marl:
+  distributed_replicated_power_unknown_target_reserve: 0.50
+  distributed_replicated_power_local_range_fallback_enabled: true

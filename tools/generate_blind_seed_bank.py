@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""D1.5 blind seed bank generation (advice 013).
+"""Blind seed bank generation (D1.5 for 8/8; P1-3 for 6/6, advice 013/014).
 
-The deployment candidate (L0-KKT + Lex-L1 + P0-L2 + multi-candidate L3) was
-tuned on the 20-seed selection split, which has been reused for margin
-selection and multiple validation rounds -- it can no longer serve as a
-blind test bank.  This tool builds a BLIND bank for the 8/8 (1130 x 1130)
-environment from the bank's own seed_metadata (the originally sampled
-geometries), excluding:
+The deployment candidate was tuned on the 20-seed selection split, which has
+been reused for margin selection and multiple validation rounds -- it can no
+longer serve as a blind test bank.  This tool builds a BLIND bank for the
+chosen scenario bank (default 8/8 ``1130_k8q8``; ``--bank 980_k6q6`` for 6/6)
+from the bank's own seed_metadata (the originally sampled geometries),
+excluding:
   - the quarantined seeds {795, 747, 105, 860, 2};
   - every seed that has EVER appeared in any results/ paired_eval.csv
     episode seed list (any split, any run -- these have been "seen");
@@ -17,7 +17,8 @@ The surviving seeds were never evaluated by any run in this repo, so they
 form a valid blind test bank for the frozen candidate.
 
 Usage: python tools/generate_blind_seed_bank.py [--size 100] [--bank 1130_k8q8]
-Output: config/stratified_seeds_1130_k8q8_blind.json
+       python tools/generate_blind_seed_bank.py --bank 980_k6q6 --draw-seed 20260828
+Output: config/stratified_seeds_{bank}_blind.json
 """
 
 from __future__ import annotations
@@ -72,9 +73,22 @@ def collect_bank_seeds() -> set[int]:
 
 def main() -> int:
     size = 100
-    if len(sys.argv) > 2 and sys.argv[1] == "--size":
-        size = int(sys.argv[2])
-    bank_path = os.path.join(ROOT, "config", "stratified_seeds_1130_k8q8.json")
+    bank_name = "1130_k8q8"
+    draw_seed = 20260827
+    argv = list(sys.argv[1:])
+    while argv:
+        arg = argv.pop(0)
+        if arg == "--size":
+            size = int(argv.pop(0))
+        elif arg == "--bank":
+            bank_name = argv.pop(0)
+        elif arg == "--draw-seed":
+            draw_seed = int(argv.pop(0))
+        else:
+            print(f"unknown arg: {arg}", file=sys.stderr)
+            return 2
+    bank_path = os.path.join(
+        ROOT, "config", f"stratified_seeds_{bank_name}.json")
     with open(bank_path, encoding="utf-8") as handle:
         bank = json.load(handle)
     metadata = {int(k): v for k, v in bank["seed_metadata"].items()}
@@ -98,7 +112,7 @@ def main() -> int:
         tier = "easy" if score <= q25 else "hard" if score >= q75 else "medium"
         tiers[tier].append(seed)
     counts = {"easy": size // 4, "medium": size // 2, "hard": size // 4}
-    rng = np.random.default_rng(20260827)  # frozen draw seed
+    rng = np.random.default_rng(draw_seed)  # frozen draw seed
     chosen: list[int] = []
     for tier in ("easy", "medium", "hard"):
         pool = list(rng.permutation(tiers[tier]))
@@ -113,8 +127,8 @@ def main() -> int:
         "schema_version": 1,
         "scenario_fingerprint": bank["scenario_fingerprint"],
         "source_config": bank["source_config"],
-        "purpose": "D1.5 blind certification bank (advice 013)",
-        "blind_draw_seed": 20260827,
+        "purpose": f"{bank_name} blind certification bank (advice 013/014)",
+        "blind_draw_seed": draw_seed,
         "excluded": {
             "quarantined": sorted(QUARANTINED),
             "exposed_in_results": len(exposed),
@@ -132,7 +146,7 @@ def main() -> int:
         },
     }
     out_path = os.path.join(ROOT, "config",
-                            "stratified_seeds_1130_k8q8_blind.json")
+                            f"stratified_seeds_{bank_name}_blind.json")
     with open(out_path, "w", encoding="utf-8") as handle:
         json.dump(out, handle, indent=2, sort_keys=True)
         handle.write("\n")

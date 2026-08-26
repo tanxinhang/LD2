@@ -1,0 +1,4 @@
+extends: exp_800_k6q6_distributed_state_beacon8.yaml
+
+marl:
+  distributed_bottleneck_matching_movement_enabled: true

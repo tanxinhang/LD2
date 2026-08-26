@@ -250,15 +250,25 @@ def compute_comm_sinr_db(
     path_loss_linear = (lam / (4.0 * np.pi * d_sig)) ** 2
     snr_linear = (P_report * G_linear * path_loss_linear) / max(noise_power, 1e-15)
 
-    # Interference from all OTHER transmitting UAVs
+    # Interference from all OTHER transmitting UAVs (role == 0).
+    # Audit 2026-08-17: skip the transmitter by resolving its index once from
+    # the roles/positions instead of comparing positions inside the loop
+    # (position identity is fragile under collisions/overlap -- a colliding UAV
+    # could be dropped, or a modified tx_pos copy would count the transmitter
+    # itself as an interferer).
+    matches = [j for j in range(all_uav_positions.shape[0])
+               if all_uav_roles[j] == 0
+               and np.array_equal(all_uav_positions[j], tx_pos)]
+    tx_index = matches[0] if len(matches) == 1 else None
     interf_linear = 0.0
     for j in range(all_uav_positions.shape[0]):
-        pos_j = all_uav_positions[j]
-        # Check if j is transmitting and not the same as tx
-        if np.array_equal(pos_j, tx_pos):
-            continue
         if all_uav_roles[j] != 0:  # not transmitting
             continue
+        if (tx_index is not None and j == tx_index) or (
+                tx_index is None and np.array_equal(
+                    all_uav_positions[j], tx_pos)):
+            continue  # the transmitter itself
+        pos_j = all_uav_positions[j]
         d_int = max(float(np.linalg.norm(rx_pos[:2] - pos_j[:2])), eps)
         # Use horizontal distance for interference path loss
         pl_int = (lam / (4.0 * np.pi * d_int)) ** 2

@@ -44,7 +44,9 @@ def train_one(cfg, seed, centralized: bool) -> float:
     env = UAVISACEnv(config=cfg, seed=seed)
     K = cfg.scenario.K
     aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt,
-                         learn_roles=cfg.marl.learn_roles)
+                         learn_roles=cfg.marl.learn_roles,
+                         dp_parameterization=str(getattr(
+                             cfg.marl, 'dp_parameterization', 'radial_clip')))
     obs_dim = env.core.obs_builder.get_obs_dim()
     global_dim = env.core.obs_builder.get_global_state_dim()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -81,7 +83,9 @@ def train_one(cfg, seed, centralized: bool) -> float:
 def eval_baseline(cfg, seed, policy: str) -> float:
     """Return steady_P_D of a non-learning baseline on the given seed."""
     aspace = ActionSpace(v_max=cfg.uav.v_max, dt=cfg.scenario.dt,
-                         learn_roles=cfg.marl.learn_roles)
+                         learn_roles=cfg.marl.learn_roles,
+                         dp_parameterization=str(getattr(
+                             cfg.marl, 'dp_parameterization', 'radial_clip')))
     aspace.rng = np.random.default_rng(seed)
     env = UAVISACEnv(config=cfg, seed=seed)
     if policy == "Random":

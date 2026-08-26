@@ -1,0 +1,22 @@
+# Dynamic-target engineering control.  This retains the robust 4 ms
+# shadowed-FBL transport and ACK-free AoI cache, but final detection consumes
+# receiver-local evidence only.  It is not a reliability-certification config.
+extends: exp_800_k12q12_distributed_v2_fbl_shadow4ms_robust_cache3.yaml
+
+target:
+  speed_range: [2.0, 5.0]
+
+marl:
+  tracking_enabled: true
+  belief_detection_sampling: true
+  detection_fusion_mode: local_only
+  passive_multireceiver_evidence_enabled: true
+  passive_multireceiver_belief_update_enabled: true
+  ground_communication_enabled: false
+  neighbor_belief_fusion: false
+  p0_uses_belief: false
+  distributed_coordination_use_local_belief_targets: true
+  use_centered_marginal: false
+  use_difference_reward: false
+  team_weight: 1.0
+  diff_weight: 0.0

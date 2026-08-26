@@ -1,0 +1,10 @@
+# Constant-density K=Q=4 endpoint of the replicated-L1 scale audit.
+extends: exp_800_k6q6_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+scenario:
+  region_size: [800, 800]
+  K: 4
+  Q: 4
+
+target:
+  omega_q: [0.25, 0.25, 0.25, 0.25]

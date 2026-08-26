@@ -90,9 +90,27 @@ def analyze(csv_path: str, bank_path: Optional[str] = None) -> Dict[str, object]
 
     if realized is not None and len(realized) == n:
         report["realized_distance"] = _bucket_table(realized, qos, worst)
-        report["corr_realized_worst_pd"] = float(
-            np.corrcoef(realized, worst)[0, 1])
+        report["corr_realized_worst_pd"] = _pearson_correlation(realized, worst)
     return report
+
+
+def _pearson_correlation(x: np.ndarray, y: np.ndarray):
+    """Pearson r with pairwise finite filtering and an explicit domain guard."""
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    if x.size != y.size:
+        raise ValueError("correlation inputs must have equal length")
+    finite = np.isfinite(x) & np.isfinite(y)
+    if np.count_nonzero(finite) < 2:
+        return None
+    x_centered = x[finite] - np.mean(x[finite])
+    y_centered = y[finite] - np.mean(y[finite])
+    x_energy = float(np.sum(x_centered * x_centered))
+    y_energy = float(np.sum(y_centered * y_centered))
+    if x_energy == 0.0 or y_energy == 0.0:
+        return None
+    covariance = float(np.sum(x_centered * y_centered))
+    return covariance / np.sqrt(x_energy * y_energy)
 
 
 def _failure_mode(

@@ -9,6 +9,18 @@ import numpy as np
 from typing import Dict, Optional
 from uav_isac.utils.types import Action
 
+# Movement-action parameterizations (B5 / advice 014, 2026-08-17).
+#   radial_clip: Gaussian -> tanh box -> scale -> radial projection onto the disk.
+#       The projection is a many-to-one map (~21% of the box lies outside the
+#       inscribed circle and triggers it), so log pi(executed action) is not the
+#       true density of the executed action -> PPO importance ratio is inexact.
+#       Kept as the default for backward compatibility with existing checkpoints.
+#   smooth_disk: bijection R^2 -> open disk  dp = d_max * z / sqrt(1+|z|^2).
+#       |det d(dp)/dz| = d_max^2/(1+|z|^2)^2, so the exact log-prob correction is
+#       +2*log(1+|z|^2) - 2*log(d_max); the PPO ratio becomes mathematically exact.
+DP_PARAM_RADIAL_CLIP = "radial_clip"
+DP_PARAM_SMOOTH_DISK = "smooth_disk"
+
 
 class ActionSpace:
     """Action space for a single UAV agent."""
@@ -19,20 +31,32 @@ class ActionSpace:
         dt: float = 0.1,
         num_roles: int = 3,
         rng: Optional[np.random.Generator] = None,
+        seed: Optional[int] = None,
         learn_roles: bool = True,
+        dp_parameterization: str = DP_PARAM_RADIAL_CLIP,
     ):
         """
         Args:
             v_max: Maximum flight speed (m/s)
             dt: Frame duration (s)
             num_roles: Number of role choices (3: tx, rx, idle)
-            rng: Random generator
+            rng: Random generator. Mutually exclusive with ``seed``.
+            seed: Seed used to construct a local generator when ``rng`` is
+                not supplied. Passing neither intentionally requests an
+                entropy-seeded generator.
             learn_roles: If False, the policy does NOT choose roles — the role is a
                 placeholder (idle) reassigned by the env's P0 solver, and the role
                 term is dropped from log-prob/entropy so the role head leaves the
                 objective entirely. Must match env's role mode for a consistent
                 old_log_prob == new_log_prob ratio.
+            dp_parameterization: "radial_clip" (legacy, default) or "smooth_disk"
+                (B5 fix, advice 014). See module docstring.
         """
+        if dp_parameterization not in (DP_PARAM_RADIAL_CLIP, DP_PARAM_SMOOTH_DISK):
+            raise ValueError(
+                f"dp_parameterization must be {DP_PARAM_RADIAL_CLIP!r} or "
+                f"{DP_PARAM_SMOOTH_DISK!r}, got {dp_parameterization!r}")
+        self.dp_parameterization = dp_parameterization
         self.learn_roles = learn_roles
         self.v_max = v_max
         self.dt = dt
@@ -44,12 +68,40 @@ class ActionSpace:
         # -> 265m budget < 283m half-diagonal -> policy collapsed to P_FA.)
         self.dp_scale = self.max_dp
         self.num_roles = num_roles
-        self.rng = rng if rng is not None else np.random.default_rng()
+        if rng is not None and seed is not None:
+            raise ValueError("pass either rng or seed, not both")
+        self.rng = rng if rng is not None else np.random.default_rng(seed)
         # Backward-compatible default. Relational MAPPO/IPPO entry points opt in
         # explicitly after constructing the action space; lightweight agents
         # and legacy unit tests retain the flat ActorNetwork interface.
         self.structured_actor = False  # flag for MAPPOAgent
         self.num_targets = 0  # overridden by run script / MAPPOAgent config
+
+    # ---- B5 (advice 014): smooth bijection R^2 -> open disk ----
+    def _map_smooth_disk(self, z: np.ndarray) -> np.ndarray:
+        """dp = d_max * z / sqrt(1 + |z|^2): bijection R^2 -> open disk.
+
+        One-to-one and smooth, no clipping; |dp| < d_max strictly, so the env's
+        radial clamp is a no-op and the PPO ratio is mathematically exact.
+        """
+        z = np.asarray(z, dtype=np.float64)
+        return self.max_dp * z / np.sqrt(1.0 + float(np.dot(z, z)))
+
+    def _inverse_smooth_disk(self, dp: np.ndarray) -> np.ndarray:
+        """Inverse of _map_smooth_disk: z = dp / sqrt(d_max^2 - |dp|^2).
+
+        Valid for |dp| < d_max, which the map always produces.
+        """
+        dp = np.asarray(dp, dtype=np.float64)
+        norm_sq = float(np.dot(dp, dp))
+        denom_sq = self.max_dp ** 2 - norm_sq
+        denom_sq = max(denom_sq, 1e-30)  # defensive; map output never hits the rim
+        return dp / np.sqrt(denom_sq)
+
+    def _smooth_disk_log_correction(self, z: np.ndarray) -> float:
+        """log|det d z / d dp| = 2*log(1 + |z|^2) - 2*log(d_max)."""
+        z = np.asarray(z, dtype=np.float64)
+        return 2.0 * np.log1p(float(np.dot(z, z))) - 2.0 * np.log(self.max_dp)
 
     @property
     def dp_dim(self) -> int:
@@ -156,16 +208,34 @@ class ActionSpace:
         # (no saturation loss); compute_log_prob() uses the IDENTICAL path so
         # old_log_prob == new_log_prob (fixes P5). Deterministic path matches the
         # legacy mean-mode exactly (no pre-clip) to preserve eval reproducibility.
-        if dp_det:
-            delta_p = np.tanh(dp_mean) * self.dp_scale
+        # Under dp_parameterization="smooth_disk" (B5, advice 014) the tanh box +
+        # radial projection is replaced by the bijection dp = d_max·z/√(1+|z|²),
+        # whose exact Jacobian is accounted for in compute_log_prob().
+        if self.dp_parameterization == DP_PARAM_SMOOTH_DISK:
+            if dp_det:
+                delta_p = self._map_smooth_disk(dp_mean)
+            else:
+                dp_std_pos = np.exp(np.clip(dp_std, -20, 2))  # ensure positive
+                delta_p_raw = self.rng.normal(dp_mean, dp_std_pos)
+                delta_p = self._map_smooth_disk(delta_p_raw)
+            # Quantize to the buffer/training precision (float32): the PPO update
+            # path recomputes log-prob from the float32 action stored by the
+            # buffer, and the smooth map's inverse is ill-conditioned near the
+            # rim, so scoring the exact float64 value would leak a float64-vs-
+            # float32 mismatch into the ratio.
+            delta_p = delta_p.astype(np.float32).astype(np.float64)
+            # No radial projection: the map is already onto the open disk.
         else:
-            dp_std_pos = np.exp(np.clip(dp_std, -20, 2))  # ensure positive
-            delta_p_raw = self.rng.normal(dp_mean, dp_std_pos)
-            dp01 = np.clip(np.tanh(delta_p_raw), -0.999, 0.999)
-            delta_p = dp01 * self.dp_scale
-        n = np.linalg.norm(delta_p)
-        if n > self.max_dp:
-            delta_p = delta_p * (self.max_dp / n)   # project onto disk -> env clamp no-op (P1)
+            if dp_det:
+                delta_p = np.tanh(dp_mean) * self.dp_scale
+            else:
+                dp_std_pos = np.exp(np.clip(dp_std, -20, 2))  # ensure positive
+                delta_p_raw = self.rng.normal(dp_mean, dp_std_pos)
+                dp01 = np.clip(np.tanh(delta_p_raw), -0.999, 0.999)
+                delta_p = dp01 * self.dp_scale
+            n = np.linalg.norm(delta_p)
+            if n > self.max_dp:
+                delta_p = delta_p * (self.max_dp / n)   # project onto disk -> env clamp no-op (P1)
 
         # ---- Discrete head (role) ----
         if not self.learn_roles:
@@ -190,10 +260,13 @@ class ActionSpace:
 
     def decode_deterministic(self, dp_mean: np.ndarray, role_logits: np.ndarray) -> Action:
         """Decode deterministically (for evaluation)."""
-        delta_p = np.tanh(dp_mean) * self.dp_scale
-        n = np.linalg.norm(delta_p)
-        if n > self.max_dp:
-            delta_p = delta_p * (self.max_dp / n)   # project onto disk
+        if self.dp_parameterization == DP_PARAM_SMOOTH_DISK:
+            delta_p = self._map_smooth_disk(dp_mean)
+        else:
+            delta_p = np.tanh(dp_mean) * self.dp_scale
+            n = np.linalg.norm(delta_p)
+            if n > self.max_dp:
+                delta_p = delta_p * (self.max_dp / n)   # project onto disk
         role = int(np.argmax(role_logits))
         return Action(delta_p=delta_p, role=role)
 
@@ -209,20 +282,40 @@ class ActionSpace:
         Returns:
             Log probability (scalar)
         """
-        # Inverse tanh: atanh(Δp / dp_scale)  (must use the SAME scale as decode)
-        dp_norm = action.delta_p / max(self.dp_scale, 1e-10)
-        dp_norm = np.clip(dp_norm, -0.999, 0.999)
-        delta_p_raw = np.arctanh(dp_norm)
+        # Under "smooth_disk" the raw pre-image is recovered from the executed
+        # action via the exact inverse z = dp / sqrt(d_max^2 - |dp|^2), and the
+        # change-of-variables Jacobian is added: log pi_dp = log pi_z
+        # + 2*log(1+|z|^2) - 2*log(d_max).  This makes the PPO ratio exact.
+        if self.dp_parameterization == DP_PARAM_SMOOTH_DISK:
+            # Quantize to the buffer/training precision (float32) so this log-prob
+            # is computed from the SAME action value the PPO update path will see
+            # (see decode()); the smooth inverse is ill-conditioned near the rim.
+            dp_q = action.delta_p.astype(np.float32).astype(np.float64)
+            delta_p_raw = self._inverse_smooth_disk(dp_q)
+            dp_std_pos = np.exp(np.clip(dp_std, -20, 2))
 
-        dp_std_pos = np.exp(np.clip(dp_std, -20, 2))
+            standardized = (delta_p_raw - dp_mean) / np.maximum(
+                dp_std_pos, 1e-12)
+            log_prob_dp = np.sum(
+                -0.5 * standardized ** 2
+                - np.log(np.maximum(dp_std_pos, 1e-12))
+                - 0.5 * np.log(2.0 * np.pi))
+            log_prob_dp += self._smooth_disk_log_correction(delta_p_raw)
+        else:
+            # Inverse tanh: atanh(Δp / dp_scale)  (must use the SAME scale as decode)
+            dp_norm = action.delta_p / max(self.dp_scale, 1e-10)
+            dp_norm = np.clip(dp_norm, -0.999, 0.999)
+            delta_p_raw = np.arctanh(dp_norm)
 
-        standardized = (delta_p_raw - dp_mean) / np.maximum(
-            dp_std_pos, 1e-12)
-        log_prob_dp = np.sum(
-            -0.5 * standardized ** 2
-            - np.log(np.maximum(dp_std_pos, 1e-12))
-            - 0.5 * np.log(2.0 * np.pi))
-        log_prob_dp -= np.sum(np.log(1.0 - dp_norm ** 2 + 1e-6))
+            dp_std_pos = np.exp(np.clip(dp_std, -20, 2))
+
+            standardized = (delta_p_raw - dp_mean) / np.maximum(
+                dp_std_pos, 1e-12)
+            log_prob_dp = np.sum(
+                -0.5 * standardized ** 2
+                - np.log(np.maximum(dp_std_pos, 1e-12))
+                - 0.5 * np.log(2.0 * np.pi))
+            log_prob_dp -= np.sum(np.log(1.0 - dp_norm ** 2 + 1e-6))
 
         if not self.learn_roles:
             # Role is not a policy decision -> excluded from the objective.

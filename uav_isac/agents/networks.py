@@ -404,13 +404,16 @@ class StructuredActorNetwork(nn.Module):
         self.max_dp = max_dp
         D = entity_dim
         self.single_frame_dim = single_frame_dim
-        # Per-target communication attention requires correctly aligned target
-        # queries. The historical hand parser assumes interleaved belief/geometry
-        # fields, while ObservationBuilder emits block-wise fields. Therefore the
-        # new receiver path always uses the authoritative slice descriptor.
-        self._use_corrected_parser = bool(
-            use_corrected_parser or use_comm_cross_attention
-            or comm_channel_feedback_rate_enabled)
+        # Audit 2026-08-17 (P0): the historical hand parser `_parse_one` reads
+        # per-target INTERLEAVED belief(9)+geometry(8), but ObservationBuilder
+        # emits BLOCK-wise fields (all Q beliefs, then all Q geometry) -- this
+        # has been the layout since the initial commit.  With the legacy parser
+        # every target's "geometry" was read from the NEXT target's belief block
+        # (Q>=2), silently corrupting the target-conditioned policy inputs in
+        # configs without cross-attention (e.g. the 4/4 frozen deployment).
+        # The corrected slice-descriptor parser is authoritative; the legacy
+        # path is now unreachable dead code.
+        self._use_corrected_parser = True
         self._use_p0 = use_p0
         self._use_comm_cross_attention = bool(use_comm_cross_attention)
         self._use_target_allocation = bool(use_target_allocation)
@@ -919,8 +922,11 @@ class StructuredActorNetwork(nn.Module):
         obs_dim = obs.shape[1]
         single_dim = self.single_frame_dim if self.single_frame_dim > 0 else obs_dim
 
-        parse_fn = (self._parse_one_corrected if self._use_corrected_parser
-                    else self._parse_one)
+        # Audit 2026-08-25 (P1b): the legacy hand parser was unreachable dead
+        # code (self._use_corrected_parser is hard-set True at __init__); its
+        # definition was removed.  The corrected slice-descriptor parser is the
+        # single authoritative parser.
+        parse_fn = self._parse_one_corrected
 
         if obs_dim > single_dim + 20:
             w = obs_dim // single_dim
@@ -1024,113 +1030,6 @@ class StructuredActorNetwork(nn.Module):
                 comm_agg, pd_hist, comm_tokens, comm_mask,
                 channel_feedback)
 
-    def _parse_one(self, obs, B):
-        """Parse single frame (227 dims) into entity tensors.
-
-        Returns:
-            self_state, target_stack, neighbor_stack, global_feat, comm_agg, pd_hist
-        """
-        K, Q = self.K, self.Q
-        obs_dim_real = obs.shape[1]
-
-        # Support both 251 (with P0 in_pair) and 227 (no P0) layouts
-        ptr = 0
-        self_state = obs[:, ptr:ptr+8]; ptr += 8  # 8
-
-        # Targets: belief(9) + geom(8) = 17 per target
-        targets = []
-        for _ in range(Q):
-            b_mean  = obs[:, ptr:ptr+4]; ptr += 4
-            b_cov   = obs[:, ptr:ptr+4]; ptr += 4
-            b_aoi   = obs[:, ptr:ptr+1]; ptr += 1
-            g_dx    = obs[:, ptr:ptr+1]; ptr += 1
-            g_dy    = obs[:, ptr:ptr+1]; ptr += 1
-            g_dist  = obs[:, ptr:ptr+1]; ptr += 1
-            g_sin   = obs[:, ptr:ptr+1]; ptr += 1
-            g_cos   = obs[:, ptr:ptr+1]; ptr += 1
-            g_s1    = obs[:, ptr:ptr+1]; ptr += 1
-            g_s2    = obs[:, ptr:ptr+1]; ptr += 1
-            g_s3    = obs[:, ptr:ptr+1]; ptr += 1
-            targets.append(torch.cat([
-                b_mean, b_cov, b_aoi,
-                g_dx, g_dy, g_dist, g_sin, g_cos, g_s1, g_s2, g_s3
-            ], dim=-1))  # 17 dims per target
-
-        # Physics features: nearest_dist(1) + bearing_sin(1) + cos(1) = 3
-        physics_feat = obs[:, ptr:ptr+3]; ptr += 3
-
-        # Coverage(Q) + pairing(K-1) — may be absent in non-P0 configs
-        remaining = obs_dim_real - ptr
-        token_count = (K - 1) * self.comm_tokens_per_sender
-        comm_extra = (token_count * self.comm_token_dim + token_count
-                      if self._use_comm_cross_attention else 0)
-        without_p0 = (K-1)*9 + 2 + Q + 16 + comm_extra
-        has_p0 = (remaining > without_p0 + 2)  # heuristic: P0 adds Q+(K-1) dims
-
-        coverage = None
-        if has_p0:
-            coverage = obs[:, ptr:ptr+Q]; ptr += Q  # Q
-            _pairing = obs[:, ptr:ptr+(K-1)]; ptr += (K-1)  # skip pairing
-
-        # Neighbors: (K-1) × 9 (rel_pos(2)+rel_vel(2)+role(1)+heading(2)+in_pair(1)+nearest(1))
-        neighbor_dim = 9 if has_p0 else 8  # in_pair is only there if P0
-        neighbors = []
-        for _ in range(K-1):
-            n = obs[:, ptr:ptr+neighbor_dim]; ptr += neighbor_dim
-            if neighbor_dim == 8:
-                # Pad missing in_pair with zero
-                n = torch.cat([n[:, :7], torch.zeros(B, 1, device=obs.device), n[:, 7:]], dim=-1)
-            neighbors.append(n)
-
-        if has_p0:
-            global_feat = obs[:, ptr:ptr+2]; ptr += 2  # 2
-        else:
-            global_feat = torch.zeros(B, 2, device=obs.device)  # no global coord
-
-        # P1 FIX: PD_hist is now KEPT and returned (was previously read and discarded).
-        # This is the per-target detection probability from the previous frame,
-        # critical for Actor to know which targets are being missed.
-        pd_hist = obs[:, ptr:ptr+Q]; ptr += Q  # P_D history (B, Q)
-
-        comm_agg = obs[:, ptr:ptr+16]  # 16
-        ptr += 16
-        if self._use_comm_cross_attention:
-            token_len = token_count * self.comm_token_dim
-            comm_tokens = obs[:, ptr:ptr+token_len].reshape(
-                B, token_count, self.comm_token_dim)
-            ptr += token_len
-            comm_mask = obs[:, ptr:ptr+token_count]
-            ptr += token_count
-        else:
-            comm_tokens = torch.zeros(B, token_count, self.comm_token_dim,
-                                      device=obs.device)
-            comm_mask = torch.zeros(B, token_count, device=obs.device)
-        if self._comm_channel_feedback_rate_enabled:
-            channel_feedback = obs[
-                :, ptr:ptr + self.comm_channel_feedback_dim]
-        else:
-            channel_feedback = torch.zeros(
-                B, self.comm_channel_feedback_dim, device=obs.device)
-
-        # Append physics to self_state for encoder
-        self_state = torch.cat([self_state, physics_feat], dim=-1)  # (B, 11)
-
-        target_stack = torch.stack(targets, dim=1)      # (B, Q, 17)
-        neighbor_stack = torch.stack(neighbors, dim=1)   # (B, K-1, 9)
-        if coverage is not None:
-            coverage = coverage.unsqueeze(-1)             # (B, Q, 1)
-            # Append coverage to target features
-            target_stack = torch.cat([target_stack, coverage], dim=-1)  # (B, Q, 18)
-
-        # Ensure target_stack is always 18-dim (pad with zero if no P0 coverage)
-        if target_stack.shape[-1] < 18:
-            B = target_stack.shape[0]
-            pad = torch.zeros(B, Q, 18 - target_stack.shape[-1], device=target_stack.device)
-            target_stack = torch.cat([target_stack, pad], dim=-1)
-
-        return (self_state, target_stack, neighbor_stack, global_feat,
-                comm_agg, pd_hist, comm_tokens, comm_mask,
-                channel_feedback)
 
     def _route_v2_coordination_modules(
         self,
@@ -2773,59 +2672,3 @@ class CriticNetwork(nn.Module):
         return ordered[..., :tail_count].mean(dim=-1)
 
 
-class GATEncoder(nn.Module):
-    """Optional Graph Attention Network for neighbor message aggregation.
-
-    Used when K is large (enabled for K >= 6 in the document).
-    Phase 1 (K=4): not activated by default.
-    """
-
-    def __init__(self, node_dim: int, hidden_dim: int = 128,
-                 num_heads: int = 4, num_layers: int = 2):
-        super().__init__()
-        self.node_dim = node_dim
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-
-        if hidden_dim % num_heads != 0:
-            raise ValueError(
-                f"hidden_dim ({hidden_dim}) must be divisible by "
-                f"num_heads ({num_heads})"
-            )
-
-        # Project input to hidden_dim, then use consistent embed_dim throughout
-        self.input_proj = nn.Linear(node_dim, hidden_dim)
-
-        self.attn_layers = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        for _ in range(num_layers):
-            self.attn_layers.append(
-                nn.MultiheadAttention(
-                    embed_dim=hidden_dim,
-                    num_heads=num_heads,
-                    batch_first=True,
-                )
-            )
-            self.norms.append(nn.LayerNorm(hidden_dim))
-
-    def forward(self, node_features: torch.Tensor,
-                adj_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            node_features: (batch, K, node_dim)
-            adj_mask: (K, K) adjacency mask (optional), True = masked (ignore)
-
-        Returns:
-            aggregated: (batch, K, hidden_dim)
-        """
-        x = self.input_proj(node_features)
-
-        for attn, norm in zip(self.attn_layers, self.norms):
-            x2, _ = attn(
-                x, x, x,
-                attn_mask=adj_mask,
-                need_weights=False,
-            )
-            x = norm(x + x2)  # residual + layer-norm
-
-        return x

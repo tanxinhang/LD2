@@ -30,6 +30,12 @@ def _env(seed=503):
     cfg.marl.task_constrained_mode = "lexicographic"
     cfg.marl.analytical_movement_candidates_enabled = True
     cfg.marl.analytical_movement_dual_prune = True
+    # G2-0 changed raw deflection from J/W to the dimensionless J/J energy
+    # ratio.  The default geometry is consequently already feasible and does
+    # not need Phase-1 movement.  Keep this as an explicit low-SNR stress
+    # fixture so the test exercises warm-start activation rather than relying
+    # on the former unit error to manufacture a deficit.
+    cfg.channel.kT /= float(cfg.otfs.T_sym)
     return UAVISACEnv(cfg, seed=seed)
 
 

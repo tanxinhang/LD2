@@ -1,0 +1,8 @@
+# K=Q=12 counterpart of the least-change pairwise safety projection.
+extends: exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40.yaml
+
+marl:
+  distributed_movement_safety_projection_enabled: true
+  # Two-endpoint worst-case error from 8-bit x/y absolute positions:
+  # 2 * 0.5 * hypot(1386/255, 1386/255) = 7.687 m.
+  distributed_movement_safety_margin_m: 7.7

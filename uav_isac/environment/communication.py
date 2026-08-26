@@ -16,6 +16,11 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from uav_isac.physical.finite_blocklength import (
+    minimum_blocklength_normal_approximation,
+    normal_approximation_packet_error_probability,
+)
+
 
 @dataclass
 class DeliveredMessage:
@@ -28,6 +33,7 @@ class DeliveredMessage:
     delay_frames: int
     tx_power_w: float
     token_mask: Optional[np.ndarray] = None
+    packet_error_probability: float = 0.0
 
 
 @dataclass
@@ -38,9 +44,16 @@ class CommunicationStepStats:
     attempted_links: int = 0
     delivered_links: int = 0
     expired_links: int = 0
+    deadline_failed_links: int = 0
+    snr_failed_links: int = 0
+    reliability_failed_links: int = 0
+    burst_failed_links: int = 0
+    burst_bad_links: int = 0
     mean_latency_s: float = 0.0
     p95_latency_s: float = 0.0
     max_latency_s: float = 0.0
+    mean_packet_error_probability: float = 0.0
+    max_packet_error_probability: float = 0.0
     per_sender_energy_j: Dict[int, float] = field(default_factory=dict)
     per_sender_bits: Dict[int, float] = field(default_factory=dict)
     per_sender_power_w: Dict[int, float] = field(default_factory=dict)
@@ -58,7 +71,37 @@ class CommunicationStepStats:
     def deadline_violation_rate(self) -> float:
         if self.attempted_links <= 0:
             return 0.0
+        return float(self.deadline_failed_links / self.attempted_links)
+
+    @property
+    def snr_violation_rate(self) -> float:
+        if self.attempted_links <= 0:
+            return 0.0
+        return float(self.snr_failed_links / self.attempted_links)
+
+    @property
+    def delivery_failure_rate(self) -> float:
+        if self.attempted_links <= 0:
+            return 0.0
         return float(self.expired_links / self.attempted_links)
+
+    @property
+    def reliability_violation_rate(self) -> float:
+        if self.attempted_links <= 0:
+            return 0.0
+        return float(self.reliability_failed_links / self.attempted_links)
+
+    @property
+    def burst_failure_rate(self) -> float:
+        if self.attempted_links <= 0:
+            return 0.0
+        return float(self.burst_failed_links / self.attempted_links)
+
+    @property
+    def burst_bad_link_rate(self) -> float:
+        if self.attempted_links <= 0:
+            return 0.0
+        return float(self.burst_bad_links / self.attempted_links)
 
     def sender_delivery_rates(self, num_senders: int) -> np.ndarray:
         """Return sender-specific delivery fractions.
@@ -83,9 +126,19 @@ class CommunicationStepStats:
             'learned_comm_delivered_links': float(self.delivered_links),
             'learned_comm_delivery_rate': self.delivery_rate,
             'learned_comm_deadline_violation_rate': self.deadline_violation_rate,
+            'learned_comm_snr_violation_rate': self.snr_violation_rate,
+            'learned_comm_delivery_failure_rate': self.delivery_failure_rate,
+            'learned_comm_reliability_violation_rate': (
+                self.reliability_violation_rate),
+            'learned_comm_burst_failure_rate': self.burst_failure_rate,
+            'learned_comm_burst_bad_link_rate': self.burst_bad_link_rate,
             'learned_comm_mean_latency_s': float(self.mean_latency_s),
             'learned_comm_p95_latency_s': float(self.p95_latency_s),
             'learned_comm_max_latency_s': float(self.max_latency_s),
+            'learned_comm_mean_packet_error_probability': float(
+                self.mean_packet_error_probability),
+            'learned_comm_max_packet_error_probability': float(
+                self.max_packet_error_probability),
             'learned_comm_mean_tx_power_w': float(np.mean(
                 list(self.per_sender_power_w.values()) or [0.0])),
             'learned_comm_total_tx_power_w': float(sum(
@@ -111,6 +164,19 @@ class InterUAVCommunicationModel:
         noise_figure_db: float,
         dt: float,
         message_dim: int = 16,
+        finite_blocklength_enabled: bool = False,
+        finite_blocklength_target_bler: float = 1.0e-5,
+        finite_blocklength_max_channel_uses: int = 100_000_000,
+        finite_blocklength_sample_errors: bool = True,
+        finite_blocklength_coding_snr_margin_db: float = 0.0,
+        snr_shadowing_std_db: float = 0.0,
+        snr_shadowing_correlation: float = 0.0,
+        burst_loss_enabled: bool = False,
+        burst_good_to_bad_probability: float = 0.0,
+        burst_bad_to_good_probability: float = 1.0,
+        burst_good_drop_probability: float = 0.0,
+        burst_bad_drop_probability: float = 1.0,
+        rng: np.random.Generator | None = None,
     ):
         if not rate_bits_per_dim or int(rate_bits_per_dim[0]) != 0:
             raise ValueError('comm_rate_bits_per_dim must start with 0 (silence)')
@@ -130,6 +196,129 @@ class InterUAVCommunicationModel:
         self.noise_figure_linear = float(10.0 ** (noise_figure_db / 10.0))
         self.dt = float(max(dt, 1e-9))
         self.message_dim = int(message_dim)
+        self.finite_blocklength_enabled = bool(finite_blocklength_enabled)
+        self.finite_blocklength_target_bler = float(
+            finite_blocklength_target_bler)
+        self.finite_blocklength_max_channel_uses = int(
+            finite_blocklength_max_channel_uses)
+        self.finite_blocklength_sample_errors = bool(
+            finite_blocklength_sample_errors)
+        self.finite_blocklength_coding_snr_margin_db = max(
+            float(finite_blocklength_coding_snr_margin_db), 0.0)
+        self.snr_shadowing_std_db = max(float(snr_shadowing_std_db), 0.0)
+        self.snr_shadowing_correlation = float(np.clip(
+            snr_shadowing_correlation, 0.0, 0.999999))
+        self.burst_loss_enabled = bool(burst_loss_enabled)
+        self.burst_good_to_bad_probability = float(
+            burst_good_to_bad_probability)
+        self.burst_bad_to_good_probability = float(
+            burst_bad_to_good_probability)
+        self.burst_good_drop_probability = float(
+            burst_good_drop_probability)
+        self.burst_bad_drop_probability = float(
+            burst_bad_drop_probability)
+        probabilities = (
+            self.burst_good_to_bad_probability,
+            self.burst_bad_to_good_probability,
+            self.burst_good_drop_probability,
+            self.burst_bad_drop_probability,
+        )
+        if any(not 0.0 <= value <= 1.0 for value in probabilities):
+            raise ValueError('burst transition/drop probabilities must lie in [0,1]')
+        self._burst_bad_state = np.zeros((0, 0), dtype=bool)
+        self._snr_shadowing_db = np.zeros((0, 0), dtype=np.float64)
+        self.rng = rng if rng is not None else np.random.default_rng(0)
+        if not 0.0 < self.finite_blocklength_target_bler < 0.5:
+            raise ValueError(
+                'finite_blocklength_target_bler must lie in (0,0.5)')
+        if self.finite_blocklength_max_channel_uses < 1:
+            raise ValueError(
+                'finite_blocklength_max_channel_uses must be positive')
+
+    def reset_channel_state(self, num_uavs: int) -> None:
+        """Reset episode-local Markov erasures and correlated SNR shadowing."""
+        K = max(0, int(num_uavs))
+        self._burst_bad_state = np.zeros((K, K), dtype=bool)
+        self._snr_shadowing_db = np.zeros((K, K), dtype=np.float64)
+
+    def get_channel_state(self) -> Dict[str, np.ndarray]:
+        return {
+            'burst_bad_state': self._burst_bad_state.copy(),
+            'snr_shadowing_db': self._snr_shadowing_db.copy(),
+        }
+
+    def set_channel_state(self, state: Dict[str, np.ndarray]) -> None:
+        burst = np.asarray(state.get(
+            'burst_bad_state', np.zeros((0, 0))), dtype=bool)
+        shadowing = np.asarray(state.get(
+            'snr_shadowing_db', np.zeros_like(burst, dtype=np.float64)),
+            dtype=np.float64)
+        if burst.ndim != 2 or burst.shape[0] != burst.shape[1]:
+            raise ValueError('burst channel state must be square')
+        if shadowing.shape != burst.shape or np.any(~np.isfinite(shadowing)):
+            raise ValueError('SNR shadowing state shape/value mismatch')
+        self._burst_bad_state = burst.copy()
+        self._snr_shadowing_db = shadowing.copy()
+
+    def _advance_channel_state(self, num_uavs: int) -> None:
+        K = max(0, int(num_uavs))
+        if self._burst_bad_state.shape != (K, K):
+            self.reset_channel_state(K)
+        off_diagonal = ~np.eye(K, dtype=bool)
+        if self.burst_loss_enabled and K > 1:
+            draws = self.rng.random((K, K))
+            good_to_bad = (
+                ~self._burst_bad_state
+                & (draws < self.burst_good_to_bad_probability))
+            bad_to_good = (
+                self._burst_bad_state
+                & (draws < self.burst_bad_to_good_probability))
+            self._burst_bad_state[good_to_bad & off_diagonal] = True
+            self._burst_bad_state[bad_to_good & off_diagonal] = False
+            self._burst_bad_state[~off_diagonal] = False
+        if self.snr_shadowing_std_db > 0.0 and K > 1:
+            rho = self.snr_shadowing_correlation
+            innovation = (
+                np.sqrt(max(1.0 - rho * rho, 0.0))
+                * self.snr_shadowing_std_db
+                * self.rng.normal(size=(K, K)))
+            self._snr_shadowing_db = rho * self._snr_shadowing_db + innovation
+            self._snr_shadowing_db[~off_diagonal] = 0.0
+        elif self.snr_shadowing_std_db <= 0.0:
+            self._snr_shadowing_db.fill(0.0)
+
+    def packet_error_probability(
+        self,
+        snr_db: float,
+        serialization_s: float,
+        payload_bits: int,
+        effective_bandwidth_hz: float,
+    ) -> float:
+        """Return the common learned/evidence-packet BLER approximation."""
+        if not self.finite_blocklength_enabled or int(payload_bits) <= 0:
+            return 0.0
+        if not np.isfinite(serialization_s) or serialization_s < 0.0:
+            return 1.0
+        blocklength = max(1, int(np.ceil(
+            float(serialization_s) * float(effective_bandwidth_hz))))
+        return normal_approximation_packet_error_probability(
+            10.0 ** (float(snr_db) / 10.0),
+            blocklength,
+            int(payload_bits),
+        )
+
+    def packet_reliability_success(self, error_probability: float) -> bool:
+        """Apply the BLER gate and, when enabled, a reproducible erasure."""
+        error = float(error_probability)
+        if not np.isfinite(error) or not 0.0 <= error <= 1.0:
+            raise ValueError('error_probability must lie in [0,1]')
+        if not self.finite_blocklength_enabled:
+            return True
+        if error > self.finite_blocklength_target_bler * (1.0 + 1.0e-9):
+            return False
+        if not self.finite_blocklength_sample_errors:
+            return True
+        return bool(self.rng.random() >= error)
 
     def payload_bits(
         self, rate_index: int, active_dimensions: Optional[int] = None,
@@ -193,6 +382,31 @@ class InterUAVCommunicationModel:
         code = np.rint((clipped + 1.0) * 0.5 * (levels - 1))
         return (2.0 * code / (levels - 1) - 1.0).astype(np.float64)
 
+    def _serialization_budget(
+        self, snr: float, payload_bits: int, effective_bandwidth_hz: float,
+    ) -> tuple[float, float]:
+        bandwidth = float(effective_bandwidth_hz)
+        bits = int(payload_bits)
+        shannon_rate_bps = bandwidth * np.log2(1.0 + max(snr, 0.0))
+        if bits <= 0:
+            return float(shannon_rate_bps), 0.0
+        if not self.finite_blocklength_enabled:
+            return (
+                float(shannon_rate_bps),
+                float(bits / max(shannon_rate_bps, 1.0e-12)),
+            )
+        design_snr = (
+            max(float(snr), 0.0)
+            / 10.0 ** (self.finite_blocklength_coding_snr_margin_db / 10.0))
+        blocklength = minimum_blocklength_normal_approximation(
+            design_snr, bits,
+            self.finite_blocklength_target_bler,
+            max_blocklength=self.finite_blocklength_max_channel_uses)
+        if blocklength is None:
+            return 0.0, float('inf')
+        serialization_s = float(blocklength / bandwidth)
+        return float(bits / serialization_s), serialization_s
+
     def _link(self, sender_pos: np.ndarray, receiver_pos: np.ndarray,
               payload_bits: int, effective_bandwidth_hz: float,
               tx_power_w: float = None):
@@ -205,8 +419,8 @@ class InterUAVCommunicationModel:
         noise_power = self.kT * effective_bandwidth_hz * self.noise_figure_linear
         snr = received_power / max(noise_power, 1e-30)
         snr_db = 10.0 * np.log10(max(snr, 1e-30))
-        rate_bps = effective_bandwidth_hz * np.log2(1.0 + max(snr, 0.0))
-        serialization_s = payload_bits / max(rate_bps, 1e-12)
+        rate_bps, serialization_s = self._serialization_budget(
+            snr, payload_bits, effective_bandwidth_hz)
         latency_s = serialization_s + self.processing_delay_s
         return snr_db, rate_bps, serialization_s, latency_s
 
@@ -279,14 +493,9 @@ class InterUAVCommunicationModel:
         else:
             robust_snr = float(10.0 ** (robust_snr_db / 10.0))
         bandwidth = float(effective_bandwidth_hz)
-        rate_bps = bandwidth * np.log2(1.0 + max(robust_snr, 0.0))
         bits = int(payload_bits)
-        if bits == 0:
-            serialization_s = 0.0
-        elif rate_bps <= 0.0:
-            serialization_s = float("inf")
-        else:
-            serialization_s = bits / float(rate_bps)
+        rate_bps, serialization_s = self._serialization_budget(
+            robust_snr, bits, bandwidth)
         latency_s = (
             float(serialization_s) + self.processing_delay_s + latency_margin
         )
@@ -306,6 +515,8 @@ class InterUAVCommunicationModel:
         token_masks: Dict[int, np.ndarray] = None,
         extra_payload_dimensions: Dict[int, int] = None,
         extra_payload_bits: Dict[int, int] = None,
+        base_payload_dimensions: Dict[int, int] = None,
+        suppress_message_payload: Dict[int, bool] = None,
     ) -> tuple[List[DeliveredMessage], CommunicationStepStats]:
         """Transport one learned broadcast per active sender.
 
@@ -314,9 +525,14 @@ class InterUAVCommunicationModel:
         evaluated independently for every receiving UAV.
         """
         K = int(positions.shape[0])
+        # Channel memory evolves once per simulator-frame transport call, not
+        # once per receiver, so burst duration is independent of fleet size.
+        self._advance_channel_state(K)
         masks = token_masks or {}
         extra_dims = extra_payload_dimensions or {}
         exact_extra_bits = extra_payload_bits or {}
+        base_dims = base_payload_dimensions or {}
+        suppress_payload = suppress_message_payload or {}
 
         def packet_bits(sender: int) -> int:
             rate_index = int(rate_indices.get(sender, 0))
@@ -324,9 +540,10 @@ class InterUAVCommunicationModel:
                 rate_index, 0, len(self.rate_bits_per_dim) - 1))
             bits_per_dim = self.rate_bits_per_dim[idx]
             learned_dimensions = (
+                max(0, int(base_dims[sender]))
+                if sender in base_dims else
                 self._active_dimensions(masks.get(sender))
-                + max(0, int(extra_dims.get(sender, 0)))
-            )
+            ) + max(0, int(extra_dims.get(sender, 0)))
             appended_bits = max(
                 0, int(exact_extra_bits.get(sender, 0)))
             payload = learned_dimensions * bits_per_dim + appended_bits
@@ -343,12 +560,17 @@ class InterUAVCommunicationModel:
         effective_bw = self.bandwidth_hz / len(active)
         deliveries: List[DeliveredMessage] = []
         all_latencies: List[float] = []
+        all_blers: List[float] = []
 
         for sender in active:
             rate_idx = int(rate_indices.get(sender, 0))
             sender_mask = masks.get(sender)
             n_bits = packet_bits(sender)
-            quantized = self.quantize(messages[sender], rate_idx)
+            quantized = (
+                np.zeros_like(np.asarray(messages[sender], dtype=np.float64))
+                if bool(suppress_payload.get(sender, False))
+                else self.quantize(messages[sender], rate_idx)
+            )
             if sender_mask is not None:
                 mask = np.asarray(sender_mask, dtype=np.float64).reshape(-1)
                 per_token = self.message_dim // mask.size
@@ -373,9 +595,14 @@ class InterUAVCommunicationModel:
                 snr_db, _rate, serialization_s, latency_s = self._link(
                     positions[sender], positions[receiver], n_bits,
                     effective_bw, sender_power_w)
+                snr_db = float(
+                    snr_db + self._snr_shadowing_db[sender, receiver])
                 stats.attempted_links += 1
                 stats.per_sender_attempted_links[sender] += 1
                 all_latencies.append(float(latency_s))
+                packet_error_probability = self.packet_error_probability(
+                    snr_db, serialization_s, n_bits, effective_bw)
+                all_blers.append(float(packet_error_probability))
                 # A packet that misses its deadline is aborted rather than
                 # occupying the radio for an unbounded Shannon serialization
                 # time. Keep raw latency for diagnostics, but bill at most one
@@ -386,7 +613,31 @@ class InterUAVCommunicationModel:
 
                 meets_snr = snr_db >= self.snr_threshold_db
                 meets_deadline = latency_s <= self.deadline_s
-                if meets_snr and meets_deadline:
+                # Match evidence-packet semantics: a link that already fails
+                # SNR or deadline does not consume a codeword-erasure RNG draw.
+                # This keeps common-seed protocol comparisons call-aligned.
+                meets_reliability = (
+                    self.packet_reliability_success(
+                        packet_error_probability)
+                    if meets_snr and meets_deadline else True)
+                burst_bad = bool(
+                    self.burst_loss_enabled
+                    and self._burst_bad_state[sender, receiver])
+                stats.burst_bad_links += int(burst_bad)
+                meets_burst = True
+                if (
+                    self.burst_loss_enabled
+                    and meets_snr and meets_deadline and meets_reliability
+                ):
+                    drop_probability = (
+                        self.burst_bad_drop_probability
+                        if burst_bad else self.burst_good_drop_probability)
+                    meets_burst = bool(
+                        self.rng.random() >= drop_probability)
+                    if not meets_burst:
+                        stats.burst_failed_links += 1
+                if (meets_snr and meets_deadline
+                        and meets_reliability and meets_burst):
                     delay_frames = max(1, int(np.ceil(latency_s / self.dt)))
                     deliveries.append(DeliveredMessage(
                         sender=sender,
@@ -399,12 +650,18 @@ class InterUAVCommunicationModel:
                         tx_power_w=float(sender_power_w),
                         token_mask=(None if sender_mask is None else
                                     np.asarray(sender_mask, dtype=np.float64).copy()),
+                        packet_error_probability=float(
+                            packet_error_probability),
                     ))
                     stats.delivered_links += 1
                     stats.per_sender_delivered_links[sender] += 1
                 else:
                     stats.expired_links += 1
                     stats.per_sender_expired_links[sender] += 1
+                    stats.deadline_failed_links += int(not meets_deadline)
+                    stats.snr_failed_links += int(not meets_snr)
+                    if not meets_reliability:
+                        stats.reliability_failed_links += 1
 
             sender_energy = sender_power_w * sender_airtime
             stats.per_sender_energy_j[sender] = float(sender_energy)
@@ -415,5 +672,9 @@ class InterUAVCommunicationModel:
             stats.mean_latency_s = float(np.mean(arr))
             stats.p95_latency_s = float(np.percentile(arr, 95))
             stats.max_latency_s = float(np.max(arr))
+        if all_blers:
+            bler = np.asarray(all_blers, dtype=np.float64)
+            stats.mean_packet_error_probability = float(np.mean(bler))
+            stats.max_packet_error_probability = float(np.max(bler))
 
         return deliveries, stats

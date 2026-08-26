@@ -1,0 +1,7 @@
+# Robust-gain ablation: the physically reconstructed public radar graph uses
+# a two-sigma local target-position radius.  By the triangle inequality this
+# lowers, rather than inflates, the advertised bistatic gain.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_pilot.yaml
+
+marl:
+  distributed_target_position_uncertainty_sigma: 2.0

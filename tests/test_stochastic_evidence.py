@@ -7,10 +7,11 @@ from uav_isac.physical.evidence import (
     detect_from_llr,
     gather_owner_values,
     llr_threshold,
+    local_ambiguity_top2_mask,
     local_quality_topk_mask,
-    pre_evidence_fusion_owner,
     quantize_llr,
     sample_gaussian_llr,
+    scheduled_fusion_owner,
     theoretical_detection_probability,
 )
 
@@ -60,13 +61,12 @@ def test_independent_receiver_llrs_add_to_central_llr_on_same_samples():
     np.testing.assert_allclose(central_llr, expected)
 
 
-def test_fusion_owner_is_selected_from_quality_not_realized_llr():
-    receiver_d = np.asarray([
-        [2.0, 5.0, 1.0],
-        [4.0, 1.0, 3.0],
-        [4.0, 2.0, 2.0],
-    ])
-    owner = pre_evidence_fusion_owner(receiver_d)
+def test_fusion_owner_is_derived_from_schedule_not_quality_or_llr():
+    owner = scheduled_fusion_owner(
+        [(0, 1, 0), (1, 0, 1), (2, 1, 2)],
+        num_agents=3,
+        num_targets=3,
+    )
     np.testing.assert_array_equal(owner, np.asarray([1, 0, 1]))
 
     realized_llr = np.asarray([
@@ -78,6 +78,43 @@ def test_fusion_owner_is_selected_from_quality_not_realized_llr():
         gather_owner_values(realized_llr, owner),
         np.asarray([-5.0, -2.0, 2.0]),
     )
+
+
+def test_scheduled_owner_tie_break_is_quality_free_and_unassigned_fails_closed():
+    owner = scheduled_fusion_owner(
+        [(0, 2, 0), (2, 1, 0)],
+        num_agents=3,
+        num_targets=2,
+    )
+    np.testing.assert_array_equal(owner, np.asarray([1, -1]))
+
+
+def test_ambiguity_top2_is_receiver_local_bounded_and_scale_invariant():
+    quality = np.asarray([
+        [10.0, 6.0, 1.0],
+        [8.0, 3.0, 2.0],
+        [0.0, 0.0, 0.0],
+    ])
+    selected = local_ambiguity_top2_mask(
+        quality, base_topk=1, second_ratio=0.5)
+    np.testing.assert_array_equal(selected, np.asarray([
+        [True, True, False],
+        [True, False, False],
+        [False, False, False],
+    ]))
+    np.testing.assert_array_equal(
+        local_ambiguity_top2_mask(
+            7.0 * quality, base_topk=1, second_ratio=0.5),
+        selected,
+    )
+    changed_other_row = quality.copy()
+    changed_other_row[1] = [1.0, 9.0, 8.0]
+    np.testing.assert_array_equal(
+        local_ambiguity_top2_mask(
+            changed_other_row, base_topk=1, second_ratio=0.5)[0],
+        selected[0],
+    )
+    assert np.all(np.sum(selected, axis=1) <= 2)
 
 
 def test_zero_deflection_has_no_deterministic_llr_detection():

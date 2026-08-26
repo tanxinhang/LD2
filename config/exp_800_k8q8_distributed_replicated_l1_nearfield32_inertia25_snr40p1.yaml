@@ -1,0 +1,5 @@
+# Near the RF-feasibility transition inferred from the 30 dB power audit.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+marl:
+  comm_snr_threshold_db: 40.1

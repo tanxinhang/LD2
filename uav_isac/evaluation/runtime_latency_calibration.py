@@ -201,11 +201,18 @@ def validate_frozen_runtime_latency_epoch(
             f"runtime train/calibration/validation leakage: {sorted(overlap)}")
     scores = episode_runtime_latency_scores(
         observations, expected_episode_ids=validation_ids)
-    failures = tuple(
-        score.episode_id for score in scores
-        if score.complete_compute_latency_upper_s
-        > epoch.complete_compute_latency_bound_s
-    )
+    # Audit 2026-08-17: a non-finite bound (rank > n in _split_upper, or a
+    # censored calibration event) makes the `score > bound` comparison never
+    # True -> the epoch would be reported as clean with zero failures.  Fail
+    # closed instead: an uncalibratable epoch fails every validation episode.
+    bound = epoch.complete_compute_latency_bound_s
+    if not math.isfinite(bound):
+        failures = tuple(score.episode_id for score in scores)
+    else:
+        failures = tuple(
+            score.episode_id for score in scores
+            if score.complete_compute_latency_upper_s > bound
+        )
     return RuntimeLatencyValidation(
         validation_episode_ids=validation_ids,
         failure_episode_ids=failures,

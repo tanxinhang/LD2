@@ -1,0 +1,6 @@
+# K=Q=10 severe-tail counterpart of the K=Q=12 development candidate.
+extends: exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25_bistatic_move.yaml
+
+marl:
+  distributed_bistatic_complement_exponent: 0.50
+  distributed_bistatic_tail_gate_ratio: 40.0

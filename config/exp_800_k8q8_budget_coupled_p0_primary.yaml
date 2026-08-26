@@ -1,0 +1,7 @@
+# Scale-safe 8x8 P0 counterpart of the 6x6 primary-only experiment.
+extends: exp_800_k8q8_analytical_l0l1_movement_lex_candidates_blind_lookahead40_indep.yaml
+
+marl:
+  p0_budget_coupled_structure_enabled: true
+  p0_budget_coupled_time_limit_s: 5.0
+  p0_budget_coupled_secondary_enabled: false

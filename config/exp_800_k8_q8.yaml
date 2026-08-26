@@ -47,7 +47,7 @@ otfs:
   T_sym: 6.4e-5
   g_tx_dBi: 16.0
   g_rx_dBi: 16.0
-  n_cpi: 128
+  n_cpi: 1
 
 channel:
   NF: 4.0
@@ -88,7 +88,6 @@ marl:
   shape_w: 0.01
   lambda_report: 1.0e-5       # lower: 8 UAVs 鈫?comm cost adds up faster
   alpha_pd: 0.5
-  lambda_report_comm: 1.0e-5
   bc_beta_init: 0.05
   vf_coef: 0.5
   max_grad_norm: 0.5

@@ -1,0 +1,6 @@
+# Same dynamic U2U detector as the feedback pilot, but with posterior gossip
+# disabled.  This is the same-seed structural ablation for the feedback loop.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_pilot.yaml
+
+marl:
+  u2u_belief_feedback_enabled: false

@@ -1,0 +1,14 @@
+# Safe gain-scheduled L3 ablation.  On every second frame, each UAV uses only
+# its delivered public-state cache and local target beliefs to reconstruct the
+# one UAV-target radial coordinate with the largest predicted reduction in the
+# worst nearest-Tx/nearest-Rx squared-range product.  The intervening frame is
+# reserved for structure/power adaptation.  Every executed row remains behind
+# the robust public-view d_safe projection inherited from the stable branch.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  distributed_gain_scheduled_movement_enabled: true
+  distributed_gain_scheduled_period_frames: 2
+  distributed_gain_scheduled_min_log_improvement: 0.0
+  distributed_gain_scheduled_max_selected_nodes: 0
+  distributed_gain_scheduled_far_range_gate_m: 225.0

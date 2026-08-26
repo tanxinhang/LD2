@@ -110,7 +110,7 @@ otfs:
   fc: 28000000000.0
   g_rx_dBi: 16.0
   g_tx_dBi: 16.0
-  n_cpi: 128
+  n_cpi: 1
 p0_solver:
   capacity_per_rx: 256
   latency_max: 0.005

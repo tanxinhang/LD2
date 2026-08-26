@@ -1,4 +1,4 @@
-﻿"""Deterministic fixed-repetition envelope for bounded U2U erasures.
+"""Deterministic fixed-repetition envelope for bounded U2U erasures.
 
 Every logical protocol packet is transmitted a fixed ``R`` times.  Hence the
 receiver obtains at least one copy whenever at most ``R-1`` copies of each

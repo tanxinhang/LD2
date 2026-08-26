@@ -1,4 +1,4 @@
-﻿"""Causal bistatic geometry correction for owner-local per-watt gains."""
+"""Causal bistatic geometry correction for owner-local per-watt gains."""
 
 # ----------------------------------------------------------------------
 # AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)

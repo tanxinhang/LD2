@@ -1,0 +1,8 @@
+# Event-certified amortized 6x6 P0.  Reuse a feasible structure for at most
+# six frames, but solve early whenever its current-budget fixed-structure LP
+# drops below the worst-target QoS floor.
+extends: exp_800_k6q6_budget_coupled_p0_primary.yaml
+
+marl:
+  p0_maxmin_pairing_hold_frames: 6
+  p0_maxmin_event_triggered_enabled: true

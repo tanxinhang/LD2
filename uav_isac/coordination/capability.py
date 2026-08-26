@@ -157,7 +157,7 @@ def capability_monotone_holds(
     return float(g2[0]) <= float(g1[0]) + 1e-6
 
 
-def capability_gauge_pwl_lp_full(
+def _capability_gauge_pwl_lp_certificate_raw(
     gain: np.ndarray,
     budget: np.ndarray,
     p_fa: float,
@@ -165,8 +165,8 @@ def capability_gauge_pwl_lp_full(
     slopes: np.ndarray,
     intercepts: np.ndarray,
     d_min: float,
-) -> tuple[float, np.ndarray, np.ndarray] | None:
-    """LP capability gauge with explicit D_q variables, returning dual prices.
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Solve the PWL gauge and return raw target and budget dual marginals.
 
     Reformulates the gauge so ``D_q`` is an explicit variable coupled by
     ``D_q - sum_i a_iq p_iq = 0``; the multiplier of that equality is the
@@ -176,7 +176,9 @@ def capability_gauge_pwl_lp_full(
 
     which is the capability-KKT analogue of the old max-min ``lambda* p`` and is
     the correct shadow price for the FULL task set (worst + bottom-k + average),
-    not just the worst target.  Returns ``(gamma*, p*, pi*)``.
+    not just the worst target.  Returns ``(gamma*, p*, pi_raw*, eta*)``;
+    ``pi_raw`` retains SciPy's equality-marginal sign, while ``eta >= 0`` is
+    the canonical multiplier of each normalized per-UAV budget inequality.
     """
     from scipy.optimize import linprog
 
@@ -187,10 +189,6 @@ def capability_gauge_pwl_lp_full(
     slopes = np.asarray(slopes, dtype=np.float64).reshape(-1)
     intercepts = np.asarray(intercepts, dtype=np.float64).reshape(-1)
     M = slopes.size
-
-    ceiling = np.sum(gain * budget[:, None], axis=0)
-    if np.any(ceiling < d_min - 1e-9):
-        return None
 
     # Variables: p (K*Q), gamma (1), D (Q), y (Q), tau (1), z (Q).
     n_p = K * Q
@@ -275,7 +273,58 @@ def capability_gauge_pwl_lp_full(
     # We return the marginals as-is; callers must apply the (test-validated)
     # sign in the geometry chain rule.
     pi = np.asarray(res.eqlin.marginals, dtype=np.float64).reshape(-1)
-    return gamma, p, pi
+    eta = np.maximum(
+        -np.asarray(res.ineqlin.marginals[-K:], dtype=np.float64).reshape(-1),
+        0.0,
+    )
+    if gamma > 1.0e-10:
+        # KKT stationarity in gamma: 1 - sum_i eta_i b_i = 0.  Keeping this
+        # executable prevents a heuristic scarcity score from being reported
+        # as the capability gauge's canonical resource dual.
+        stationarity = float(np.dot(eta, budget))
+        if abs(stationarity - 1.0) > 1.0e-6:
+            raise RuntimeError(
+                "capability-gauge budget dual violates gamma stationarity")
+    return gamma, p, pi, eta
+
+
+def capability_gauge_pwl_lp_full(
+    gain: np.ndarray,
+    budget: np.ndarray,
+    p_fa: float,
+    xi: tuple[float, float, float, int],
+    slopes: np.ndarray,
+    intercepts: np.ndarray,
+    d_min: float,
+) -> tuple[float, np.ndarray, np.ndarray] | None:
+    """Return ``(gamma*, p*, raw target equality marginal)``."""
+    out = _capability_gauge_pwl_lp_certificate_raw(
+        gain, budget, p_fa, xi, slopes, intercepts, d_min)
+    return None if out is None else out[:3]
+
+
+def capability_gauge_pwl_lp_certificate(
+    gain: np.ndarray,
+    budget: np.ndarray,
+    p_fa: float,
+    xi: tuple[float, float, float, int],
+    slopes: np.ndarray,
+    intercepts: np.ndarray,
+    d_min: float,
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return a locator-safe canonical L1 certificate.
+
+    Target price uses the positive convention
+    ``pi_q=-eqlin.marginal_q``.  Thus ``pi_q*a_ijq-eta_i`` is a reduced
+    capability contribution.  This certificate uses no joint-structure
+    feasibility query or witness information.
+    """
+    out = _capability_gauge_pwl_lp_certificate_raw(
+        gain, budget, p_fa, xi, slopes, intercepts, d_min)
+    if out is None:
+        return None
+    gamma, power, raw_pi, eta = out
+    return gamma, power, np.maximum(-raw_pi, 0.0), eta
 
 
 def capability_gauge_pwl_lp(
@@ -291,6 +340,102 @@ def capability_gauge_pwl_lp(
     out = capability_gauge_pwl_lp_full(
         gain, budget, p_fa, xi, slopes, intercepts, d_min)
     return None if out is None else out[0]
+
+
+def minimum_total_power_pwl_lp(
+    gain: np.ndarray,
+    budget: np.ndarray,
+    p_fa: float,
+    xi: tuple[float, float, float, int],
+    slopes: np.ndarray,
+    intercepts: np.ndarray,
+    d_min: float,
+) -> tuple[float, np.ndarray] | None:
+    """Minimum total sensing power for one fixed discrete structure.
+
+    The hard per-UAV budgets and all three task floors are retained.  Unlike
+    the capability gauge, this is the third stage of the G4 lexicographic
+    objective after the discrete closure and prepare-bit stages are fixed.
+    ``None`` means that this fixed structure is infeasible under the supplied
+    coefficient realization and physical budgets.
+    """
+    from scipy.optimize import linprog
+
+    rho_min, rho_tail, rho_avg, k = xi
+    value = np.asarray(gain, dtype=np.float64)
+    resource = np.asarray(budget, dtype=np.float64).reshape(-1)
+    slope = np.asarray(slopes, dtype=np.float64).reshape(-1)
+    intercept = np.asarray(intercepts, dtype=np.float64).reshape(-1)
+    if value.ndim != 2 or value.shape[0] != resource.size:
+        raise ValueError("gain/budget shapes inconsistent")
+    if (np.any(~np.isfinite(value)) or np.any(value < 0.0)
+            or np.any(~np.isfinite(resource)) or np.any(resource < 0.0)
+            or slope.size == 0 or slope.size != intercept.size):
+        raise ValueError("invalid fixed-structure power inputs")
+    K, Q = value.shape
+    if not 1 <= int(k) <= Q:
+        raise ValueError("tail order is outside target count")
+
+    # Variables: p(KQ), D(Q), y(Q), tau(1), z(Q).
+    n_p = K * Q
+    o_D = n_p
+    o_y = o_D + Q
+    o_tau = o_y + Q
+    o_z = o_tau + 1
+    n_vars = o_z + Q
+    objective = np.zeros(n_vars)
+    objective[:n_p] = 1.0
+
+    equality = np.zeros((Q, n_vars))
+    for q in range(Q):
+        equality[q, o_D + q] = 1.0
+        for i in range(K):
+            equality[q, i * Q + q] = -value[i, q]
+
+    rows = []
+    upper = []
+    for q in range(Q):
+        row = np.zeros(n_vars)
+        row[o_D + q] = -1.0
+        rows.append(row)
+        upper.append(-float(d_min))
+    for m in range(slope.size):
+        for q in range(Q):
+            row = np.zeros(n_vars)
+            row[o_D + q] = -slope[m]
+            row[o_y + q] = 1.0
+            rows.append(row)
+            upper.append(float(intercept[m]))
+    row = np.zeros(n_vars)
+    row[o_y:o_y + Q] = -1.0
+    rows.append(row)
+    upper.append(-Q * float(rho_avg))
+    for q in range(Q):
+        row = np.zeros(n_vars)
+        row[o_z + q] = -1.0
+        row[o_tau] = 1.0
+        row[o_y + q] = -1.0
+        rows.append(row)
+        upper.append(0.0)
+    row = np.zeros(n_vars)
+    row[o_tau] = -int(k)
+    row[o_z:o_z + Q] = 1.0
+    rows.append(row)
+    upper.append(-int(k) * float(rho_tail))
+    for i in range(K):
+        row = np.zeros(n_vars)
+        row[i * Q:(i + 1) * Q] = 1.0
+        rows.append(row)
+        upper.append(float(resource[i]))
+
+    result = linprog(
+        objective, A_ub=np.stack(rows), b_ub=np.asarray(upper),
+        A_eq=equality, b_eq=np.zeros(Q),
+        bounds=[(0.0, None)] * n_vars, method="highs")
+    if not result.success or result.x is None:
+        return None
+    power = np.asarray(result.x[:n_p], dtype=np.float64).reshape(K, Q)
+    return float(np.sum(power)), power
 
 
 def qos_constrained_maxmin_lp(
@@ -493,12 +638,32 @@ def qos_constrained_maxmin_lp(
     else:
         p = res.x[:n_p].reshape(K, Q)
     # Turn the budget inequalities into the exact per-UAV RF equality (slack to
-    # the best-gain target), matching the max-min LP convention.
+    # the best-gain target), matching the max-min LP convention.  When covertness
+    # rows are present (intercept_coeff), the fill must respect their headroom:
+    # the naive best-gain fill could violate sum_i aI[i,q] p_iq <= dbar_q exactly
+    # when the LP left slack because covertness binds (audit 2026-08-17, P0).
     p = np.maximum(p, 0.0).copy()
-    for i in range(K):
-        slack = float(budget[i] - np.sum(p[i]))
-        if slack > 1e-10:
-            p[i, int(np.argmax(gain[i]))] += slack
+    if intercept_coeff is not None and intercept_ub is not None:
+        c_norm = np.asarray(intercept_coeff, dtype=np.float64) / np.maximum(
+            np.asarray(intercept_ub, dtype=np.float64)[None, :], 1e-300)
+        for i in range(K):
+            slack = float(budget[i] - np.sum(p[i]))
+            while slack > 1e-10:
+                e_q = np.sum(c_norm * p, axis=0)
+                room = (1.0 - e_q) / np.maximum(c_norm[i, :], 1e-30)
+                q_fill = int(np.argmax(room))
+                if room[q_fill] <= 1e-12:
+                    break
+                add = min(slack, max(float(room[q_fill]), 0.0))
+                if add <= 1e-12:
+                    break
+                p[i, q_fill] += add
+                slack -= add
+    else:
+        for i in range(K):
+            slack = float(budget[i] - np.sum(p[i]))
+            if slack > 1e-10:
+                p[i, int(np.argmax(gain[i]))] += slack
     d = np.sum(gain * p, axis=0)
     return float(t_star), p, d
 

@@ -1,0 +1,4 @@
+extends: exp_800_k6q6_distributed_state_beacon8_replicated_l1.yaml
+
+marl:
+  hyperedge_state_bits_per_dim: 12

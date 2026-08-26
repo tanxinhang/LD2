@@ -1,0 +1,8 @@
+# Development safety branch: least-change pairwise movement projection.
+extends: exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25_bistatic_move_gamma50_tail40.yaml
+
+marl:
+  distributed_movement_safety_projection_enabled: true
+  # Two-endpoint worst-case error from 8-bit x/y absolute positions:
+  # 2 * 0.5 * hypot(1265/255, 1265/255) = 7.016 m.
+  distributed_movement_safety_margin_m: 7.1

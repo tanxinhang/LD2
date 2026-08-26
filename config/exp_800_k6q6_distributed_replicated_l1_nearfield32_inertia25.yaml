@@ -1,0 +1,5 @@
+# Stronger diagnostic for the same local-only temporal regularization.
+extends: exp_800_k6q6_distributed_replicated_l1_nearfield32.yaml
+
+marl:
+  distributed_replicated_power_inertia: 0.25

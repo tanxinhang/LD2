@@ -1,0 +1,7 @@
+# Common-view near-field refinement: 8-bit absolute state plus nearest-target
+# ID and 32 m relative residual. Adds physical state only, no certificates.
+extends: exp_800_k6q6_distributed_state_beacon8_replicated_l1.yaml
+
+marl:
+  hyperedge_nearfield_residual_enabled: true
+  hyperedge_nearfield_residual_range_m: 32.0

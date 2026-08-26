@@ -46,7 +46,7 @@ otfs:
   T_sym: 6.4e-5
   g_tx_dBi: 16.0
   g_rx_dBi: 16.0
-  n_cpi: 128                   # sensing radius ~120 m (kept; this is what makes 800 m non-trivial)
+  n_cpi: 1                     # post-G2 single executed OTFS-frame baseline
 
 channel:
   NF: 4.0

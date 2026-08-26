@@ -1,0 +1,6 @@
+# Diagnostic upper bound: every endpoint independently repeats the exact
+# role-partition solve over its delivered public-state cache.
+extends: exp_800_k6q6_distributed_state_beacon8.yaml
+
+marl:
+  hyperedge_coordination_mode: replicated_global

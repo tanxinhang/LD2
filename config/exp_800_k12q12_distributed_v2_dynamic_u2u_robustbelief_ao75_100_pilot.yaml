@@ -1,0 +1,7 @@
+# Same-seed refinement of the first AO pilot: retain the explicit 75 m
+# engineering near-distance guard, but postpone radius hold/formation updates
+# until 100 m so the sensing link budget is not sacrificed prematurely.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_ao_pilot.yaml
+
+marl:
+  distributed_ao_outer_radius_m: 100.0

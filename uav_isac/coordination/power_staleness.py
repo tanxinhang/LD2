@@ -1,4 +1,4 @@
-﻿"""Certified staleness bounds for the fixed-owner max-min power LP.
+"""Certified staleness bounds for the fixed-owner max-min power LP.
 
 When the fast layer holds a max-min power allocation ``p*`` while the geometry
 drifts, the realized worst-target Deflection can fall behind the value that a
@@ -194,3 +194,93 @@ def dd_gate_crossing(
         raise ValueError("g_dd tensors must share shape (K,K,Q)")
     floor = float(g_min)
     return (old >= floor) != (new >= floor)
+
+
+# ----------------------------------------------------------------------
+# C4 / advice 014 (2026-08-17): local active-set theorem for the DD gate.
+#
+# g_dd = |sinc(l_offset) * sinc(k_offset)| with l_offset, k_offset in
+# [-0.5, 0.5] the fractional OTFS delay/Doppler bin offsets, and
+# |sinc'| <= 4/pi on that interval.  Within ONE frame's position-only trust
+# region (velocities held), a displacement of size r changes
+#   |Delta l_offset| <= M*delta_f * 2r/c
+#   |Delta k_offset| <= N*T_sym * (fc/c) * r * (|v_tx|+2|v_t|+|v_rx|)/R_min
+# (delay via tau = R/c, path change <= 2r; Doppler via the unit-vector
+# rotation, |Delta u| <= r/R).  Hence a conservative Lipschitz constant of
+# g_dd w.r.t. position displacement (velocity held) is
+#   L_g = (4/pi) * [ M*delta_f*2/c
+#                    + N*T_sym*(fc/c)*(|v_tx|+2|v_t|+|v_rx|)/R_min ].
+# The active-set certificate is then: on every edge with
+#   |g_dd,ijq - g_min| > L_g * r
+# the indicator 1[g_dd >= g_min] is CONSTANT inside the radius-r trust region,
+# hence a_ijq is locally smooth/Lipschitz there (the support is fixed).  Edges
+# failing the condition are gate-uncertain -> the certificate fails closed:
+# the gain must be re-evaluated exactly at the moved geometry (which the L3
+# candidate path already does), never assumed smooth.
+#
+# Across frames the per-frame velocity model (v = step/dt) lets the Doppler
+# alignment swing by O(1) regardless of the step size, so NO across-frame
+# certificate exists: the deployment re-solves the tensor exactly every frame,
+# which is precisely the fail-closed behaviour the theorem prescribes.
+# ----------------------------------------------------------------------
+
+
+def dd_gate_position_lipschitz_constant(
+    M: int = 64,
+    delta_f: float = 1.5625e4,
+    T_sym: float = 6.4e-5,
+    N: int = 16,
+    fc: float = 2.8e10,
+    c: float = 3.0e8,
+    v_max: float = 25.0,
+    target_v_max: float = 5.0,
+    r_min: float = 100.0,
+) -> float:
+    """Conservative Lipschitz constant (per meter) of ``g_dd`` w.r.t. position.
+
+    Valid for a *position-only* displacement inside one frame (velocities held,
+    ``v_max``/``target_v_max`` bound the projected speeds, ``r_min`` the
+    shortest link distance).  ``|g_dd(x') - g_dd(x)| <= L_g * |x' - x|``.
+    Across frames (velocity = step/dt) there is no such bound: fail closed and
+    re-evaluate exactly (the deployment does this every frame).
+    """
+    delay_coef = M * delta_f * 2.0 / c
+    doppler_coef = (
+        N * T_sym * (fc / c) * (2.0 * v_max + 2.0 * target_v_max) / r_min)
+    return float((4.0 / np.pi) * (delay_coef + doppler_coef))
+
+
+def dd_gate_active_set_certificate(
+    g_dd: np.ndarray,
+    g_min: float,
+    r: float,
+    L_g: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Local active-set certificate for the DD gate inside a radius-``r`` trust region.
+
+    Returns ``(certified, uncertain, r_max)`` where
+
+    - ``certified[ijq] = |g_dd,ijq - g_min| > L_g * r``: the DD support
+      indicator is CONSTANT inside the region (``a_ijq`` locally smooth);
+    - ``uncertain[ijq] = ~certified[ijq]``: the gate may flip -> fail-closed
+      (re-evaluate exactly at the moved geometry, do not assume smoothness);
+    - ``r_max = min_ijq |g_dd,ijq - g_min| / L_g``: the largest trust-region
+      radius for which the current support is certified constant everywhere.
+
+    Soundness: if ``L_g`` is a true Lipschitz constant of ``g_dd`` (see
+    ``dd_gate_position_lipschitz_constant``), then a certified edge cannot
+    cross ``g_min`` under any displacement of size ``<= r``, by the triangle
+    inequality ``|g_dd' - g_dd| <= L_g * r < |g_dd - g_min|``.
+    """
+    dd = np.asarray(g_dd, dtype=np.float64)
+    if dd.ndim != 3:
+        raise ValueError("g_dd must have shape (K,K,Q)")
+    floor = float(g_min)
+    rr = float(r)
+    ll = float(L_g)
+    if rr < 0.0 or ll <= 0.0:
+        raise ValueError("r must be non-negative and L_g strictly positive")
+    margin = np.abs(dd - floor)
+    certified = margin > ll * rr
+    r_max = float(np.min(margin)) / ll
+    return certified, ~certified, r_max

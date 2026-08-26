@@ -4,7 +4,7 @@
 Turns "Gate passed" from documentation narrative into a script-enforced check:
 any formal run whose episode aggregates do not clear the Medium thresholds
 (steady >= 0.80, weak3 >= 0.70, mean worst >= 0.60, QoS feasible >= 0.70 with
-a one-sided Wilson LCB) exits non-zero, so a regression can never be
+the lower endpoint of a 95% two-sided Wilson interval) exits non-zero, so a regression can never be
 silently written into a docs table again.
 
 Two entry points:
@@ -39,7 +39,7 @@ Z_95 = 1.96
 
 
 def wilson_lower(successes: int, total: int, z: float = Z_95) -> float:
-    """Wilson lower confidence bound for a Bernoulli rate (z=1.96)."""
+    """Lower endpoint of the 95% two-sided Wilson interval (z=1.96)."""
     if total <= 0:
         return float("nan")
     p = successes / total
@@ -124,6 +124,26 @@ def read_episode_arrays(csv_path: str) -> Dict[str, List[float]]:
                 f"{csv_path} lacks column {column!r} (not a trainer paired_eval)")
         values = ast.literal_eval(raw[column])
         arrays[name] = [float(value) for value in values]
+    lengths = {name: len(values) for name, values in arrays.items()}
+    if not lengths["steady"]:
+        raise ValueError(f"{csv_path} contains no evaluation episodes")
+    if len(set(lengths.values())) != 1:
+        raise ValueError(
+            f"{csv_path} has misaligned episode arrays: {lengths}")
+    for name, values in arrays.items():
+        if any(not math.isfinite(value) or not 0.0 <= value <= 1.0
+               for value in values):
+            raise ValueError(
+                f"{csv_path} has non-finite/out-of-range {name} values")
+    seed_column = raw.get("eval_episode_seeds")
+    if seed_column:
+        seeds = [int(value) for value in ast.literal_eval(seed_column)]
+        if len(seeds) != lengths["steady"]:
+            raise ValueError(
+                f"{csv_path} seed count does not match episode arrays")
+        if len(set(seeds)) != len(seeds):
+            raise ValueError(f"{csv_path} contains duplicate evaluation seeds")
+        arrays["seeds"] = seeds
     return arrays
 
 

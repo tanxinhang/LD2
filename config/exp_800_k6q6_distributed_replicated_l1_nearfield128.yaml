@@ -1,0 +1,4 @@
+extends: exp_800_k6q6_distributed_replicated_l1_nearfield32.yaml
+
+marl:
+  hyperedge_nearfield_residual_range_m: 128.0

@@ -1,0 +1,6 @@
+# Conservative partial-view robust power: retain 75% uniformly for unknown
+# targets and use only 25% for private-cache reachable-target max-min.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25_snr41.yaml
+
+marl:
+  distributed_replicated_power_unknown_target_reserve: 0.75

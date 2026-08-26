@@ -1,0 +1,8 @@
+# Event-certified amortized 8x8 P0.  The long maximum hold makes the exact
+# mixed-integer solve computationally viable; a per-frame fixed-structure LP
+# is the safety trigger and uses the actual current sensing budgets.
+extends: exp_800_k8q8_budget_coupled_p0_primary.yaml
+
+marl:
+  p0_maxmin_pairing_hold_frames: 30
+  p0_maxmin_event_triggered_enabled: true

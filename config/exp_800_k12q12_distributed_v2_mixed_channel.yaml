@@ -1,0 +1,12 @@
+# Gate E: combined episode-level 3--5 ms operating profiles, correlated SNR
+# shadowing, FBL, and burst erasures.  This is a stress gate, not a training
+# distribution or a reliability certification protocol.
+extends: exp_800_k12q12_distributed_v2_fbl_burst5ms.yaml
+
+marl:
+  comm_channel_randomization_enabled: true
+  comm_channel_randomization_snr_threshold_db_values: [0.0, 3.0, 6.0]
+  comm_channel_randomization_deadline_s_values: [0.005, 0.004, 0.003]
+  comm_channel_randomization_profile_weights: [0.34, 0.33, 0.33]
+  comm_snr_shadowing_std_db: 3.0
+  comm_snr_shadowing_correlation: 0.85

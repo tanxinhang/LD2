@@ -1,0 +1,12 @@
+# ACK-free two-level movement coordination pilot. Every five frames each UAV
+# multiplexes one absolute local-belief target anchor into the already charged
+# 3-D near-field header; ordinary frames keep the original residual header.
+# With K=Q, one beacon round covers every target. All nodes then rebuild the
+# same deterministic matching locally and refresh movement responsibility.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  distributed_movement_anchor_broadcast_enabled: true
+  distributed_movement_anchor_broadcast_period_frames: 5
+  distributed_movement_anchor_max_age_frames: 10
+  distributed_greedy_matching_hold_frames: 5

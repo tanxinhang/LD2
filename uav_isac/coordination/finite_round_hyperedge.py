@@ -1,4 +1,4 @@
-﻿"""Finite-round learning-free coordination on sparse directed hyperedges.
+"""Finite-round learning-free coordination on sparse directed hyperedges.
 
 The protocol is an unfolded deterministic auction.  Candidate publication is
 external and must already respect the physical Token inbox.  Every update can

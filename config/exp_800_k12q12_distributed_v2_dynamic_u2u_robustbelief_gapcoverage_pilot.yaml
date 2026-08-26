@@ -1,0 +1,31 @@
+# Gap-coverage movement pilot (three-phase policy, Phase A + B safety net).
+#
+# Coverage invariant C1: every target must have a Tx and an Rx endpoint
+# within the critical radius (320 m ~ P_D>=0.6 operational radius).  The
+# deterministic gap-coverage assignment gives every uncovered target a Tx/Rx
+# responsibility, re-evaluated every frame so a target leaving the critical
+# radius is re-covered immediately (fixes the missed-target root cause found
+# by the deep audit).  Each node pursues the responsibility with the largest
+# remaining gap at full speed (fast far-field convergence); standoff clamps
+# the approach (safety invariant S1).
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_freshness_pilot.yaml
+
+marl:
+  # Gap-coverage is a separate movement ablation: disable the legacy
+  # distributed/analytical movement modes inherited from the base chain.
+  distributed_bistatic_bottleneck_movement_enabled: false
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_greedy_matching_movement_enabled: false
+  distributed_id_movement_enabled: false
+  distributed_role_capacity_movement_enabled: false
+  distributed_gap_coverage_movement_enabled: true
+  distributed_gap_critical_radius_m: 320.0
+  distributed_gap_capacity: 2
+  distributed_gap_standoff_m: 0.0
+  # Near-field focus (Phase B): only focus targets whose far endpoint really
+  # drags (>450 m), reducing resource preemption of other targets.
+  distributed_gap_complete_radius_m: 450.0
+  # Gap-coverage movement requires the public-view safety projection and
+  # execution of the projected action (validated in env_core).
+  distributed_movement_safety_projection_enabled: true
+  distributed_movement_execute_projected_public_action: true

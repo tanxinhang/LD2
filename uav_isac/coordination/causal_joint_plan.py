@@ -1,4 +1,4 @@
-﻿"""Causal finite-horizon joint-plan commitments for slow ISAC control."""
+"""Causal finite-horizon joint-plan commitments for slow ISAC control."""
 
 # ----------------------------------------------------------------------
 # AUDIT/RESEARCH-ONLY MODULE (2026-08-16 audit remediation)

@@ -1,0 +1,6 @@
+# Physical range-outage stress diagnostic: require 30 dB receive SNR while
+# retaining the 5 ms deadline. Losses arise from the RF link budget.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32.yaml
+
+marl:
+  comm_snr_threshold_db: 30.0

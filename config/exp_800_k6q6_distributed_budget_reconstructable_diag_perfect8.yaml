@@ -1,0 +1,8 @@
+# Diagnostic only: lossless/high-resolution public-state upper bound.  This
+# separates endpoint-state quantization error from distributed coordination.
+extends: exp_800_k6q6_distributed_budget_reconstructable.yaml
+
+marl:
+  comm_rate_bits_per_dim: [0, 4, 8]
+  comm_eval_force_rate_bits: 8
+  comm_deadline_s: 0.05

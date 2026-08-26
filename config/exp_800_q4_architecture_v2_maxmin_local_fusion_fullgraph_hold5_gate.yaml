@@ -4,3 +4,6 @@ extends: exp_800_q4_architecture_v2_maxmin_local_fusion_fullgraph_gate.yaml
 
 marl:
   p0_maxmin_pairing_hold_frames: 5
+  # G2-1A: the original bank contains permanently quarantined seeds.  Use the
+  # audited backfill bank; explicit historical final seeds remain paired.
+  eval_seed_bank_path: config/stratified_seeds_800_q4_v2.json

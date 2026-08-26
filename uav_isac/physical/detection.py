@@ -8,6 +8,72 @@ import numpy as np
 from uav_isac.utils.math_utils import Q_inverse, compute_PD, utility_from_D
 
 
+DETECTOR_CONVENTION = "real_gaussian_shift"
+DETECTOR_SCALE = 1.0
+
+
+def gaussian_shift_parameters(
+    deflection: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Parameters of the declared G2-0.5 sufficient-statistic model.
+
+    The detector is explicitly
+
+    ``H0: Z ~ N(0,1)``, ``H1: Z ~ N(sqrt(D),1)``.
+
+    Therefore ``D=(mu1-mu0)^2/var0`` and the Neyman--Pearson threshold is
+    ``Q^-1(P_FA)``.  We use the real-equivalent matched-filter convention,
+    so ``D=E_signal/E_noise`` and ``c_det=1``.  A complex convention whose
+    noise energy is ``E|n|^2`` can introduce a factor two; it is deliberately
+    not mixed into this model.
+    """
+    values = np.asarray(deflection, dtype=np.float64)
+    if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+        raise ValueError("deflection must be finite and non-negative")
+    mu0 = np.zeros_like(values)
+    mu1 = np.sqrt(values)
+    variance0 = np.ones_like(values)
+    variance1 = np.ones_like(values)
+    return mu0, mu1, variance0, variance1
+
+
+def monte_carlo_gaussian_shift_roc(
+    deflection: np.ndarray,
+    P_FA: float,
+    *,
+    samples: int,
+    seed: int,
+) -> dict[str, np.ndarray | float | int]:
+    """Monte-Carlo audit of the declared ``D -> ROC`` normalization."""
+    values = np.asarray(deflection, dtype=np.float64).reshape(-1)
+    mu0, mu1, _var0, _var1 = gaussian_shift_parameters(values)
+    p_fa = float(P_FA)
+    count = int(samples)
+    if not np.isfinite(p_fa) or not 0.0 < p_fa < 1.0:
+        raise ValueError("P_FA must lie in (0,1)")
+    if count < 1000:
+        raise ValueError("samples must be at least 1000")
+    threshold = float(Q_inverse(np.asarray(p_fa)))
+    rng = np.random.default_rng(int(seed))
+    h0 = rng.standard_normal(count)
+    h1_noise = rng.standard_normal((values.size, count))
+    h1 = mu1[:, None] + h1_noise
+    empirical_pfa = float(np.mean(h0 > threshold))
+    empirical_pd = np.mean(h1 > threshold, axis=1)
+    empirical_d = np.square(
+        np.mean(h1, axis=1) - float(np.mean(h0))) / float(np.var(h0))
+    return {
+        "samples": count,
+        "threshold": threshold,
+        "analytical_pfa": p_fa,
+        "empirical_pfa": empirical_pfa,
+        "analytical_pd": compute_PD(values, p_fa),
+        "empirical_pd": empirical_pd,
+        "analytical_deflection": values.copy(),
+        "empirical_deflection": empirical_d,
+    }
+
+
 def compute_detection_probabilities(
     D_q_star: np.ndarray,  # (Q,) cumulative Deflection per target
     P_FA: float            # false alarm probability
@@ -16,8 +82,9 @@ def compute_detection_probabilities(
 
     P_D^q = Q(Q^{-1}(P_FA) - sqrt(D_q^*))
 
-    This is the standard relationship for a deflection-based detector
-    under Gaussian statistics.
+    This relationship is exact for the declared real Gaussian shift model
+    returned by :func:`gaussian_shift_parameters`, not a convention-free
+    identity for every real/complex detector.
 
     Args:
         D_q_star: Cumulative effective Deflection per target

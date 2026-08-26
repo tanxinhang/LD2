@@ -14,8 +14,9 @@ uav:
   v_max: 25                    # m/s max flight speed
   d_safe: 20                   # m safe separation distance
   P_sense: 0.0251              # W = 14 dBm sensing power 鈥?Device-free MARL (TVT 2024): P^(r)=14 dBm
+  P_sense_max: 0.0251          # W hard sensing-waveform cap; joint RF slack may remain unused
   P_report: 0.25               # W reporting power 鈥?Device-free MARL comm power set {0.25..1 W}
-  P_isac_total: 1.0            # W per-UAV hard RF budget: P_comm + sum_q P_sense,q
+  P_isac_total: 1.0            # W per-UAV hard RF cap: P_comm + sum_q P_sense,q <= 1 W
   B_max: 50000                 # J initial battery energy
   P_fly_static: 80             # W hover power (rotorcraft)
   P_fly_coeff: 0.05            # speed-dependent coefficient (P_fly 鈭?v^2)
@@ -36,7 +37,7 @@ otfs:
   T_sym: 6.4e-5                # symbol period (s) = 1/delta_f
   g_tx_dBi: 16.0               # tx array gain (64-elem UAV phased array; lit: 8 dBi single / "large arrays")
   g_rx_dBi: 16.0               # rx array gain
-  n_cpi: 128                   # coherent integration frames -> sensing radius ~120 m (matches 400x400 area)
+  n_cpi: 1                     # G2-0.6: one explicitly executed OTFS frame per control action
 
 channel:
   NF: 4.0                      # noise figure (dB): kT*B*NF = 4e-21*1e6*2.51 = 1e-14 W = -110 dBm (TVT 2024 N0)
@@ -51,6 +52,7 @@ channel:
 
 detection:
   P_FA: 0.001                  # false alarm probability
+  c_det: 1.0                   # real Gaussian shift convention D=c_det*Es/En
   g_min: 0.5                   # DD effectiveness threshold
   K_q_max: 3                   # max reporting sources per target
   B_q: 64                      # soft info bits per report
@@ -64,6 +66,20 @@ p0_solver:
 marl:
   hidden_layers: [256, 256]    # actor/critic MLP architecture
   movement_decision_interval: 1 # hold only movement; communication/resources still update each frame
+  distributed_id_movement_enabled: false
+  distributed_id_movement_standoff_m: 0.0
+  distributed_greedy_matching_movement_enabled: false
+  distributed_greedy_matching_hold_frames: 150
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_coordination_use_local_belief_targets: false
+  distributed_movement_safety_margin_per_age_m: 0.0
+  distributed_movement_local_assignment_cache_enabled: false
+  distributed_movement_public_max_age_frames: 5
+  distributed_movement_stale_fail_closed: false
+  distributed_movement_execute_projected_public_action: false
+  distributed_movement_outside_invariant_recovery_enabled: false
+  distributed_movement_outside_invariant_recovery_gain: 1.0
+  distributed_movement_independently_composable_safety: false
   # Permit transmit/receive endpoint roles in different sensing sub-slots of
   # one frame. Disabled for exact backwards compatibility.
   multistatic_subslot_enabled: false
@@ -113,7 +129,16 @@ marl:
   hyperedge_deficit_gain: 2.0
   hyperedge_proxy_floor: 0.25
   hyperedge_pair_score_mode: endpoint_proxy
+  # replicated_global | reserved_endpoint | refined_endpoint
+  hyperedge_coordination_mode: replicated_global
   hyperedge_state_stream_enabled: false
+  # Dedicated state beacons may suppress the unused learned target token.
+  # A value of zero keeps the actor-selected message precision.
+  hyperedge_protocol_only_enabled: false
+  hyperedge_state_bits_per_dim: 0
+  hyperedge_tx_coalition_max: 2
+  hyperedge_robust_quantization_enabled: false
+  hyperedge_reserved_tx_nodes: []
   hyperedge_consensus_rounds: 2
   hyperedge_assignment_hold_frames: 1
   hyperedge_min_target_coverage: 1.0
@@ -124,9 +149,27 @@ marl:
   p0_maxmin_local_fusion_enabled: false
   p0_maxmin_event_triggered_enabled: false
   p0_maxmin_deficit_priority_gain: 3.0
+  p0_budget_coupled_structure_enabled: false
+  p0_budget_coupled_time_limit_s: 5.0
+  p0_budget_coupled_secondary_enabled: true
+  p0_budget_coupled_solver_mode: milp
+  p0_legacy_guard_qos_floors: []
+  p0_maxmin_event_qos_enabled: true
+  p0_topology_min_change_repair_enabled: false
   tracking_enabled: false      # fixed mission-known sensing targets; no Kalman tracking loop
   detection_fusion_mode: local_only # legacy_global | central_oracle | local_only | u2u_distributed
+  passive_multireceiver_evidence_enabled: false
+  passive_multireceiver_belief_update_enabled: false
+  u2u_belief_feedback_enabled: false
+  u2u_belief_feedback_mean_bits: 12
+  u2u_belief_feedback_cov_bits: 8
+  u2u_belief_feedback_aoi_bits: 8
+  u2u_belief_feedback_max_age_frames: 5
+  distributed_target_position_uncertainty_sigma: 0.0
   evidence_packet_topk: 1
+  evidence_packet_ambiguity_top2_enabled: false
+  evidence_packet_ambiguity_ratio: 0.5
+  evidence_packet_ambiguity_min_deflection: 0.0
   evidence_packet_owner_aware: true
   evidence_packet_llr_bits: 8
   evidence_packet_confidence_bits: 2
@@ -151,6 +194,21 @@ marl:
   comm_processing_delay_s: 0.0002
   comm_snr_threshold_db: 0.0
   comm_antenna_gain_dbi: 0.0
+  # Optional finite-blocklength normal approximation. Disabled to preserve
+  # historical Shannon artifacts; opt-in runs must report the target BLER.
+  comm_finite_blocklength_enabled: false
+  comm_finite_blocklength_target_bler: 0.00001
+  comm_finite_blocklength_max_channel_uses: 100000000
+  comm_finite_blocklength_sample_errors: true
+  comm_finite_blocklength_coding_snr_margin_db: 0.0
+  comm_snr_shadowing_std_db: 0.0
+  comm_snr_shadowing_correlation: 0.0
+  comm_burst_loss_enabled: false
+  comm_burst_good_to_bad_probability: 0.0
+  comm_burst_bad_to_good_probability: 1.0
+  comm_burst_good_drop_probability: 0.0
+  comm_burst_bad_drop_probability: 1.0
+  analytical_comm_snr_margin_db: 0.0
   # Episode-level paired channel profiles for robust-policy training.
   # Disabled by default, so formal fixed-channel evaluation is unchanged.
   comm_channel_randomization_enabled: false

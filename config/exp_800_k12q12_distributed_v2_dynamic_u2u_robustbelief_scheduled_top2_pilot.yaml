@@ -1,0 +1,13 @@
+# Scheduled-owner distributed evidence pilot.
+#
+# Each receiver broadcasts its two strongest local target statistics instead
+# of exposing a global receiver-quality matrix for owner election.  Relative
+# to Top-1 this adds one bounded (target-id, LLR, confidence) record per active
+# receiver; it is a short local-summary layer, not a second full-state round.
+# The inherited detector threshold remains an engineering diagnostic until a
+# fresh trace containing the scheduled fusion-owner directory is calibrated.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  evidence_packet_topk: 2
+  evidence_packet_calibration_profile: k12-scheduled-owner-top2-pending-recalibration

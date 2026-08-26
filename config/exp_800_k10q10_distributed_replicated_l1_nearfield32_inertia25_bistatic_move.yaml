@@ -1,0 +1,7 @@
+# Development-only L3: minimize the bottleneck predicted bistatic range
+# product instead of single-node travel distance. No additional message.
+extends: exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+marl:
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_bistatic_bottleneck_movement_enabled: true

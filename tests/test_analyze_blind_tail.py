@@ -6,6 +6,7 @@ import json
 import numpy as np
 
 from tools.analyze_blind_tail import (
+    _pearson_correlation,
     _wilson_lower,
     analyze,
 )
@@ -30,6 +31,12 @@ def test_wilson_lower_matches_reference():
     # Classic reference: 73/100 -> LCB ~0.636 (matches D1.5 blind100 report).
     assert abs(_wilson_lower(73, 100) - 0.6357) < 1e-3
     assert _wilson_lower(0, 10) == 0.0
+
+
+def test_pearson_correlation_has_defined_degenerate_behavior():
+    assert _pearson_correlation([1, 2, 3], [3, 2, 1]) == -1.0
+    assert _pearson_correlation([1, 1, 1], [1, 2, 3]) is None
+    assert _pearson_correlation([1, np.nan, 3], [3, 2, 1]) == -1.0
 
 
 def test_analyze_reports_qos_and_failure_mode(tmp_path):

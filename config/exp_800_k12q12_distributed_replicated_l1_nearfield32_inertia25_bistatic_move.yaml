@@ -1,0 +1,6 @@
+# K=Q=12 counterpart of the role-aware bistatic movement development branch.
+extends: exp_800_k12q12_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+marl:
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_bistatic_bottleneck_movement_enabled: true

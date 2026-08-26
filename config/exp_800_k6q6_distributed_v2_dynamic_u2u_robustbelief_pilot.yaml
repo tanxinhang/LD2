@@ -1,0 +1,29 @@
+# Dynamic-stack K=Q=6 same-caliber baseline (pre-fix engineering candidate)
+# for the paired scale test (audit priority #7).  Same detector operating
+# rule (K12 profile transferred unchanged) so the scale effect isolates the
+# coordination system.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+scenario:
+  K: 6
+  Q: 6
+  region_size: [980, 980]
+
+target:
+  omega_q: [0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667, 0.1666666667]
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_980_k6q6_v2.json
+  # K6 same-recipe calibration (tools/calibrate_dynamic_evidence.py, PFA 0.001).
+  evidence_packet_calibration_profile: k6-passiverx-rawllr-seed1019466100-engineering
+  evidence_packet_clip_max: 46.3658691062264
+  evidence_packet_standardized_threshold: 15.670904728936874
+  evidence_packet_confidence_log_boundaries:
+    - 3.3033380642710752
+    - 4.591577598621301
+    - 5.593089994929902
+  evidence_packet_confidence_representatives:
+    - 7.124520742645702
+    - 50.39136164551002
+    - 151.5472078873666
+    - 663.8700125447582

@@ -14,6 +14,31 @@ from typing import Dict, List, Optional
 from uav_isac.utils.types import BeliefState
 
 
+def compress_target_summary(
+    values: np.ndarray,
+    slots: int = 8,
+    reduction: str = 'mean',
+) -> np.ndarray:
+    """Compress an ordered target vector into fixed contiguous index bins."""
+    source = np.asarray(values, dtype=np.float64).reshape(-1)
+    count = max(1, int(slots))
+    if source.size < 1 or np.any(~np.isfinite(source)):
+        raise ValueError('values must be a finite non-empty target vector')
+    if reduction not in {'mean', 'max'}:
+        raise ValueError("reduction must be 'mean' or 'max'")
+    result = np.zeros(count, dtype=np.float64)
+    for slot, indices in enumerate(np.array_split(
+        np.arange(source.size, dtype=np.int64), count
+    )):
+        if indices.size:
+            result[slot] = (
+                float(np.mean(source[indices]))
+                if reduction == 'mean'
+                else float(np.max(source[indices]))
+            )
+    return result
+
+
 class ObservationBuilder:
     """Builds local observations for each UAV agent.
 
@@ -356,9 +381,23 @@ class ObservationBuilder:
                     if own_claims.shape != (self.Q,):
                         raise ValueError(
                             f'own target claims must have shape {(self.Q,)}')
-                agg_msg[:self.Q] = own_claims
-                agg_msg[self.Q:2 * self.Q] = (
-                    own_mask > 0.5).astype(np.float64)
+                if self.Q <= 8:
+                    # Preserve the historical layout exactly for all existing
+                    # 4/6/8-target checkpoints.
+                    agg_msg[:self.Q] = own_claims
+                    agg_msg[self.Q:2 * self.Q] = (
+                        own_mask > 0.5).astype(np.float64)
+                else:
+                    # The legacy aggregate block has only 16 scalars. For
+                    # larger systems, summarize claims and masks into two
+                    # deterministic eight-bin local-memory sketches instead
+                    # of overflowing the fixed observation or adding a free
+                    # communication channel.
+                    agg_msg[:8] = compress_target_summary(
+                        own_claims, slots=8, reduction='mean')
+                    agg_msg[8:] = compress_target_summary(
+                        (own_mask > 0.5).astype(np.float64),
+                        slots=8, reduction='max')
         obs_parts.append(agg_msg)  # 16 dims
 
         # --- Received network tokens for masked cross-attention ---

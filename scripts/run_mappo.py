@@ -4,6 +4,7 @@
 import sys
 import os
 import argparse
+import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
@@ -15,6 +16,14 @@ from uav_isac.environment.env_wrapper import UAVISACEnv
 from uav_isac.environment.action import ActionSpace
 from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.trainer import MAPPTrainer, load_stratified_seed_split
+from uav_isac.utils.provenance import (
+    build_run_provenance,
+    write_source_snapshot,
+)
+from uav_isac.evaluation.layer_provenance import (
+    canonical_json_sha256,
+    sha256_state_dict,
+)
 
 
 def main():
@@ -314,7 +323,10 @@ def main():
     action_space = ActionSpace(
         v_max=config.uav.v_max,
         dt=config.scenario.dt,
+        seed=seed,
         learn_roles=config.marl.learn_roles,
+        dp_parameterization=str(getattr(
+            config.marl, 'dp_parameterization', 'radial_clip')),
     )
     action_space.num_targets = config.scenario.Q
     action_space.structured_actor = True   # relational with 2-frame parsing
@@ -777,7 +789,7 @@ def main():
         print(f"Final actor loss: {actor_losses[-1]:.4f}" if actor_losses else "")
 
     # Save results for reproducibility and paired bootstrap
-    import csv, json as _json, subprocess as _sp
+    import csv, json as _json
     # Auto-derive variant from config name: exp_800_q4_full → full
     config_stem = os.path.splitext(os.path.basename(args.config or "config/default.yaml"))[0]
     variant = config_stem.replace("exp_800_q4_", "") if "exp_800_q4_" in config_stem else config_stem
@@ -801,15 +813,37 @@ def main():
                 'runtime': trainer.get_policy_runtime_state(),
             }, os.path.join(out_dir, "risk_critic_final.pt"))
 
-    # Commit hash
-    try:
-        commit = _sp.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
+    workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source_snapshot = write_source_snapshot(
+        workspace_root, os.path.join(out_dir, "source_snapshot.zip"))
+    provenance = build_run_provenance(
+        root=workspace_root,
+        config=config,
+        source_snapshot=source_snapshot,
+        checkpoint_paths=(args.warm_start, args.structure_student_checkpoint,
+                          args.local_move_ranker_checkpoint,
+                          args.factor_graph_coordinator_checkpoint),
+    )
+    deployed_policy_state_sha256 = sha256_state_dict(
+        trainer.agents[0].actor.state_dict())
+    checkpoint_binding = {
+        "deployed_policy_state_sha256": deployed_policy_state_sha256,
+        "input_checkpoints": provenance["checkpoints"],
+    }
+    structure_trace_run_binding = {
+        "code_sha256": provenance["source_snapshot"]["sha256"],
+        "config_sha256": provenance["resolved_config_sha256"],
+        "checkpoint_sha256": canonical_json_sha256(checkpoint_binding),
+        "checkpoint_binding": checkpoint_binding,
+        "git_commit": provenance["git_commit"],
+        "git_dirty": provenance["git_dirty"],
+    }
 
     # Manifest
     manifest = {
-        "git_commit": commit,
+        "git_commit": provenance["git_commit"],
+        "provenance": provenance,
+        "layer_trace_run_binding": structure_trace_run_binding,
         "config": args.config or "config/default.yaml",
         "seed": seed,
         "K": config.scenario.K, "Q": config.scenario.Q,
@@ -1308,6 +1342,7 @@ def main():
             evidence_trace_output=args.evidence_trace_output,
             structure_teacher_trace_output=(
                 args.structure_teacher_trace_output),
+            structure_trace_run_binding=structure_trace_run_binding,
             n5_counterfactual_output=args.n5_counterfactual_output,
             n5_counterfactual_max_events=max(
                 0, int(args.n5_counterfactual_max_events)),
@@ -1337,6 +1372,7 @@ def main():
         torch.save(checkpoint, os.path.join(out_dir, "best_restored.pt"))
     except Exception as e:
         print(f"  [warn] paired eval failed: {e}")
+        traceback.print_exc()
 
     print(f"Results saved → {out_dir}")
     env.close()

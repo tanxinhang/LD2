@@ -1,0 +1,7 @@
+# Near-feasibility-boundary range-outage diagnostic. At 30 dB the L0 power
+# allocator still delivered every packet; 41 dB is expected to expose links
+# whose required RF power exceeds the per-UAV total-power budget.
+extends: exp_800_k8q8_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+marl:
+  comm_snr_threshold_db: 41.0

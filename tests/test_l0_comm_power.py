@@ -26,11 +26,12 @@ def test_l0_reclaims_comm_slack_into_sensing_budget():
     actions = {str(k): {"delta_p": np.zeros(2), "role": 2} for k in range(4)}
     for _ in range(5):
         _, _, _, _, info = on.step(actions)
-    # Power balance must remain exact (1 W per UAV).
-    assert float(info["isac_max_power_balance_error_w"]) < 1e-12
-    # Sensing power is strictly positive and comm power bounded by 1 W.
+    # Both hardware caps hold; unused RF slack is physically allowed.
+    assert float(info["isac_max_power_budget_violation_w"]) < 1e-12
     sensing = np.asarray(info["isac_per_uav_sensing_power_w"], dtype=np.float64)
     assert np.all(sensing >= 0.0)
+    assert np.all(sensing <= on.cfg.uav.P_sense_max + 1e-12)
+    assert float(info["isac_unused_power_w"]) >= 0.0
     on.close()
 
 

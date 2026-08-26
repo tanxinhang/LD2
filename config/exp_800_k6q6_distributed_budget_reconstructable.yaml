@@ -1,0 +1,25 @@
+# Distributed L2 research candidate.
+#
+# Each UAV broadcasts quantized endpoint position/velocity and local target
+# capability through the physically charged U2U token channel. Every UAV
+# reconstructs the bistatic per-watt graph from its delivered public cache,
+# independently runs the same budget-feasible role/owner enumeration, and an
+# edge executes only after both directed endpoints endorse it. No centralized
+# P0 fallback is allowed. The environment's exact graph remains an execution
+# safety check and offline audit reference only.
+extends: exp_800_k6q6_budget_coupled_p0_satisficing_event.yaml
+
+marl:
+  p0_maxmin_event_triggered_enabled: false
+  p0_maxmin_bypass_commitment_filter: false
+  hyperedge_negotiation_enabled: true
+  hyperedge_pair_score_mode: budget_reconstructable
+  hyperedge_coordination_mode: reserved_endpoint
+  hyperedge_state_stream_enabled: true
+  # One target token carries the node-level four-scalar state header. The
+  # receiver expands that state across targets before physical reconstruction.
+  hyperedge_share_topk: 1
+  hyperedge_consensus_rounds: 1
+  hyperedge_assignment_hold_frames: 5
+  hyperedge_min_target_coverage: 1.0
+  hyperedge_safety_fallback_enabled: false

@@ -47,7 +47,9 @@ def test_lossless_quality_topk_uses_local_pre_observation_ranking():
         [2.0, 8.0, 0.0],
         [3.0, 4.0, 7.0],
     ])
-    top1 = lossless_quality_topk_pd(receiver_d, p_fa=0.001, topk=1)
+    owners = np.asarray([0, 1, 2])
+    top1 = lossless_quality_topk_pd(
+        receiver_d, p_fa=0.001, topk=1, fusion_owner=owners)
     np.testing.assert_array_equal(
         top1["selected_mask"],
         np.asarray([
@@ -60,7 +62,8 @@ def test_lossless_quality_topk_uses_local_pre_observation_ranking():
     np.testing.assert_allclose(
         top1["fused_deflection"], np.asarray([9.0, 8.0, 7.0]))
 
-    top2 = lossless_quality_topk_pd(receiver_d, p_fa=0.001, topk=2)
+    top2 = lossless_quality_topk_pd(
+        receiver_d, p_fa=0.001, topk=2, fusion_owner=owners)
     np.testing.assert_allclose(
         top2["fused_deflection"], np.asarray([11.0, 13.0, 7.0]))
 

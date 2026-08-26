@@ -82,25 +82,31 @@ class UAV:
         if dp_norm > max_dp:
             delta_p = delta_p * (max_dp / dp_norm)
 
-        # Update velocity (estimated from displacement)
+        # Update the endpoint and reflect both position and outgoing velocity
+        # at the same physical wall.  Previously the endpoint bounced but the
+        # stored velocity retained its incoming sign, so the published state
+        # was not a trajectory that the kinematic model could have executed.
+        next_xy = self.pos[:2] + delta_p
+        reflected = np.zeros(2, dtype=bool)
+        # z is fixed.
+        if next_xy[0] < 0:
+            next_xy[0] = -next_xy[0]
+            reflected[0] = True
+        elif next_xy[0] > self.area_w:
+            next_xy[0] = 2 * self.area_w - next_xy[0]
+            reflected[0] = True
+
+        if next_xy[1] < 0:
+            next_xy[1] = -next_xy[1]
+            reflected[1] = True
+        elif next_xy[1] > self.area_h:
+            next_xy[1] = 2 * self.area_h - next_xy[1]
+            reflected[1] = True
+        self.pos[:2] = next_xy
         if self.dt > 0:
-            self.vel = np.array([delta_p[0] / self.dt, delta_p[1] / self.dt, 0.0])
-
-        # Update position
-        self.pos[0] += delta_p[0]
-        self.pos[1] += delta_p[1]
-        # z is fixed
-
-        # Clamp to area bounds with soft bounce
-        if self.pos[0] < 0:
-            self.pos[0] = -self.pos[0]
-        elif self.pos[0] > self.area_w:
-            self.pos[0] = 2 * self.area_w - self.pos[0]
-
-        if self.pos[1] < 0:
-            self.pos[1] = -self.pos[1]
-        elif self.pos[1] > self.area_h:
-            self.pos[1] = 2 * self.area_h - self.pos[1]
+            outgoing = np.asarray(delta_p, dtype=np.float64) / self.dt
+            outgoing[reflected] *= -1.0
+            self.vel = np.array([outgoing[0], outgoing[1], 0.0])
 
         # Set role
         self.role = int(role)

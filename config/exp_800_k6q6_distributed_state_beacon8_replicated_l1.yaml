@@ -1,0 +1,19 @@
+# Certificate-light distributed L1 ablation. Each UAV reconstructs its own
+# fixed-structure gain view from the existing 8-bit state beacons, solves the
+# ordinary max-min LP locally, and executes only its own power row. No extra
+# primal/dual certificate or ACK payload is added.
+extends: exp_800_k6q6_distributed_state_beacon8.yaml
+
+marl:
+  distributed_replicated_power_enabled: true
+  task_constrained_power_enabled: false
+  bargaining_objective_enabled: false
+  intercept_constrained_power_enabled: false
+  analytical_sensing_power_reserve_pd: 0.0
+  # Retained for inherited analytical-movement config validation; the
+  # replicated L1 branch does not publish centralized dual prices.
+  analytical_structure_ranking_enabled: true
+  # Local numerical robustness only; it adds no certificate payload.
+  hyperedge_robust_quantization_enabled: true
+  # Keep the frozen L2 hold window so this ablation changes L1 only.
+  hyperedge_assignment_hold_frames: 5

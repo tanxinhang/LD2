@@ -1,0 +1,8 @@
+# Gate B: add correlated 3 dB U2U shadowing and tighten the deadline to 4 ms.
+extends: exp_800_k12q12_distributed_v2_fbl5ms.yaml
+
+marl:
+  comm_deadline_s: 0.004
+  comm_snr_shadowing_std_db: 3.0
+  comm_snr_shadowing_correlation: 0.85
+

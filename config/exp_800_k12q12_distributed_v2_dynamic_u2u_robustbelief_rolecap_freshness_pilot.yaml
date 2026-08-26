@@ -1,0 +1,27 @@
+# Combined role-capacity movement + decoupled belief-freshness schedule.
+#
+# The two audit fixes compound: the freshness schedule cuts posterior
+# staleness (AoI) and inter-node belief disagreement, which is the root cause
+# of the movement layer's low assignment agreement; with fresher beliefs the
+# role-capacity responsibilities should agree across viewers more often and
+# churn less, so the fleet approaches the weak targets without the
+# per-viewer stitching of the legacy modes.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_freshness_pilot.yaml
+
+marl:
+  # Role-capacity movement is a separate ablation: disable every legacy
+  # distributed/analytical movement mode inherited from the base chain.
+  distributed_bistatic_bottleneck_movement_enabled: false
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_greedy_matching_movement_enabled: false
+  distributed_id_movement_enabled: false
+  distributed_role_capacity_movement_enabled: true
+  distributed_role_capacity_standoff_m: 0.0
+  distributed_role_capacity_reassign_threshold: 0.05
+  distributed_role_capacity_hold_frames: 20
+  distributed_role_capacity_range_frames: 12
+  distributed_role_capacity_strategy_frames: 0
+  # Role-capacity movement requires the public-view safety projection and
+  # execution of the projected action (validated in env_core).
+  distributed_movement_safety_projection_enabled: true
+  distributed_movement_execute_projected_public_action: true

@@ -1,0 +1,44 @@
+{
+  "calibration_profile": "k8-passiverx-rawllr-seed1019466100-engineering",
+  "clip_max": 46.3658691062264,
+  "clip_selection": "decision-relevant saturation clip: minimum deflection for P_D=0.9999 at P_FA=0.001",
+  "confidence_bits": 2,
+  "confidence_log_boundaries": [
+    1.5177967283346017,
+    2.6285632321004253,
+    4.270257810384333
+  ],
+  "confidence_representatives": [
+    1.1409056781063462,
+    6.396841107952631,
+    30.02538976533576,
+    231.2085643346146
+  ],
+  "content_mode": "normal",
+  "frames": 150,
+  "independent_mc_selfcheck": {
+    "draws_per_frame": 1024,
+    "pfa": 0.0010481770833333333,
+    "seed": 20260826,
+    "steady_pd": 0.979949951171875,
+    "weak3_pd": 0.946533203125,
+    "worst_pd": 0.856103515625
+  },
+  "llr_bits": 8,
+  "num_agents": 8,
+  "num_targets": 8,
+  "positive_receiver_deflection_fraction": 0.4508333333333333,
+  "schema_version": 1,
+  "status": "single-seed engineering calibration; not reliability certification",
+  "threshold_calibration": {
+    "calibration_pfa": 0.001,
+    "hypothesis": "H0 only (deployed replicated statistic)",
+    "samples": 500000,
+    "seed": 20260825,
+    "standardized_threshold": 7.445412263490985,
+    "target_pfa": 0.001,
+    "valid_calibration_samples": 500000
+  },
+  "trace_path": "D:\\BYLW\\LD3\\results\\_cal_k8_validate\\receiver_evidence.npz",
+  "trace_seed": 1019466100
+}

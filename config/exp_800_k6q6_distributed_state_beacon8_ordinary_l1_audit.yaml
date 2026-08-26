@@ -1,0 +1,9 @@
+# Objective-only audit: retain centralized true-gain ordinary max-min L1 but
+# disable task-constrained lexicographic stages. This is not a candidate.
+extends: exp_800_k6q6_distributed_state_beacon8.yaml
+
+marl:
+  task_constrained_power_enabled: false
+  bargaining_objective_enabled: false
+  intercept_constrained_power_enabled: false
+  analytical_sensing_power_reserve_pd: 0.0

@@ -1,0 +1,4 @@
+extends: exp_800_k8q8_distributed_state_beacon8_diag_greedy_move.yaml
+
+marl:
+  hyperedge_reserved_tx_nodes: [1, 3, 5, 7]

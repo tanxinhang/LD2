@@ -1,6 +1,6 @@
 import numpy as np
 
-from tools.probe_crisis_gate import choose_threshold, temporal_hysteresis_gate
+from tools.probe_crisis_gate import choose_threshold, evaluate, temporal_hysteresis_gate
 
 
 def test_threshold_is_fit_from_scores_and_separates_simple_crises():
@@ -9,6 +9,18 @@ def test_threshold_is_fit_from_scores_and_separates_simple_crises():
     threshold = choose_threshold(score, label)
     prediction = score >= threshold
     np.testing.assert_array_equal(prediction, label)
+
+
+def test_binary_metrics_give_half_credit_to_auc_ties():
+    result = evaluate(
+        np.asarray([0.1, 0.5, 0.5, 0.9]),
+        np.asarray([False, False, True, True]),
+        threshold=0.5,
+    )
+    assert result["roc_auc"] == 0.875
+    assert result["balanced_accuracy"] == 0.75
+    assert result["precision"] == 2 / 3
+    assert result["recall"] == 1.0
 
 
 def test_temporal_gate_repairs_underload_immediately_and_waits_on_quality():

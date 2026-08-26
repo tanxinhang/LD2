@@ -1,0 +1,6 @@
+# Fixed-area counterpart: isolates target-count/extreme-value effects from the
+# constant-density region expansion used by the main scale audit.
+extends: exp_800_k10q10_distributed_replicated_l1_nearfield32_inertia25.yaml
+
+scenario:
+  region_size: [800, 800]

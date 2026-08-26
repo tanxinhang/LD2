@@ -1,0 +1,8 @@
+# Gate D2: same burst trace model as Gate D, but permit a three-frame public
+# cache.  The robust separation margin grows by 5 m per observed AoI frame;
+# data older than three frames still produces an explicit zero action.
+extends: exp_800_k12q12_distributed_v2_fbl_burst5ms.yaml
+
+marl:
+  comm_message_ttl_frames: 3
+  distributed_movement_public_max_age_frames: 3

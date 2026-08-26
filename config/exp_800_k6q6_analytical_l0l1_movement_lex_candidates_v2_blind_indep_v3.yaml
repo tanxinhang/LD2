@@ -1,0 +1,38 @@
+# V3-T4 rev4 (advice 015, 2026-08-17): dual-priced L2 structure coordination
+# LIVE, final A/B after the rev1-rev3b diagnosis.
+#
+# The A/B sequence established the failure mechanism precisely:
+#   rev1 (single-frame, no deficit, guard=0):   5/9 improve, 4/9 regress
+#   rev2 (persist + deficit + guard=0.02):      fixes 14/705 feasible
+#     perturbation, rescues 274 (+0.494), but 866 flips QoS PASS->FAIL
+#   rev3 (forward geometry gate, steps=1/5/20): ZERO rejects -- the gate is
+#     vacuous because the regression is NOT geometry drift (candidates stay
+#     non-worse under extrapolated geometry) but CLOSED-LOOP POLICY COUPLING:
+#     the commit changes the executed structure -> observations -> the frozen
+#     Student policy's comm/budget decisions diverge -> trajectory forks.
+#   rev3b (no cache persistence): 866 WORSE (-0.600) -- persistence is not
+#     the culprit; single-frame flapping is worse.
+#
+# The decisive quantity is the COMMIT GAIN relative to d_req: seed 866's four
+# commits all carry only +0.507 deflection (4.5% of d_req=11.18) -- marginal
+# reallocations that perturb the policy for no physical gain; seed 274's
+# commit carries +1.995 (17.8% of d_req) and delivers the big QoS win.  This
+# is exactly the V3-T2 proximal-guard lesson (marginal reallocations hurt the
+# geometry loop) and the D1.10-C churn guard (flip feasible OR raise t_min by
+# >= min_gain*d_req).  rev4 therefore raises the guard to
+#   v3_min_improvement_frac: 0.05  (= 0.05*d_req ~= 0.56 deflection),
+# which rejects 866's marginal commits (0.507 < 0.56) while keeping 274's
+# substantial one (1.995 > 0.56), and keeps everything else from rev2/rev3:
+#   v3_deficit_only: true           act only on QoS-infeasible structures
+#   v3_relax_route: true            abstain when the relaxed ceiling t_relax
+#                                   < d_req (geometry cannot deliver at all)
+#   v3_persist_commit: true         committed structure executes until the
+#                                   next P0 re-solve (rev3b proved this HELPS)
+#   v3_lookahead_steps: 1           forward geometry gate (kept; zero rejects
+#                                   in practice but cheap and fail-closed)
+#
+# A/B arm "ON": identical to the P1-3 6/6 independent-sampling blind config
+# (bank, eval_independent_env, structure student, warm start unchanged) plus
+# the V3 layer; the OFF arm is the parent config.
+extends: exp_800_k6q6_analytical_l0l1_movement_lex_candidates_v2_blind_indep.yaml
+

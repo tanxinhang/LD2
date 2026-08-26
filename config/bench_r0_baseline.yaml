@@ -50,7 +50,6 @@ marl:
   lagrangian_lr: 0.002
   lagrangian_max: 1.0
   lambda_report: 1.0e-05
-  lambda_report_comm: 1.0e-05
   learn_roles: false
   learned_comm_mode: 'off'
   lr: 0.0003
@@ -87,7 +86,7 @@ otfs:
   fc: 28000000000.0
   g_rx_dBi: 16.0
   g_tx_dBi: 16.0
-  n_cpi: 128
+  n_cpi: 1
 p0_solver:
   capacity_per_rx: 256
   latency_max: 0.005

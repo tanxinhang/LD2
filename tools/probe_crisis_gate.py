@@ -85,34 +85,61 @@ def load_gate_rows(path: str, decoder) -> dict:
 
 
 def choose_threshold(score: np.ndarray, label: np.ndarray) -> float:
-    from sklearn.metrics import balanced_accuracy_score
-
+    score, label = _validate_binary_inputs(score, label)
     candidates = np.unique(np.quantile(score, np.linspace(0.02, 0.98, 97)))
     best = (-np.inf, float(np.median(score)))
     for threshold in candidates:
-        value = balanced_accuracy_score(label, score >= threshold)
+        value = _balanced_accuracy(label, score >= threshold)
         if value > best[0]:
             best = (value, float(threshold))
     return best[1]
 
 
 def evaluate(score, label, threshold) -> dict:
-    from sklearn.metrics import (
-        balanced_accuracy_score,
-        precision_score,
-        recall_score,
-        roc_auc_score,
-    )
-
+    score, label = _validate_binary_inputs(score, label)
     prediction = score >= threshold
+    true_positive = int(np.count_nonzero(prediction & label))
+    predicted_positive = int(np.count_nonzero(prediction))
+    actual_positive = int(np.count_nonzero(label))
     return {
-        "roc_auc": float(roc_auc_score(label, score)),
-        "balanced_accuracy": float(balanced_accuracy_score(label, prediction)),
-        "precision": float(precision_score(label, prediction, zero_division=0)),
-        "recall": float(recall_score(label, prediction, zero_division=0)),
+        "roc_auc": _binary_roc_auc(label, score),
+        "balanced_accuracy": _balanced_accuracy(label, prediction),
+        "precision": (
+            true_positive / predicted_positive if predicted_positive else 0.0),
+        "recall": true_positive / actual_positive,
         "activation_rate": float(np.mean(prediction)),
         "threshold_from_train": float(threshold),
     }
+
+
+def _validate_binary_inputs(score, label) -> tuple[np.ndarray, np.ndarray]:
+    score = np.asarray(score, dtype=np.float64).reshape(-1)
+    label = np.asarray(label, dtype=bool).reshape(-1)
+    if score.size == 0 or score.size != label.size:
+        raise ValueError("score and label must be non-empty and equally sized")
+    if not np.all(np.isfinite(score)):
+        raise ValueError("score must contain only finite values")
+    if not np.any(label) or np.all(label):
+        raise ValueError("both binary classes are required")
+    return score, label
+
+
+def _balanced_accuracy(label: np.ndarray, prediction: np.ndarray) -> float:
+    """Binary macro recall: one half of sensitivity plus specificity."""
+    positive = label
+    negative = ~label
+    sensitivity = np.mean(prediction[positive])
+    specificity = np.mean(~prediction[negative])
+    return float(0.5 * (sensitivity + specificity))
+
+
+def _binary_roc_auc(label: np.ndarray, score: np.ndarray) -> float:
+    """Mann-Whitney AUC with half credit for tied positive/negative scores."""
+    positive = score[label]
+    negative = score[~label]
+    wins = np.count_nonzero(positive[:, None] > negative[None, :])
+    ties = np.count_nonzero(positive[:, None] == negative[None, :])
+    return float((wins + 0.5 * ties) / (positive.size * negative.size))
 
 
 def temporal_hysteresis_gate(

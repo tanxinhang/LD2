@@ -8,7 +8,29 @@ from tools.train_multiscale_structure_student import (
     _initialize_from_preservation_student,
     _seed_grouped_split,
     _selection_key,
+    _teacher_frame_gain,
 )
+
+
+def test_teacher_gain_uses_residual_watts_not_normalized_weights():
+    deff = np.zeros((1, 3, 3, 1), dtype=np.float64)
+    pair = np.zeros_like(deff)
+    # Owner j=2; actual powers are (1-.2)*1=.8 and (1-.5)*1=.5 W.
+    deff[0, 0, 2, 0] = 1.6
+    deff[0, 1, 2, 0] = 1.5
+    pair[0, 0, 2, 0] = 1.0
+    pair[0, 1, 2, 0] = 1.0
+    data = {
+        "privileged_d_eff": deff,
+        "sensing_weights": np.ones((1, 3, 1), dtype=np.float64),
+        "comm_fraction": np.asarray([[0.2, 0.5, 0.0]]),
+        "teacher_pair": pair,
+        "teacher_receiver_owner": np.asarray([[2]]),
+        "num_uavs": np.asarray([3]),
+        "num_targets": np.asarray([1]),
+    }
+    gain = _teacher_frame_gain(data, np.asarray([0]))
+    np.testing.assert_allclose(gain[0, :, 0], [2.0, 3.0, 0.0])
 from uav_isac.agents.frozen_structure_student import (
     FactorizedStructureStudent,
     FrozenStructureStudent,

@@ -1,0 +1,12 @@
+# Hard topology-validity event guard for the final 6x6 portfolio.  A cached
+# edge leaving the current physical graph triggers a full P0 refresh.  The
+# experimental fast bridge is kept in a separate config after its dev10 mean
+# and tail failed to dominate this hard-trigger controller.
+extends: exp_800_k6q6_budget_coupled_p0_satisficing.yaml
+
+marl:
+  p0_maxmin_event_triggered_enabled: true
+  # Hard topology-validity trigger only.  The soft instantaneous-QoS trigger
+  # caused harmful L2/L3 churn in the exposed dev10 A/B (QoS 9/10 -> 7/10).
+  p0_maxmin_event_qos_enabled: false
+  p0_topology_min_change_repair_enabled: false

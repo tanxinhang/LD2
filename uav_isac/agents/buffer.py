@@ -452,9 +452,14 @@ class RolloutBuffer:
         ret_flat = ret_flat * oracle_mask_flat
 
         # Normalize advantages (in-place on local, doesn't modify stored advantages)
-        adv_mean = adv_flat[adv_flat != 0].mean() if (adv_flat != 0).any() else 0.0
-        adv_std = adv_flat[adv_flat != 0].std() + 1e-8
-        adv_flat_norm = np.where(adv_flat != 0, (adv_flat - adv_mean) / adv_std, 0.0)
+        active_adv = adv_flat != 0
+        adv_flat_norm = np.zeros_like(adv_flat)
+        if np.any(active_adv):
+            adv_values = adv_flat[active_adv]
+            adv_mean = adv_values.mean()
+            adv_std = adv_values.std() + 1e-8
+            adv_flat_norm[active_adv] = (
+                adv_values - adv_mean) / adv_std
 
         result = {
             'obs': torch.as_tensor(obs_flat, dtype=torch.float32),

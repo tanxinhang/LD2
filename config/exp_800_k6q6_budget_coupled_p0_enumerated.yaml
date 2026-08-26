@@ -1,0 +1,7 @@
+# Fast feasible 6x6 role-partition decomposition, exact LP-certified power.
+extends: exp_800_k6q6_budget_coupled_p0_primary.yaml
+
+marl:
+  p0_budget_coupled_solver_mode: enumerated_role_ceiling
+  p0_maxmin_pairing_hold_frames: 5
+  p0_maxmin_event_triggered_enabled: false

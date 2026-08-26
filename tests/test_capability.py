@@ -113,6 +113,78 @@ def test_pwl_lp_sandwich():
             f"exact {gamma_exact} > conservative {gamma_conservative}")
 
 
+def test_pwl_capability_gauge_remains_defined_above_physical_budget():
+    """The gauge must report gamma>1, not erase the L1 fallback margin."""
+    from uav_isac.coordination.capability import capability_gauge_pwl_lp
+    from uav_isac.coordination.pwl_pd import saturating_chord_lower_bound
+    from uav_isac.physical.detection import (
+        minimum_deflection_for_detection_probability,
+    )
+
+    p_fa = 0.01
+    xi = (0.6, 0.6, 0.6, 1)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([xi[0]]), p_fa)[0])
+    slopes, intercepts, _ = saturating_chord_lower_bound(
+        p_fa, d_min, max(2.0 * d_min, d_min + 1.0), 1.0e-3)
+    gain = np.eye(2) * d_min
+    gamma = capability_gauge_pwl_lp(
+        gain, np.full(2, 0.5), p_fa, xi, slopes, intercepts, d_min)
+    assert gamma is not None
+    assert gamma > 1.0
+
+
+def test_capability_certificate_returns_canonical_budget_dual():
+    from uav_isac.coordination.capability import (
+        capability_gauge_pwl_lp_certificate,
+    )
+    from uav_isac.coordination.pwl_pd import saturating_chord_lower_bound
+    from uav_isac.physical.detection import (
+        minimum_deflection_for_detection_probability,
+    )
+
+    p_fa = 0.01
+    xi = (0.6, 0.6, 0.6, 1)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([xi[0]]), p_fa)[0])
+    slopes, intercepts, _ = saturating_chord_lower_bound(
+        p_fa, d_min, 3.0 * d_min, 1.0e-3)
+    budget = np.asarray([0.5, 0.5])
+    out = capability_gauge_pwl_lp_certificate(
+        np.eye(2) * d_min, budget, p_fa, xi,
+        slopes, intercepts, d_min)
+    assert out is not None
+    gamma, power, target_price, scarcity_price = out
+    assert gamma > 0.0
+    assert power.shape == (2, 2)
+    assert np.all(target_price >= 0.0)
+    assert np.all(scarcity_price >= 0.0)
+    assert np.dot(scarcity_price, budget) == pytest.approx(1.0, abs=1e-7)
+
+
+def test_fixed_structure_minimum_total_power_is_monotone_in_gain():
+    from uav_isac.coordination.capability import minimum_total_power_pwl_lp
+    from uav_isac.coordination.pwl_pd import saturating_chord_lower_bound
+    from uav_isac.physical.detection import (
+        minimum_deflection_for_detection_probability,
+    )
+
+    p_fa = 0.01
+    xi = (0.6, 0.6, 0.6, 1)
+    d_min = float(minimum_deflection_for_detection_probability(
+        np.asarray([xi[0]]), p_fa)[0])
+    slopes, intercepts, _ = saturating_chord_lower_bound(
+        p_fa, d_min, 3.0 * d_min, 1.0e-3)
+    gain = np.eye(2) * d_min
+    base = minimum_total_power_pwl_lp(
+        gain, np.full(2, 3.0), p_fa, xi, slopes, intercepts, d_min)
+    better = minimum_total_power_pwl_lp(
+        2.0 * gain, np.full(2, 3.0), p_fa, xi, slopes, intercepts, d_min)
+    assert base is not None and better is not None
+    assert np.isclose(base[0], 2.0, atol=1.0e-7)
+    assert np.isclose(better[0], 1.0, atol=1.0e-7)
+
+
 def test_envelope_gradient_matches_finite_difference():
     """L3-T2: d gamma*/d a_iq = -pi_q* p_iq* (capability-KKT envelope theorem)."""
     from uav_isac.coordination.capability import capability_gauge_pwl_lp_full

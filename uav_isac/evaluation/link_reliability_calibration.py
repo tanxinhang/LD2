@@ -282,14 +282,23 @@ def validate_frozen_link_reliability_epoch(
             f"training/calibration/validation episode leakage: {sorted(overlap)}")
     scores = episode_link_reliability_scores(
         observations, expected_episode_ids=validation_ids)
-    erasure_failures = tuple(
-        score.episode_id for score in scores
-        if score.erasure_score > epoch.erasure_bound
-    )
-    queue_failures = tuple(
-        score.episode_id for score in scores
-        if score.excess_queue_score_s > epoch.queue_bound_s
-    )
+    # Audit 2026-08-17: non-finite bounds (rank > n, or censored events storing
+    # inf scores) made the comparisons never True -> zero failures.  Fail closed:
+    # an uncalibratable epoch fails every validation episode.
+    erasure_bound = epoch.erasure_bound
+    queue_bound = epoch.queue_bound_s
+    if not math.isfinite(erasure_bound) or not math.isfinite(queue_bound):
+        erasure_failures = tuple(score.episode_id for score in scores)
+        queue_failures = erasure_failures
+    else:
+        erasure_failures = tuple(
+            score.episode_id for score in scores
+            if score.erasure_score > erasure_bound
+        )
+        queue_failures = tuple(
+            score.episode_id for score in scores
+            if score.excess_queue_score_s > queue_bound
+        )
     joint_failures = tuple(
         episode_id for episode_id in validation_ids
         if episode_id in set(erasure_failures) | set(queue_failures)

@@ -1,0 +1,12 @@
+# 6x6 task-satisficing guard: preserve the legacy structure-policy/L3
+# alignment only while its exact current-budget LP meets the complete
+# [worst, bottom-3, steady] task floors; otherwise invoke the scale-safe
+# enumerated repair.
+extends: exp_800_k6q6_budget_coupled_p0_enumerated.yaml
+
+marl:
+  p0_budget_coupled_solver_mode: satisficing_legacy_then_enumerated
+  p0_maxmin_pairing_hold_frames: 5
+  # Development robustness margin for six-frame structure staleness.  Must be
+  # re-calibrated on a selection split before blind certification.
+  p0_legacy_guard_qos_floors: [0.80, 0.85, 0.90, 3]

@@ -1,0 +1,19 @@
+# K=Q=12 same-recipe baseline (pre-fix) for the scale curve (audit #7).
+# Replaces the frozen detector constants with the deployed-statistic recipe
+# used at every scale; the frozen baseline candidate and its confirmation
+# numbers are unchanged.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_pilot.yaml
+
+marl:
+  evidence_packet_calibration_profile: k12-passiverx-rawllr-recal-seed1019466100-engineering
+  evidence_packet_clip_max: 46.3658691062264
+  evidence_packet_standardized_threshold: 5.216988848532336
+  evidence_packet_confidence_log_boundaries:
+    - 0.5072801398818568
+    - 2.1483379283367716
+    - 3.4975903161964745
+  evidence_packet_confidence_representatives:
+    - 0.1548524711921262
+    - 2.173105137641447
+    - 15.883958950146207
+    - 88.20443690068409

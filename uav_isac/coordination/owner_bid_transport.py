@@ -11,6 +11,7 @@ from uav_isac.coordination.owner_proposal_transport import (
     quantize_nonnegative_float16_lower,
     quantize_nonnegative_float16_upper,
 )
+from uav_isac.coordination.owner_gain_ceiling import owner_gain_ceiling
 from uav_isac.coordination.power_repair_transport import (
     _required_power_for_packet,
 )
@@ -124,10 +125,12 @@ def owner_capacity_bid_envelope(
     upper_bid = np.zeros((K, Q), dtype=np.float64)
     for receiver in range(K):
         for target in range(Q):
-            lower_values = lower[:, receiver, target] * budget
-            upper_values = upper[:, receiver, target] * budget
-            lower_value = float(np.sum(np.sort(lower_values)[-pair_limit:]))
-            upper_value = float(np.sum(np.sort(upper_values)[-pair_limit:]))
+            lower_value = owner_gain_ceiling(
+                lower[:, receiver, target],
+                budget_w=budget, pair_limit=pair_limit)
+            upper_value = owner_gain_ceiling(
+                upper[:, receiver, target],
+                budget_w=budget, pair_limit=pair_limit)
             lower_bid[receiver, target] = (
                 quantize_nonnegative_float16_lower(lower_value))
             upper_bid[receiver, target] = (

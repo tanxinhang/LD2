@@ -1,0 +1,2 @@
+extends: exp_800_k6q6_distributed_state_beacon8.yaml
+marl: {hyperedge_reserved_tx_nodes: [1]}

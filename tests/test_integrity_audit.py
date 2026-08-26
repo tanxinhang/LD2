@@ -73,6 +73,20 @@ class TestActionExecution:
         assert np.linalg.norm(actual) <= max_dp + 1e-9
         assert not np.allclose(actual, dp_cmd[:2] if len(dp_cmd) == 2 else actual, atol=0.5)
 
+    def test_boundary_bounce_reflects_outgoing_velocity(self, default_config):
+        """A reflected endpoint must publish the reflected velocity sign."""
+        uav = UAV(
+            uav_id=0,
+            initial_pos=np.array([0.5, 0.5, default_config.scenario.height]),
+            v_max=25.0,
+            dt=0.1,
+            area_size=(100.0, 100.0),
+            height=default_config.scenario.height,
+        )
+        uav.apply_action(np.array([-1.0, -2.0]), role=2)
+        np.testing.assert_allclose(uav.pos[:2], [0.5, 1.5])
+        np.testing.assert_allclose(uav.vel[:2], [10.0, 20.0])
+
     def test_action_space_clamp_is_unused_in_env_path(self):
         """ActionSpace.clamp() exists but env_core calls uav.apply_action directly."""
         from uav_isac.environment import env_core

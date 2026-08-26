@@ -1,4 +1,4 @@
-﻿"""Causal coefficient envelopes for the certified hierarchical controller.
+"""Causal coefficient envelopes for the certified hierarchical controller.
 
 Only lagged, actually excited sensing edges may refresh the target invariant.
 The invariant is directionally quantized and physically transported before a

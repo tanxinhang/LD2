@@ -121,3 +121,26 @@ def test_cli_rejects_missing_column(tmp_path):
         handle.write("a,b\n1,2\n")
     from tools.assert_gate_thresholds import main
     assert main([str(path)]) == 2
+
+
+def test_gate_rejects_misaligned_episode_arrays(tmp_path):
+    path = tmp_path / "misaligned.csv"
+    _write_csv(path, [0.9, 0.9], [0.8], [0.7, 0.7])
+    with pytest.raises(ValueError, match="misaligned episode arrays"):
+        assert_gate_from_csv(str(path))
+
+
+def test_gate_rejects_duplicate_episode_seeds(tmp_path):
+    path = tmp_path / "duplicates.csv"
+    _write_csv(path, [0.9, 0.9], [0.8, 0.8], [0.7, 0.7])
+    text = path.read_text(encoding="utf-8").replace("[0, 1]", "[7, 7]")
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate evaluation seeds"):
+        assert_gate_from_csv(str(path))
+
+
+def test_gate_rejects_nonfinite_or_out_of_range_metrics(tmp_path):
+    path = tmp_path / "out_of_range.csv"
+    _write_csv(path, [0.9], [0.8], [1.2])
+    with pytest.raises(ValueError, match="out-of-range worst"):
+        assert_gate_from_csv(str(path))

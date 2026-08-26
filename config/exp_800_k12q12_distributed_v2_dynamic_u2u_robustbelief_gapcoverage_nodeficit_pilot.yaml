@@ -1,0 +1,6 @@
+# Phase B ablation: deficit priority OFF (assignment order not skewed to
+# weak targets; coverage invariant C1 still enforced).
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_pilot.yaml
+
+marl:
+  distributed_gap_deficit_priority: false
