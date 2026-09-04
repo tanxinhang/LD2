@@ -1,0 +1,6 @@
+# Sensitivity-aware 44-bit state: global x/y=8, velocity=6, categorical
+# target code=4, bounded near-field residual=6.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_rr2_audit.yaml
+
+marl:
+  hyperedge_state_field_bits: [8, 8, 6, 6, 4, 6, 6]

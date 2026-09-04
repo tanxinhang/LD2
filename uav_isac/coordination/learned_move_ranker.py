@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from uav_isac.coordination.local_move_ranker import FEATURE_NAMES
+from uav_isac.utils.checkpoint_loading import safe_torch_load
 
 
 class LocalMoveRanker(nn.Module):
@@ -50,8 +51,16 @@ class FrozenLocalMoveRanker:
     """CPU inference wrapper with a stable NumPy interface."""
 
     def __init__(self, checkpoint: str | Path) -> None:
-        payload = torch.load(
-            Path(checkpoint), map_location="cpu", weights_only=False)
+        payload = safe_torch_load(
+            Path(checkpoint),
+            map_location="cpu",
+            description="local-move ranker checkpoint",
+            allow_legacy_numpy_float32=True,
+            required_keys=(
+                "alpha", "feature_mean", "feature_std", "hidden_dim",
+            ),
+            state_dict_keys=("model_state",),
+        )
         self.alpha = float(payload["alpha"])
         self.model = LocalMoveRanker(
             payload["feature_mean"],
@@ -66,4 +75,3 @@ class FrozenLocalMoveRanker:
         tensor = torch.as_tensor(features, dtype=torch.float32)
         rank_score, positive_logit = self.model(tensor)
         return (rank_score + self.alpha * positive_logit).cpu().numpy()
-

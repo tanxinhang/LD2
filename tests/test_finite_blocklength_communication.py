@@ -91,6 +91,51 @@ def test_protocol_only_packet_charges_exact_bits_and_hides_latent_payload():
     np.testing.assert_array_equal(delivered[0].message, np.zeros(16))
 
 
+def test_fixed_schema_header_override_is_charged_exactly():
+    model = _model(fbl=False)
+    positions = np.asarray([
+        [0.0, 0.0, 100.0],
+        [100.0, 0.0, 100.0],
+    ])
+    delivered, stats = model.transmit(
+        {0: np.ones(16)}, {0: 1}, positions,
+        extra_payload_bits={0: 32},
+        base_payload_dimensions={0: 0},
+        suppress_message_payload={0: True},
+        header_bits_by_sender={0: 16},
+    )
+    assert len(delivered) == 1
+    assert stats.total_bits == 16 + 32
+    assert stats.per_sender_bits[0] == 16 + 32
+
+
+def test_service_envelope_keeps_policy_latency_metadata_legacy():
+    positions = np.asarray([
+        [0.0, 0.0, 100.0],
+        [100.0, 0.0, 100.0],
+    ])
+    legacy_model = _model(fbl=True)
+    compact_model = _model(fbl=True)
+    legacy_delivery, legacy_stats = legacy_model.transmit(
+        {0: np.zeros(16)}, {0: 0}, positions,
+        extra_payload_bits={0: 28},
+        base_payload_dimensions={0: 0},
+        suppress_message_payload={0: True},
+    )
+    compact_delivery, compact_stats = compact_model.transmit(
+        {0: np.zeros(16)}, {0: 0}, positions,
+        extra_payload_bits={0: 12},
+        base_payload_dimensions={0: 0},
+        suppress_message_payload={0: True},
+        header_bits_by_sender={0: 16},
+        service_envelope_payload_bits_by_sender={0: 92},
+    )
+    assert len(legacy_delivery) == len(compact_delivery) == 1
+    assert compact_stats.mean_latency_s < legacy_stats.mean_latency_s
+    assert compact_delivery[0].latency_s == pytest.approx(
+        legacy_delivery[0].latency_s)
+
+
 def test_finite_blocklength_deadline_failure_is_fail_closed():
     model = _model(fbl=True, deadline_s=0.00021)
     positions = np.asarray([
@@ -198,6 +243,99 @@ def test_evidence_transport_uses_same_reliability_gate():
     assert result.attempted_links == 1
     assert result.delivered_links == 0
     assert not np.any(result.delivered_peer_mask)
+
+
+def test_synchronous_evidence_header_is_charged_inside_transport():
+    model = _model(fbl=False)
+    receiver_d = np.asarray([[4.0], [2.0]])
+    positions = np.asarray([
+        [0.0, 0.0, 100.0],
+        [100.0, 0.0, 100.0],
+    ])
+    layout = EvidencePacketLayout(
+        2, 1,
+        header_bits=16,
+        timestamp_bits=0,
+        confidence_bits=2,
+    )
+    result = route_structured_evidence(
+        receiver_d,
+        positions,
+        np.full(2, 0.25),
+        observation_frame=3,
+        topk=1,
+        llr_bits=8,
+        layout=layout,
+        link_model=model,
+        fusion_owner=np.asarray([0]),
+        owner_aware=True,
+    )
+    # One non-owner source sends: CRC16 + source1 + target1 + LLR8 + conf2.
+    assert result.active_senders == 1
+    assert result.total_bits == 28
+    assert result.payload_bits_by_sender[1] == 28
+
+
+def test_compact_evidence_service_envelope_preserves_legacy_delivery():
+    positions = np.asarray([
+        [0.0, 0.0, 100.0],
+        [100.0, 0.0, 100.0],
+    ])
+    receiver_d = np.asarray([[4.0], [2.0]])
+    legacy_layout = EvidencePacketLayout(
+        2, 1, header_bits=64, timestamp_bits=16, confidence_bits=2)
+    compact_layout = EvidencePacketLayout(
+        2, 1, header_bits=16, timestamp_bits=0, confidence_bits=2)
+    common = dict(
+        receiver_deflection=receiver_d,
+        positions=positions,
+        comm_power_w=np.full(2, 0.25),
+        observation_frame=3,
+        topk=1,
+        llr_bits=8,
+        fusion_owner=np.asarray([0]),
+        owner_aware=True,
+    )
+    legacy = route_structured_evidence(
+        **common, layout=legacy_layout, link_model=_model(fbl=True))
+    compact = route_structured_evidence(
+        **common,
+        layout=compact_layout,
+        service_envelope_layout=legacy_layout,
+        link_model=_model(fbl=True),
+    )
+    np.testing.assert_array_equal(
+        compact.delivery_matrix, legacy.delivery_matrix)
+    assert compact.total_bits < legacy.total_bits
+    assert compact.mean_latency_s < legacy.mean_latency_s
+    assert compact.total_energy_j == pytest.approx(legacy.total_energy_j)
+
+
+def test_four_bit_hyperedge_target_code_is_lossless_for_q12():
+    q = 12
+    normalized = np.arange(q + 1, dtype=np.float64) / q
+    encoded = InterUAVCommunicationModel.quantize_values_at_bits(
+        2.0 * normalized - 1.0, 4)
+    decoded = np.rint(0.5 * (encoded + 1.0) * q).astype(np.int64)
+    np.testing.assert_array_equal(decoded, np.arange(q + 1))
+    legacy = InterUAVCommunicationModel.quantize_values_at_bits(
+        2.0 * decoded.astype(np.float64) / q - 1.0, 8)
+    reference = InterUAVCommunicationModel.quantize_values_at_bits(
+        2.0 * normalized - 1.0, 8)
+    np.testing.assert_array_equal(legacy, reference)
+
+
+def test_crc10_closes_configured_undetected_error_budget():
+    target_bler = 1.0e-3
+    undetected_budget = 1.0e-6
+    assert target_bler * 2.0 ** -10 <= undetected_budget
+    assert target_bler * 2.0 ** -9 > undetected_budget
+
+
+def test_two_bit_aoi_is_lossless_under_three_frame_guard():
+    aoi = np.arange(4, dtype=np.int64)
+    encoded = np.minimum(aoi, (1 << 2) - 1)
+    np.testing.assert_array_equal(encoded, aoi)
 
 
 def test_fbl_rejects_shannon_optimal_bandwidth_l0():

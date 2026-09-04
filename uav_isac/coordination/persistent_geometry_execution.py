@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from uav_isac.utils.sentinels import AGE_EXPIRED
 
 from uav_isac.coordination.certified_geometry_repair import (
     CertifiedGeometryRepairDecision,
@@ -330,7 +331,7 @@ class FrozenTokenInbox:
             np.rint(link_age * float(observation_age_scale_frames)),
             -1.0,
         ).astype(np.int64)
-        decoded_age[np.arange(K), np.arange(K)] = -1
+        decoded_age[np.arange(K), np.arange(K)] = AGE_EXPIRED
         mask = mask.copy()
         mask[np.arange(K), np.arange(K), :] = False
         return cls(mask, decoded_age, int(ttl_frames))
@@ -379,7 +380,7 @@ class FrozenTokenInbox:
         retained = next_age >= 0
         next_age[retained] += 1
         expired = next_age > int(self.ttl_frames)
-        next_age[expired] = -1
+        next_age[expired] = AGE_EXPIRED
         next_mask = self.token_mask.copy()
         next_mask[expired, :] = False
         for delivery in deliveries:
@@ -393,7 +394,7 @@ class FrozenTokenInbox:
             next_mask[receiver, sender] = token_mask
             next_age[receiver, sender] = 0
         next_mask[np.arange(K), np.arange(K), :] = False
-        next_age[np.arange(K), np.arange(K)] = -1
+        next_age[np.arange(K), np.arange(K)] = AGE_EXPIRED
         return FrozenTokenInbox(
             token_mask=next_mask,
             age_frames=next_age,
@@ -406,7 +407,7 @@ class FrozenTokenInbox:
         retained = next_age >= 0
         next_age[retained] += 1
         expired = next_age > int(self.ttl_frames)
-        next_age[expired] = -1
+        next_age[expired] = AGE_EXPIRED
         next_mask = self.token_mask.copy()
         next_mask[expired, :] = False
         return FrozenTokenInbox(

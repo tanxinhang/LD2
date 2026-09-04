@@ -1,0 +1,12 @@
+# Algorithmic screening candidate: execute each node's current private-LP row
+# without the historical 25% convex lag.  For the node-local LP dual price
+# lambda_k, the fresh row maximizes the separable response
+#   b_k max_q lambda_kq a_kq
+# over its RF simplex, so mixing a stale row cannot improve that certified
+# current-view linear response.  This does not by itself prove global max-min
+# dominance under disagreeing private views; promotion therefore requires
+# paired closed-loop tail evidence and no stability regression.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  distributed_replicated_power_inertia: 0.0

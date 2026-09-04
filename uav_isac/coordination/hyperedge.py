@@ -13,11 +13,33 @@ from typing import Dict, Iterable, Tuple, Union
 
 import numpy as np
 
-from uav_isac.physical.geometry import compute_all_bistatic_params
-from uav_isac.physical.otfs import compute_dd_effectiveness
+from uav_isac.physical.geometry import C_LIGHT
 
 
 Hyperedge = Tuple[int, int, int]
+
+
+def _sinc_alignment_lower_array(
+    center: np.ndarray,
+    radius: np.ndarray,
+) -> np.ndarray:
+    """Minimum ``abs(sinc(x-round(x)))`` on interval ``center +/- radius``."""
+    x = np.asarray(center, dtype=np.float64)
+    r = np.asarray(radius, dtype=np.float64)
+    left = x - r
+    right = x + r
+    crosses_half_integer = (
+        np.ceil(left - 0.5) <= np.floor(right - 0.5))
+    endpoint_distance = np.minimum(0.5, np.maximum(
+        np.abs(left - np.round(left)),
+        np.abs(right - np.round(right)),
+    ))
+    distance = np.where(
+        (r >= 0.5) | crosses_half_integer,
+        0.5,
+        endpoint_distance,
+    )
+    return np.abs(np.sinc(distance))
 
 
 def deterministic_bottleneck_cost_assignment(
@@ -105,7 +127,7 @@ def role_capacity_bottleneck_assignment(
     *,
     height_m: float,
     capacity: Union[int, Tuple[int, int]],
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float, bool]:
     """Capacitated Tx/Rx geometric responsibility assignment.
 
     For each role (the public Tx partition and its Rx complement), solve
@@ -125,11 +147,15 @@ def role_capacity_bottleneck_assignment(
     reproduce identical responsibilities without any global optimizer
     certificate.
 
-    Returns ``(tx_responsibility, rx_responsibility, bottleneck_cost)`` where
+    Returns ``(tx_responsibility, rx_responsibility, bottleneck_cost,
+    feasible)`` where
     each responsibility array has shape ``(K, Q)`` with 1 marking that node
     ``k`` holds the geometric responsibility for target ``q`` in that role, and
     ``bottleneck_cost`` is the worst-case squared range ``H^2 + ||x - z||^2``
-    over both roles after the assignment.
+    over both roles after the assignment.  If either role lacks enough total
+    capacity, both responsibility arrays are zero, the cost is ``inf``, and
+    ``feasible`` is false; an infeasible assignment is never represented by a
+    misleading zero bottleneck.
     """
     nodes = np.asarray(node_positions_xy, dtype=np.float64)
     targets = np.asarray(target_positions_xy, dtype=np.float64)
@@ -153,7 +179,7 @@ def role_capacity_bottleneck_assignment(
     Q = int(targets.shape[0])
     if K == 0 or Q == 0:
         empty = np.zeros((K, Q), dtype=np.int8)
-        return empty, empty, 0.0
+        return empty, empty, 0.0, True
     if np.all(roles) or not np.any(roles):
         raise ValueError("role-capacity assignment requires both Tx and Rx")
 
@@ -165,22 +191,22 @@ def role_capacity_bottleneck_assignment(
     rx_resp = np.zeros((K, Q), dtype=np.int8)
     worst = 0.0
 
-    def solve_role(role_nodes: np.ndarray, is_tx: bool) -> None:
+    def solve_role(role_nodes: np.ndarray, is_tx: bool) -> bool:
         nonlocal worst
         count = int(role_nodes.size)
         if count == 0:
-            return
+            return False
         cap = tx_cap if is_tx else rx_cap
         rows = np.repeat(role_nodes, cap)
         if rows.size < Q:
             # Not enough duplicated rows to cover every target: the requested
             # capacity is below ceil(Q/|K_r|).  Fail closed (no responsibility
             # for this role) rather than silently dropping targets.
-            return
+            return False
         role_cost = range_sq[rows]  # (rows, Q)
         finite = role_cost[np.isfinite(role_cost)]
         if finite.size == 0:
-            return
+            return False
         thresholds = np.unique(finite)
         lo, hi = 0, len(thresholds) - 1
         best = float(thresholds[-1])
@@ -203,7 +229,7 @@ def role_capacity_bottleneck_assignment(
             else:
                 lo = mid + 1
         if not found:
-            return
+            return False
         scale = max(float(np.max(finite)), 1.0)
         penalty = scale * (rows.size + 1)
         restricted = np.where(
@@ -217,6 +243,11 @@ def role_capacity_bottleneck_assignment(
         )
         assigned_rows, assigned_cols = linear_sum_assignment(
             restricted + tie)
+        if (
+            assigned_cols.size != Q
+            or np.any(restricted[assigned_rows, assigned_cols] >= penalty)
+        ):
+            return False
         for row, col in zip(assigned_rows, assigned_cols):
             node = int(rows[row])
             if is_tx:
@@ -224,12 +255,23 @@ def role_capacity_bottleneck_assignment(
             else:
                 rx_resp[node, col] = 1
             worst = max(worst, float(role_cost[row, col]))
+        return True
 
     tx_nodes = np.flatnonzero(roles)
     rx_nodes = np.flatnonzero(~roles)
-    solve_role(tx_nodes, is_tx=True)
-    solve_role(rx_nodes, is_tx=False)
-    return tx_resp, rx_resp, worst
+    tx_feasible = solve_role(tx_nodes, is_tx=True)
+    rx_feasible = solve_role(rx_nodes, is_tx=False)
+    feasible = bool(
+        tx_feasible
+        and rx_feasible
+        and np.all(tx_resp.sum(axis=0) == 1)
+        and np.all(rx_resp.sum(axis=0) == 1)
+    )
+    if not feasible:
+        tx_resp.fill(0)
+        rx_resp.fill(0)
+        return tx_resp, rx_resp, float("inf"), False
+    return tx_resp, rx_resp, worst, True
 
 
 def gap_coverage_bottleneck_assignment(
@@ -243,9 +285,11 @@ def gap_coverage_bottleneck_assignment(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Deterministic gap-coverage Tx/Rx responsibility assignment.
 
-    The coverage invariant C1 requires every target to have at least one Tx
-    endpoint and one Rx endpoint within ``critical_radius_m`` (the P_D >= 0.6
-    operational radius).  Targets violating C1 form the uncovered set U; each
+    The geometric coverage objective asks for every target to have at least
+    one Tx endpoint and one Rx endpoint within ``critical_radius_m``.  This is
+    a design radius, not a universal P_D threshold: detection also depends on
+    power, DD support, fusion and both endpoint ranges.  Targets violating the
+    objective form the uncovered set U; each
     uncovered target receives a responsibility from the closest endpoint of
     the missing role (Tx first when both are missing), subject to a per-node
     ``capacity``.  Greedy order is fully deterministic (target id ascending;
@@ -326,8 +370,10 @@ def gap_coverage_bottleneck_assignment(
             return True
         return False
 
-    # 1) Safety net first (weakest targets first): every uncovered target
-    #    receives the missing role(s) so C1 is re-established immediately.
+    # 1) Recovery responsibilities first (weakest targets first): every
+    #    uncovered target receives the missing role(s).  This does not make
+    #    the geometry covered instantaneously; it assigns movers that reduce
+    #    the deficit over subsequent safe steps.
     for target in order:
         target = int(target)
         if not uncovered[target]:
@@ -730,6 +776,7 @@ def project_pairwise_safe_movement(
     outside_invariant_recovery: bool = False,
     recovery_gain: float = 1.0,
     independently_composable: bool = False,
+    analytic_composable_projection: bool = False,
 ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, object]]]:
     """Project fleet movement onto a conservative one-step safety set.
 
@@ -744,15 +791,21 @@ def project_pairwise_safe_movement(
     no constraint because bounded movements cannot reach the unsafe set in one
     frame.  The strictly convex least-change objective preserves the sensing
     movement whenever it is already safe.  Per-node Euclidean speed balls and
-    rectangular flight bounds are enforced by SLSQP.
+    rectangular flight bounds are enforced exactly.  With endpoint-split
+    constraints containing zero, ``analytic_composable_projection`` uses the
+    projection variational inequality to prove that the speed balls are
+    redundant, reducing the nonlinear program exactly to a linearly
+    constrained quadratic projection. Failed proof premises retain the full
+    SLSQP problem.
     """
-    from scipy.optimize import minimize
     from time import perf_counter
 
     started = perf_counter()
     initially_safe = True
     minimum_initial_distance = float('inf')
     recovery_pair_count = 0
+    projection_solver = 'certified_noop'
+    analytic_fallback = False
 
     def finish(
         value: np.ndarray,
@@ -771,6 +824,8 @@ def project_pairwise_safe_movement(
             'initially_safe': bool(initially_safe),
             'minimum_initial_distance_m': float(minimum_initial_distance),
             'recovery_pair_count': int(recovery_pair_count),
+            'projection_solver': str(projection_solver),
+            'analytic_fallback': bool(analytic_fallback),
         }
 
     positions = np.asarray(node_positions_xy, dtype=np.float64)
@@ -907,40 +962,66 @@ def project_pairwise_safe_movement(
     x0 = np.zeros_like(desired).reshape(-1)
     lower_bound = np.maximum(-step, -positions).reshape(-1)
     upper_bound = np.minimum(step, area[None, :] - positions).reshape(-1)
-    constraints = []
-    if rows:
-        matrix = np.asarray(rows, dtype=np.float64)
-        rhs = np.asarray(lower, dtype=np.float64)
-        constraints.append({
-            'type': 'ineq',
-            'fun': lambda value, A=matrix, b=rhs: A @ value - b,
-            'jac': lambda value, A=matrix, b=rhs: A,
-        })
-    constraints.append({
-        'type': 'ineq',
-        'fun': lambda value: (
-            step * step
-            - np.sum(value.reshape(K, 2) ** 2, axis=1)),
-        'jac': lambda value: np.asarray([
-            np.concatenate([
-                np.zeros(2 * node),
-                -2.0 * value.reshape(K, 2)[node],
-                np.zeros(2 * (K - node - 1)),
-            ])
-            for node in range(K)
-        ]),
-    })
-    result = minimize(
-        lambda value: 0.5 * float(np.sum(
-            (value - recovery_reference.reshape(-1)) ** 2)),
-        x0,
-        jac=lambda value: value - recovery_reference.reshape(-1),
-        bounds=list(zip(lower_bound, upper_bound)),
-        constraints=constraints,
-        method='SLSQP',
-        options={'ftol': 1.0e-10, 'maxiter': 200, 'disp': False},
+    matrix = np.asarray(rows, dtype=np.float64).reshape(-1, 2 * K)
+    rhs = np.asarray(lower, dtype=np.float64)
+
+    # When every affine/bound constraint contains zero and the reference is
+    # inside the speed balls, those balls are mathematically redundant.  For
+    # C closed, convex and 0 in C, the projection variational inequality gives
+    #   <x-P_C(x), -P_C(x)> <= 0,
+    # hence ||P_C(x)||^2 <= <x,P_C(x)> and ||P_C(x)|| <= ||x||.
+    # The guarded reduction removes K nonlinear constraints without changing
+    # the optimizer. Defensive states that violate any premise keep them.
+    reduced_linear_qp = bool(
+        analytic_composable_projection
+        and independently_composable
+        and np.all(rhs <= 1.0e-12)
+        and np.all(lower_bound <= 1.0e-12)
+        and np.all(upper_bound >= -1.0e-12)
+        and np.all(np.linalg.norm(recovery_reference, axis=1) <= step + 1.0e-12)
     )
-    projected = np.asarray(result.x, dtype=np.float64).reshape(K, 2)
+
+    projected: np.ndarray | None = None
+
+    if projected is None:
+        from scipy.optimize import minimize
+
+        projection_solver = (
+            'reduced_linear_qp' if reduced_linear_qp
+            else ('slsqp_fallback' if analytic_fallback else 'slsqp'))
+        constraints = []
+        if rows:
+            constraints.append({
+                'type': 'ineq',
+                'fun': lambda value, A=matrix, b=rhs: A @ value - b,
+                'jac': lambda value, A=matrix, b=rhs: A,
+            })
+        if not reduced_linear_qp:
+            constraints.append({
+                'type': 'ineq',
+                'fun': lambda value: (
+                    step * step
+                    - np.sum(value.reshape(K, 2) ** 2, axis=1)),
+                'jac': lambda value: np.asarray([
+                    np.concatenate([
+                        np.zeros(2 * node),
+                        -2.0 * value.reshape(K, 2)[node],
+                        np.zeros(2 * (K - node - 1)),
+                    ])
+                    for node in range(K)
+                ]),
+            })
+        result = minimize(
+            lambda value: 0.5 * float(np.sum(
+                (value - recovery_reference.reshape(-1)) ** 2)),
+            x0,
+            jac=lambda value: value - recovery_reference.reshape(-1),
+            bounds=list(zip(lower_bound, upper_bound)),
+            constraints=constraints,
+            method='SLSQP',
+            options={'ftol': 1.0e-10, 'maxiter': 200, 'disp': False},
+        )
+        projected = np.asarray(result.x, dtype=np.float64).reshape(K, 2)
     projected_next = positions + projected
     if K >= 2:
         projected_pair_distance = np.linalg.norm(
@@ -985,6 +1066,92 @@ def project_pairwise_safe_movement(
         fail_closed=False,
         constraint_count=len(rows),
     )
+
+
+def is_pairwise_safe_movement(
+    node_positions_xy: np.ndarray,
+    desired_delta_xy: np.ndarray,
+    *,
+    minimum_distance_m: float,
+    maximum_step_m: float,
+    area_size_xy: Tuple[float, float],
+    outside_invariant_recovery: bool = False,
+    independently_composable: bool = False,
+    analytic_composable_projection: bool = False,
+) -> bool:
+    """Return whether the safety projector is provably an exact no-op.
+
+    This is the analytic feasibility predicate used by
+    :func:`project_pairwise_safe_movement`: endpoint separation, affine
+    barrier, per-node speed and flight-area constraints must all hold.  When
+    recovery is requested from outside the invariant set, the answer is
+    deliberately false because the projector also applies a recovery bias.
+    ``analytic_composable_projection`` does not alter feasibility; it is
+    accepted so callers can share one safety-configuration mapping with the
+    projector.
+
+    The function is useful for candidate envelopes: if every candidate is a
+    certified no-op, they may be scored before projection and only the winner
+    needs to pass through the projector.  This removes redundant optimization
+    without weakening the post-projection ordering guarantee.
+    """
+    positions = np.asarray(node_positions_xy, dtype=np.float64)
+    desired = np.asarray(desired_delta_xy, dtype=np.float64)
+    if (
+        positions.ndim != 2 or positions.shape[1:] != (2,)
+        or desired.shape != positions.shape
+        or np.any(~np.isfinite(positions))
+        or np.any(~np.isfinite(desired))
+    ):
+        raise ValueError("invalid pairwise movement feasibility inputs")
+    distance = max(float(minimum_distance_m), 0.0)
+    step = max(float(maximum_step_m), 0.0)
+    area = np.asarray(area_size_xy, dtype=np.float64).reshape(-1)
+    if area.shape != (2,) or np.any(~np.isfinite(area)) or np.any(area <= 0.0):
+        raise ValueError("area_size_xy must contain two positive finite values")
+    # The projector scales every norm strictly greater than ``step``.  Do not
+    # admit an epsilon band here: this predicate certifies an *exact* no-op,
+    # not merely a numerically close action.
+    if np.any(np.linalg.norm(desired, axis=1) > step):
+        return False
+    next_position = positions + desired
+    if (
+        np.any(next_position < -1.0e-9)
+        or np.any(next_position > area[None, :] + 1.0e-9)
+    ):
+        return False
+
+    K = positions.shape[0]
+    influence = distance + 2.0 * step
+    for i in range(K):
+        for j in range(i + 1, K):
+            relative = positions[i] - positions[j]
+            current = float(np.linalg.norm(relative))
+            if (
+                outside_invariant_recovery
+                and current < distance - 1.0e-9
+            ):
+                return False
+            if np.linalg.norm(
+                next_position[i] - next_position[j]
+            ) < distance - 1.0e-9:
+                return False
+            if current > influence + 1.0e-12:
+                continue
+            lower = 0.5 * (distance * distance - current * current)
+            if independently_composable:
+                if (
+                    float(relative @ desired[i]) < 0.5 * lower - 1.0e-8
+                    or float((-relative) @ desired[j])
+                    < 0.5 * lower - 1.0e-8
+                ):
+                    return False
+            elif (
+                float(relative @ (desired[i] - desired[j]))
+                < lower - 1.0e-8
+            ):
+                return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -1137,6 +1304,10 @@ def reconstruct_bistatic_coefficient_from_public_state(
     coefficient_scale: float,
     position_uncertainty_m: float | np.ndarray = 0.0,
     target_position_uncertainty_m: float | np.ndarray = 0.0,
+    velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    target_velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    dd_gain_mode: str = "binary",
+    robust_dd_uncertainty: bool = True,
 ) -> np.ndarray:
     """Reconstruct the executable per-watt graph from delivered endpoint state.
 
@@ -1202,57 +1373,218 @@ def reconstruct_bistatic_coefficient_from_public_state(
             "grid sizes/scale must be positive and uncertainty non-negative")
     if np.any(target_uncertainty < 0.0):
         raise ValueError("target uncertainty must be non-negative")
+    velocity_uncertainty = np.asarray(
+        velocity_uncertainty_mps, dtype=np.float64)
+    if velocity_uncertainty.ndim == 0:
+        velocity_uncertainty = np.full(K, float(velocity_uncertainty))
+    else:
+        velocity_uncertainty = velocity_uncertainty.reshape(-1)
+    target_velocity_uncertainty = np.asarray(
+        target_velocity_uncertainty_mps, dtype=np.float64)
+    if target_velocity_uncertainty.ndim == 0:
+        target_velocity_uncertainty = np.full(
+            Q, float(target_velocity_uncertainty))
+    else:
+        target_velocity_uncertainty = target_velocity_uncertainty.reshape(-1)
+    if (
+        velocity_uncertainty.shape != (K,)
+        or target_velocity_uncertainty.shape != (Q,)
+        or np.any(~np.isfinite(velocity_uncertainty))
+        or np.any(~np.isfinite(target_velocity_uncertainty))
+        or np.any(velocity_uncertainty < 0.0)
+        or np.any(target_velocity_uncertainty < 0.0)
+    ):
+        raise ValueError("velocity uncertainty must be non-negative K/Q vectors")
 
-    coefficient = np.zeros((K, K, Q), dtype=np.float64)
-    roles = np.full(K, 2, dtype=np.int64)
-    for q in range(Q):
-        positions = np.column_stack([
-            positions_xy[:, q], np.full(K, float(uav_height_m))])
-        velocities = np.column_stack([
-            velocities_xy[:, q], np.zeros(K, dtype=np.float64)])
-        tau, nu, alpha = compute_all_bistatic_params(
-            positions,
-            velocities,
-            targets[q:q + 1],
-            target_velocity[q:q + 1],
-            roles,
-            float(fc_hz),
-            float(rcs_m2),
-            role_agnostic=True,
+    # Vectorized K x K x Q reconstruction.  The previous implementation called
+    # the full geometry routine once per target and then evaluated every edge
+    # in Python.  In a K-view distributed simulation that created K redundant
+    # scalar triple loops per frame.  These expressions are the same bistatic
+    # range, signed-Doppler, radar-path and DD equations, evaluated as arrays.
+    positions = np.concatenate((
+        positions_xy,
+        np.full((K, Q, 1), float(uav_height_m), dtype=np.float64),
+    ), axis=-1)
+    velocities = np.concatenate((
+        velocities_xy,
+        np.zeros((K, Q, 1), dtype=np.float64),
+    ), axis=-1)
+    endpoint_vector = targets[None, :, :] - positions
+    endpoint_range = np.linalg.norm(endpoint_vector, axis=-1)
+    endpoint_unit = endpoint_vector / (endpoint_range[..., None] + 1.0e-10)
+
+    bistatic_range = (
+        endpoint_range[:, None, :] + endpoint_range[None, :, :])
+    tau = bistatic_range / C_LIGHT
+    node_radial = np.sum(velocities * endpoint_unit, axis=-1)
+    target_radial = np.sum(
+        target_velocity[None, :, :] * endpoint_unit, axis=-1)
+    nu = (float(fc_hz) / C_LIGHT) * (
+        node_radial[:, None, :] + node_radial[None, :, :]
+        - target_radial[:, None, :] - target_radial[None, :, :]
+    )
+
+    safe_range = np.maximum(endpoint_range, 1.0e-6)
+    wavelength = C_LIGHT / float(fc_hz)
+    path_constant = (
+        wavelength * wavelength * float(rcs_m2) / (4.0 * np.pi) ** 3)
+    alpha_sq = path_constant / (
+        safe_range[:, None, :] ** 2 * safe_range[None, :, :] ** 2)
+
+    delay_fraction = tau * int(delay_bins) * float(delta_f_hz)
+    doppler_fraction = (
+        nu * int(doppler_bins) * float(symbol_period_s))
+    delay_offset = delay_fraction - np.round(delay_fraction)
+    doppler_offset = doppler_fraction - np.round(doppler_fraction)
+    ambiguity_amplitude = np.abs(
+        np.sinc(delay_offset) * np.sinc(doppler_offset))
+    # Deterministic uncertainty-set lower bound.  The bistatic delay is
+    # 1-Lipschitz in each endpoint/target range.  Doppler uses the standard
+    # unit-vector perturbation bound min(2, 2r/(R-r)); velocity and direction
+    # errors are then combined by the triangle inequality.  With zero radii
+    # this reduces exactly to the historical point evaluation.
+    endpoint_position_radius = (
+        uncertainty[:, None] + target_uncertainty[None, :])
+    delay_radius = (
+        uncertainty[:, None, None]
+        + uncertainty[None, :, None]
+        + 2.0 * target_uncertainty[None, None, :]
+    ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
+    unit_radius = np.minimum(
+        2.0,
+        2.0 * endpoint_position_radius
+        / np.maximum(endpoint_range - endpoint_position_radius, 1.0e-9),
+    )
+    relative_velocity = velocities - target_velocity[None, :, :]
+    relative_speed = np.linalg.norm(relative_velocity, axis=-1)
+    relative_velocity_radius = (
+        velocity_uncertainty[:, None]
+        + target_velocity_uncertainty[None, :])
+    radial_radius = (
+        relative_velocity_radius
+        + (relative_speed + relative_velocity_radius) * unit_radius
+    )
+    doppler_radius = (
+        float(fc_hz) / C_LIGHT
+        * (radial_radius[:, None, :] + radial_radius[None, :, :])
+        * int(doppler_bins) * float(symbol_period_s)
+    )
+    ambiguity_lower = (
+        _sinc_alignment_lower_array(delay_fraction, delay_radius)
+        * _sinc_alignment_lower_array(doppler_fraction, doppler_radius)
+    )
+    if not bool(robust_dd_uncertainty):
+        delay_radius = np.zeros_like(delay_radius)
+        doppler_radius = np.zeros_like(doppler_radius)
+        ambiguity_lower = ambiguity_amplitude
+    if str(dd_gain_mode) == "continuous":
+        support = (
+            (tau - delay_radius / (
+                int(delay_bins) * float(delta_f_hz)) >= 0.0)
+            & (tau + delay_radius / (
+                int(delay_bins) * float(delta_f_hz))
+               < 1.0 / float(delta_f_hz))
+            & ((np.abs(nu) + doppler_radius / (
+                int(doppler_bins) * float(symbol_period_s)))
+               <= 1.0 / (2.0 * float(symbol_period_s)))
         )
-        endpoint_range = np.linalg.norm(
-            positions - targets[q][None, :], axis=1)
-        for i in range(K):
-            if not seen[i, q]:
-                continue
-            for j in range(K):
-                if i == j or not seen[j, q]:
-                    continue
-                g_dd = compute_dd_effectiveness(
-                    float(tau[i, j, 0]),
-                    float(nu[i, j, 0]),
-                    float(delta_f_hz),
-                    float(symbol_period_s),
-                    int(delay_bins),
-                    int(doppler_bins),
-                    float(dd_gate_min),
-                )
-                if g_dd >= float(dd_gate_min):
-                    robust_pathloss = (
-                        endpoint_range[i]
-                        / (endpoint_range[i] + float(uncertainty[i])
-                           + float(target_uncertainty[q]))
-                    ) ** 2 * (
-                        endpoint_range[j]
-                        / (endpoint_range[j] + float(uncertainty[j])
-                           + float(target_uncertainty[q]))
-                    ) ** 2
-                    coefficient[i, j, q] = (
-                        float(coefficient_scale)
-                        * float(alpha[i, j, 0]) ** 2
-                        * float(robust_pathloss)
-                    )
-    return coefficient
+        dd_factor = support.astype(np.float64) * ambiguity_lower ** 2
+    else:
+        dd_factor = (
+            ambiguity_lower >= float(dd_gate_min)).astype(np.float64)
+
+    robust_endpoint = endpoint_range / (
+        endpoint_range
+        + uncertainty[:, None]
+        + target_uncertainty[None, :]
+    )
+    robust_pathloss = (
+        robust_endpoint[:, None, :] ** 2
+        * robust_endpoint[None, :, :] ** 2)
+    executable = seen[:, None, :] & seen[None, :, :]
+    executable &= ~np.eye(K, dtype=bool)[:, :, None]
+    return (
+        float(coefficient_scale)
+        * alpha_sq
+        * robust_pathloss
+        * dd_factor
+        * executable.astype(np.float64)
+    )
+
+
+def reconstruct_bistatic_coefficient_upper_from_public_state(
+    positions_xy_by_target: np.ndarray,
+    target_positions_m: np.ndarray,
+    seen_mask: np.ndarray,
+    *,
+    uav_height_m: float,
+    fc_hz: float,
+    rcs_m2: float,
+    coefficient_scale: float,
+    position_uncertainty_m: float | np.ndarray = 0.0,
+    target_position_uncertainty_m: float | np.ndarray = 0.0,
+) -> np.ndarray:
+    """Upper-bound every fixed-edge coefficient over position uncertainty.
+
+    The continuous DD power gain is at most one.  Visible endpoints use their
+    minimum possible slant range; missing endpoints use the physical altitude
+    floor, so an incomplete private view remains valid (although loose).
+    """
+    positions_xy = np.asarray(positions_xy_by_target, dtype=np.float64)
+    targets = np.asarray(target_positions_m, dtype=np.float64)
+    seen = np.asarray(seen_mask, dtype=bool)
+    if (
+        positions_xy.ndim != 3 or positions_xy.shape[2] != 2
+    ):
+        raise ValueError("positions must have shape (K,Q,2)")
+    K, Q, _ = positions_xy.shape
+    if targets.shape != (Q, 3) or seen.shape != (K, Q):
+        raise ValueError("target/visibility shapes do not match (K,Q)")
+    uncertainty = np.asarray(position_uncertainty_m, dtype=np.float64)
+    if uncertainty.ndim == 0:
+        uncertainty = np.full(K, float(uncertainty))
+    else:
+        uncertainty = uncertainty.reshape(-1)
+    target_uncertainty = np.asarray(
+        target_position_uncertainty_m, dtype=np.float64)
+    if target_uncertainty.ndim == 0:
+        target_uncertainty = np.full(Q, float(target_uncertainty))
+    else:
+        target_uncertainty = target_uncertainty.reshape(-1)
+    values = (positions_xy, targets, uncertainty, target_uncertainty)
+    if (
+        uncertainty.shape != (K,) or target_uncertainty.shape != (Q,)
+        or any(np.any(~np.isfinite(value)) for value in values)
+        or np.any(uncertainty < 0.0)
+        or np.any(target_uncertainty < 0.0)
+        or not np.isfinite(uav_height_m) or float(uav_height_m) <= 0.0
+        or not np.isfinite(fc_hz) or float(fc_hz) <= 0.0
+        or not np.isfinite(rcs_m2) or float(rcs_m2) < 0.0
+        or not np.isfinite(coefficient_scale) or float(coefficient_scale) < 0.0
+    ):
+        raise ValueError("coefficient upper-bound inputs are invalid")
+    positions = np.concatenate((
+        positions_xy,
+        np.full((K, Q, 1), float(uav_height_m), dtype=np.float64),
+    ), axis=-1)
+    nominal_range = np.linalg.norm(
+        targets[None, :, :] - positions, axis=-1)
+    radius = uncertainty[:, None] + target_uncertainty[None, :]
+    minimum_range = np.maximum(
+        nominal_range - radius, float(uav_height_m))
+    minimum_range = np.where(seen, minimum_range, float(uav_height_m))
+    wavelength = C_LIGHT / float(fc_hz)
+    path_constant = (
+        wavelength * wavelength * float(rcs_m2) / (4.0 * np.pi) ** 3)
+    upper = (
+        float(coefficient_scale) * path_constant
+        / (
+            minimum_range[:, None, :] ** 2
+            * minimum_range[None, :, :] ** 2
+        )
+    )
+    upper *= (~np.eye(K, dtype=bool))[:, :, None]
+    return upper
 
 
 def plan_budget_certified_hyperedges(
@@ -1318,6 +1650,8 @@ def plan_reserved_endpoint_hyperedges(
     viewer: int,
     tx_role_mask: np.ndarray,
     target_pair_limit: int,
+    normalized_edge_information: np.ndarray | None = None,
+    information_weight: float = 0.0,
 ) -> LocalHyperedgePlan:
     """Create one endpoint-local plan under stable role/owner reservations.
 
@@ -1330,11 +1664,27 @@ def plan_reserved_endpoint_hyperedges(
     seen = np.asarray(visible, dtype=bool)
     budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
     role = np.asarray(tx_role_mask, dtype=bool).reshape(-1)
+    edge_information = None
+    if normalized_edge_information is not None:
+        edge_information = np.asarray(
+            normalized_edge_information, dtype=np.float64)
     if gain.ndim != 3 or gain.shape[0] != gain.shape[1]:
         raise ValueError("coefficient must have shape (K,K,Q)")
     K, _, Q = gain.shape
     if seen.shape != (K, Q) or budget.shape != (K,) or role.shape != (K,):
         raise ValueError("reserved endpoint input shapes are inconsistent")
+    weight = float(information_weight)
+    if (
+        not np.isfinite(weight) or weight < 0.0
+        or (
+            edge_information is not None
+            and (
+                edge_information.shape != (K, K, Q, 4, 4)
+                or np.any(~np.isfinite(edge_information))
+            )
+        )
+    ):
+        raise ValueError('reserved endpoint information inputs are invalid')
     if not 0 <= int(viewer) < K:
         raise ValueError("viewer index is out of range")
     tx_nodes = tuple(int(i) for i in np.flatnonzero(role))
@@ -1357,8 +1707,55 @@ def plan_reserved_endpoint_hyperedges(
                 score = float(budget[tx] * gain[tx, owner, q])
                 if score > 0.0:
                     incoming.append((score, (tx, owner, q)))
-            incoming.sort(key=lambda item: (-item[0], item[1]))
-            for score, edge in incoming[:limit]:
+            if edge_information is None or weight <= 0.0:
+                incoming.sort(key=lambda item: (-item[0], item[1]))
+                chosen = incoming[:limit]
+            else:
+                # F(S)=log(1+sum D_e)+w/2 logdet(I+sum A_e), where
+                # A_e=P^(1/2) H_e^T R_e^-1 H_e P^(1/2) is PSD.  Both terms
+                # are monotone submodular in S, hence cardinality-greedy has
+                # the standard (1-1/e) approximation guarantee.
+                remaining = list(incoming)
+                chosen = []
+                total_deflection = 0.0
+                total_information = np.zeros((4, 4), dtype=np.float64)
+
+                def objective(deflection, information):
+                    sign, logdet = np.linalg.slogdet(
+                        np.eye(4, dtype=np.float64) + information)
+                    if sign <= 0.0:
+                        raise ValueError('normalized information must be PSD')
+                    return (
+                        float(np.log1p(deflection))
+                        + 0.5 * weight * float(logdet)
+                    )
+
+                current_objective = objective(
+                    total_deflection, total_information)
+                while remaining and len(chosen) < limit:
+                    candidates = []
+                    for nominal, edge in remaining:
+                        increment = edge_information[edge]
+                        candidate_objective = objective(
+                            total_deflection + nominal,
+                            total_information + increment,
+                        )
+                        candidates.append((
+                            candidate_objective - current_objective,
+                            nominal,
+                            edge,
+                            increment,
+                            candidate_objective,
+                        ))
+                    candidates.sort(key=lambda item: (-item[0], item[2]))
+                    marginal, nominal, edge, increment, updated = candidates[0]
+                    chosen.append((marginal, edge))
+                    total_deflection += nominal
+                    total_information += increment
+                    current_objective = updated
+                    remaining = [
+                        item for item in remaining if item[1] != edge]
+            for score, edge in chosen:
                 selected.append(edge)
                 scores[edge] = score
                 target_value[q] += score

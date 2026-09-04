@@ -49,6 +49,7 @@ class CommunicationStepStats:
     reliability_failed_links: int = 0
     burst_failed_links: int = 0
     burst_bad_links: int = 0
+    service_envelope_filtered_links: int = 0
     mean_latency_s: float = 0.0
     p95_latency_s: float = 0.0
     max_latency_s: float = 0.0
@@ -132,6 +133,8 @@ class CommunicationStepStats:
                 self.reliability_violation_rate),
             'learned_comm_burst_failure_rate': self.burst_failure_rate,
             'learned_comm_burst_bad_link_rate': self.burst_bad_link_rate,
+            'learned_comm_service_envelope_filtered_links': float(
+                self.service_envelope_filtered_links),
             'learned_comm_mean_latency_s': float(self.mean_latency_s),
             'learned_comm_p95_latency_s': float(self.p95_latency_s),
             'learned_comm_max_latency_s': float(self.max_latency_s),
@@ -517,12 +520,37 @@ class InterUAVCommunicationModel:
         extra_payload_bits: Dict[int, int] = None,
         base_payload_dimensions: Dict[int, int] = None,
         suppress_message_payload: Dict[int, bool] = None,
+        exact_bits_per_dim: Dict[int, int] = None,
+        header_bits_by_sender: Dict[int, int] = None,
+        service_envelope_payload_bits_by_sender: Dict[int, int] = None,
     ) -> tuple[List[DeliveredMessage], CommunicationStepStats]:
         """Transport one learned broadcast per active sender.
 
         Active senders share the configured bandwidth orthogonally.  A
         broadcast is charged once in bits and radio energy, while delivery is
         evaluated independently for every receiving UAV.
+
+        ``exact_bits_per_dim`` (C6 decision-sufficient comm, 2026-08-26):
+        per-sender explicit quantization precision that OVERRIDES the rate
+        ladder for that sender -- the decision-preserving minimal token width
+        chosen by ``decision_sufficient_plan``.  A sender listed here is
+        quantized with ``quantize_values_at_bits`` and charged
+        ``bits_per_dim * payload_dimensions`` (no ladder rounding), so a
+        certified 3-bit token really puts 3 bits/dim on air instead of being
+        rounded up to the 4-bit ladder step.  Absent (default) keeps the
+        pre-C6 ladder path bit-for-bit.
+
+        ``header_bits_by_sender`` supports a fixed-schema scheduled protocol
+        whose orthogonal resource identifies sender, rate and layout. The
+        explicit override is still charged in packet length, FBL reliability,
+        latency and energy; absent senders retain the generic header.
+
+        ``service_envelope_payload_bits_by_sender`` is a conservative
+        compatibility gate. The actual short packet determines reported bits
+        and latency, while the supplied legacy packet length determines
+        logical admission, the coupled erasure probability and billed RF
+        airtime. Using max(actual, legacy) BLER prevents the envelope from ever
+        accepting a packet that the physical short codeword would reject.
         """
         K = int(positions.shape[0])
         # Channel memory evolves once per simulator-frame transport call, not
@@ -533,12 +561,18 @@ class InterUAVCommunicationModel:
         exact_extra_bits = extra_payload_bits or {}
         base_dims = base_payload_dimensions or {}
         suppress_payload = suppress_message_payload or {}
+        exact_bits = exact_bits_per_dim or {}
+        explicit_headers = header_bits_by_sender or {}
+        service_payloads = service_envelope_payload_bits_by_sender or {}
 
         def packet_bits(sender: int) -> int:
             rate_index = int(rate_indices.get(sender, 0))
             idx = int(np.clip(
                 rate_index, 0, len(self.rate_bits_per_dim) - 1))
-            bits_per_dim = self.rate_bits_per_dim[idx]
+            bits_per_dim = (
+                int(exact_bits[sender])
+                if sender in exact_bits
+                else self.rate_bits_per_dim[idx])
             learned_dimensions = (
                 max(0, int(base_dims[sender]))
                 if sender in base_dims else
@@ -547,7 +581,9 @@ class InterUAVCommunicationModel:
             appended_bits = max(
                 0, int(exact_extra_bits.get(sender, 0)))
             payload = learned_dimensions * bits_per_dim + appended_bits
-            return self.header_bits + payload if payload > 0 else 0
+            header = max(0, int(explicit_headers.get(
+                sender, self.header_bits)))
+            return header + payload if payload > 0 else 0
 
         active = []
         for k in range(K):
@@ -569,7 +605,13 @@ class InterUAVCommunicationModel:
             quantized = (
                 np.zeros_like(np.asarray(messages[sender], dtype=np.float64))
                 if bool(suppress_payload.get(sender, False))
-                else self.quantize(messages[sender], rate_idx)
+                else (
+                    self.quantize_values_at_bits(
+                        np.asarray(messages[sender], dtype=np.float64),
+                        int(exact_bits[sender]))
+                    if sender in exact_bits
+                    else self.quantize(messages[sender], rate_idx)
+                )
             )
             if sender_mask is not None:
                 mask = np.asarray(sender_mask, dtype=np.float64).reshape(-1)
@@ -599,27 +641,93 @@ class InterUAVCommunicationModel:
                     snr_db + self._snr_shadowing_db[sender, receiver])
                 stats.attempted_links += 1
                 stats.per_sender_attempted_links[sender] += 1
-                all_latencies.append(float(latency_s))
                 packet_error_probability = self.packet_error_probability(
                     snr_db, serialization_s, n_bits, effective_bw)
+                service_bits = max(
+                    n_bits, int(service_payloads.get(sender, n_bits)))
+                if service_bits != n_bits:
+                    (_service_snr_db, _service_rate,
+                     service_serialization_s,
+                     service_latency_s) = self._link(
+                        positions[sender], positions[receiver], service_bits,
+                        effective_bw, sender_power_w)
+                    service_error_probability = (
+                        self.packet_error_probability(
+                            snr_db,
+                            service_serialization_s,
+                            service_bits,
+                            effective_bw,
+                        ))
+                else:
+                    service_serialization_s = serialization_s
+                    service_latency_s = latency_s
+                    service_error_probability = packet_error_probability
+                if (
+                    service_bits != n_bits
+                    and packet_error_probability
+                    > service_error_probability * (1.0 + 1.0e-12)
+                    and self.finite_blocklength_enabled
+                ):
+                    # Integer minimum-blocklength rounding can make the short
+                    # packet's just-feasible BLER slightly larger than the
+                    # legacy packet's. Select the shortest short codeword that
+                    # is no less reliable than the service envelope. Since it
+                    # carries fewer information bits at the same SNR, this
+                    # required blocklength cannot exceed the legacy one.
+                    reliability_snr = float(
+                        10.0 ** (snr_db / 10.0))
+                    required_blocklength = (
+                        minimum_blocklength_normal_approximation(
+                            reliability_snr,
+                            n_bits,
+                            max(float(service_error_probability), 1.0e-15),
+                            max_blocklength=(
+                                self.finite_blocklength_max_channel_uses),
+                        ))
+                    if required_blocklength is not None:
+                        serialization_s = max(
+                            float(serialization_s),
+                            float(required_blocklength)
+                            / float(effective_bw),
+                        )
+                        latency_s = (
+                            serialization_s + self.processing_delay_s)
+                        packet_error_probability = (
+                            self.packet_error_probability(
+                                snr_db,
+                                serialization_s,
+                                n_bits,
+                                effective_bw,
+                            ))
+                all_latencies.append(float(latency_s))
                 all_blers.append(float(packet_error_probability))
                 # A packet that misses its deadline is aborted rather than
                 # occupying the radio for an unbounded Shannon serialization
                 # time. Keep raw latency for diagnostics, but bill at most one
                 # configured deadline of RF airtime per broadcast.
                 billed_airtime = min(
-                    float(serialization_s), self.deadline_s)
+                    float(service_serialization_s), self.deadline_s)
                 sender_airtime = max(sender_airtime, billed_airtime)
 
                 meets_snr = snr_db >= self.snr_threshold_db
                 meets_deadline = latency_s <= self.deadline_s
+                meets_service_envelope = (
+                    service_latency_s <= self.deadline_s)
+                effective_error_probability = max(
+                    float(packet_error_probability),
+                    float(service_error_probability),
+                )
                 # Match evidence-packet semantics: a link that already fails
                 # SNR or deadline does not consume a codeword-erasure RNG draw.
                 # This keeps common-seed protocol comparisons call-aligned.
                 meets_reliability = (
                     self.packet_reliability_success(
-                        packet_error_probability)
-                    if meets_snr and meets_deadline else True)
+                        effective_error_probability)
+                    if (
+                        meets_snr
+                        and meets_deadline
+                        and meets_service_envelope
+                    ) else True)
                 burst_bad = bool(
                     self.burst_loss_enabled
                     and self._burst_bad_state[sender, receiver])
@@ -627,7 +735,8 @@ class InterUAVCommunicationModel:
                 meets_burst = True
                 if (
                     self.burst_loss_enabled
-                    and meets_snr and meets_deadline and meets_reliability
+                    and meets_snr and meets_deadline
+                    and meets_service_envelope and meets_reliability
                 ):
                     drop_probability = (
                         self.burst_bad_drop_probability
@@ -636,22 +745,34 @@ class InterUAVCommunicationModel:
                         self.rng.random() >= drop_probability)
                     if not meets_burst:
                         stats.burst_failed_links += 1
-                if (meets_snr and meets_deadline
+                if (meets_snr and meets_deadline and meets_service_envelope
                         and meets_reliability and meets_burst):
-                    delay_frames = max(1, int(np.ceil(latency_s / self.dt)))
+                    logical_latency_s = float(
+                        service_latency_s
+                        if service_bits != n_bits else latency_s)
+                    delay_frames = max(
+                        1, int(np.ceil(logical_latency_s / self.dt)))
                     deliveries.append(DeliveredMessage(
                         sender=sender,
                         receiver=receiver,
                         message=quantized.copy(),
                         rate_index=rate_idx,
                         snr_db=float(snr_db),
-                        latency_s=float(latency_s),
+                        # Compatibility metadata follows the service
+                        # envelope so a deployed policy does not observe a
+                        # new channel state merely because its wire codec was
+                        # shortened. CommunicationStepStats above continues
+                        # to report the actual physical short-packet latency.
+                        latency_s=logical_latency_s,
                         delay_frames=delay_frames,
                         tx_power_w=float(sender_power_w),
                         token_mask=(None if sender_mask is None else
                                     np.asarray(sender_mask, dtype=np.float64).copy()),
                         packet_error_probability=float(
-                            packet_error_probability),
+                            max(
+                                packet_error_probability,
+                                service_error_probability,
+                            )),
                     ))
                     stats.delivered_links += 1
                     stats.per_sender_delivered_links[sender] += 1
@@ -659,6 +780,8 @@ class InterUAVCommunicationModel:
                     stats.expired_links += 1
                     stats.per_sender_expired_links[sender] += 1
                     stats.deadline_failed_links += int(not meets_deadline)
+                    stats.service_envelope_filtered_links += int(
+                        meets_deadline and not meets_service_envelope)
                     stats.snr_failed_links += int(not meets_snr)
                     if not meets_reliability:
                         stats.reliability_failed_links += 1

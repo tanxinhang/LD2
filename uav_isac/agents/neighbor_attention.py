@@ -63,7 +63,15 @@ class MultiHeadNeighborAttention(nn.Module):
     def __init__(self, D: int = 64, num_heads: int = 4,
                  uniform_init: bool = True):
         super().__init__()
-        assert D % num_heads == 0
+        if (
+            isinstance(D, bool) or not isinstance(D, int) or D <= 0
+            or isinstance(num_heads, bool)
+            or not isinstance(num_heads, int) or num_heads <= 0
+            or D % num_heads != 0
+        ):
+            raise ValueError(
+                "D and num_heads must be positive integers with "
+                "D divisible by num_heads")
         self.D = D
         self.num_heads = num_heads
         self.head_dim = D // num_heads

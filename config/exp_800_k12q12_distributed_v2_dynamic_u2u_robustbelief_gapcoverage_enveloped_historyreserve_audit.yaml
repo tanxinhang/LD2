@@ -1,0 +1,16 @@
+# Causal two-stage private-power candidate.
+#
+# For viewer k, project its previous full local plan H_k onto the current
+# public RF budgets and form
+#   r_kq = min{sum_i a_kiq H_kiq, D(P_D=0.60)}.
+# H_k is a feasible witness for r_k.  The next LP first enforces every r_kq,
+# then maximizes the usual worst target.  With a common private view this gives
+# target-wise QoS-envelope preservation and non-decreasing current-view worst;
+# under packet-induced view disagreement it remains a local guarantee and must
+# pass paired closed-loop evaluation.  Historical convex lag is removed only
+# inside this stronger feasible envelope.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  distributed_replicated_power_inertia: 0.0
+  distributed_replicated_power_history_reserve_pd: 0.60

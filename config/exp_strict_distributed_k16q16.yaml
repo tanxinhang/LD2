@@ -1,0 +1,33 @@
+# Frozen-scale strict distributed K16/Q16 evaluation identity.
+# The algorithmic and physical settings are inherited from the strict pilot;
+# only the scale, target weights and scale-specific blind bank are changed.
+extends: exp_strict_distributed_no_truth_pilot.yaml
+
+scenario:
+  K: 16
+  Q: 16
+  T: 150
+
+target:
+  omega_q:
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+    - 0.0625
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_1130_k16q16_blind.json
+  eval_seed_split: test
+  final_eval_seed_split: test

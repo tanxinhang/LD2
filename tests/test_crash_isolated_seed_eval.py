@@ -1,6 +1,10 @@
 import pytest
 
-from tools.crash_isolated_seed_eval import _merge_rows, _wilson_lower
+from tools.crash_isolated_seed_eval import (
+    _merge_rows,
+    _order_rows_by_requested_seeds,
+    _wilson_lower,
+)
 
 
 def test_merge_recomputes_multiseed_metrics_from_episode_arrays():
@@ -50,6 +54,27 @@ def test_merge_recomputes_multiseed_metrics_from_episode_arrays():
 def test_wilson_lower_is_bounded_and_increases_with_successes():
     values = [_wilson_lower(successes, 100) for successes in (0, 50, 100)]
     assert 0.0 <= values[0] < values[1] < values[2] <= 1.0
+
+
+def test_isolated_rows_restore_requested_not_numeric_seed_order():
+    rows = [
+        {"eval_episode_seeds": "[2]", "value": "second"},
+        {"eval_episode_seeds": "[10]", "value": "first"},
+    ]
+
+    ordered = _order_rows_by_requested_seeds(rows, [10, 2])
+
+    assert [row["value"] for row in ordered] == ["first", "second"]
+    merged = _merge_rows(ordered)
+    assert merged["eval_episode_seeds"] == "[10, 2]"
+
+
+def test_isolated_row_order_rejects_duplicate_or_unrequested_seeds():
+    with pytest.raises(ValueError, match="unique"):
+        _order_rows_by_requested_seeds([], [3, 3])
+    with pytest.raises(ValueError, match="do not match"):
+        _order_rows_by_requested_seeds(
+            [{"eval_episode_seeds": "[4]"}], [3])
 
 
 def test_merge_preserves_minimum_distance_and_sums_safety_counts():

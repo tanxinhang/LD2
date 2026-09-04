@@ -7,10 +7,15 @@ This module bridges geometry/channel/OTFS → detection performance.
 """
 
 import numpy as np
+from dataclasses import dataclass
 from typing import List, Optional
 
 from uav_isac.physical.geometry import compute_all_bistatic_params
-from uav_isac.physical.otfs import compute_dd_effectiveness
+from uav_isac.physical.otfs import (
+    compute_dd_effectiveness,
+    compute_dd_phys_gain,
+    compute_dd_phys_gain_batch,
+)
 from uav_isac.physical.channel import (
     compute_noise_power,
     compute_report_link_reliability
@@ -20,6 +25,70 @@ from uav_isac.utils.types import DeflectionEntry
 
 # Speed of light
 C_LIGHT = 3.0e8
+
+
+@dataclass(frozen=True)
+class DenseDeflection:
+    """Tensor form of deterministic U2U deflection.
+
+    The physical quantities remain indexed by ``(tx, rx, target)``.  Keeping
+    them dense lets ranking and power allocation operate on contiguous arrays;
+    ``DeflectionEntry`` objects are materialized only at an interface that
+    still requires the historical list representation.
+    """
+
+    tau: np.ndarray
+    nu: np.ndarray
+    alpha: np.ndarray
+    d_raw: np.ndarray
+    g_dd: np.ndarray
+    d_eff: np.ndarray
+    valid: np.ndarray
+
+    def to_entries(
+        self,
+        power_scale_w: Optional[np.ndarray] = None,
+    ) -> List[DeflectionEntry]:
+        """Materialize entries in the canonical ``i -> j -> q`` order.
+
+        ``power_scale_w`` exploits the exact fixed-geometry linearity
+        ``d(P)=P d(1)``.  It is intended for a tensor computed at unit power.
+        Delay, Doppler, path gain and DD effectiveness are power independent.
+        """
+        raw = self.d_raw
+        effective = self.d_eff
+        if power_scale_w is not None:
+            power = np.asarray(power_scale_w, dtype=np.float64)
+            expected = (self.tau.shape[0], self.tau.shape[2])
+            if power.shape != expected:
+                raise ValueError(
+                    f"power_scale_w must have shape {expected}, got "
+                    f"{power.shape}")
+            if not np.all(np.isfinite(power)) or np.any(power < -1.0e-12):
+                raise ValueError(
+                    "power_scale_w must be finite and non-negative")
+            factor = np.maximum(power, 0.0)[:, None, :]
+            raw = raw * factor
+            effective = effective * factor
+
+        K, _, Q = self.valid.shape
+        return [
+            DeflectionEntry(
+                i=int(i), j=int(j), q=int(q),
+                tau=float(self.tau[i, j, q]),
+                nu=float(self.nu[i, j, q]),
+                alpha=float(self.alpha[i, j, q]),
+                d_raw=float(raw[i, j, q]),
+                g_dd=float(self.g_dd[i, j, q]),
+                chi_rep=1.0,
+                d_eff=float(effective[i, j, q]),
+            )
+            for i in range(K)
+            for j in range(K)
+            if i != j
+            for q in range(Q)
+            if self.valid[i, j, q]
+        ]
 
 
 def validate_cpi_schedule(
@@ -135,6 +204,7 @@ class DeflectionComputer:
         eta_nlos_dB: float = 21.0,
         use_swerling: bool = False,
         use_report_link: bool = True,
+        dd_gain_mode: str = "binary",
     ):
         self.fc = fc
         self.delta_f = delta_f
@@ -148,6 +218,19 @@ class DeflectionComputer:
         self.rcs = rcs
         self.g_min = g_min
         self.rng = rng
+        # Post-G2 physics closure (audit advice/001 section 5):
+        #   binary      -- legacy ``1[g_dd >= g_min]`` support gate (historical
+        #                  certified numbers are all under this convention).
+        #   continuous  -- physical gain ``I_support * |A(tau,nu)|^2`` applied
+        #                  continuously to raw deflection; out-of-support
+        #                  targets contribute exactly 0.
+        # The canonical post-G2 manifest pins ``continuous``; ``binary`` is kept
+        # so existing pre-G2 result files remain reproducible.
+        dd_gain_mode = str(dd_gain_mode)
+        if dd_gain_mode not in ("binary", "continuous"):
+            raise ValueError(
+                f"dd_gain_mode must be 'binary' or 'continuous', got {dd_gain_mode!r}")
+        self.dd_gain_mode = dd_gain_mode
         # Antenna array gain (linear) = G_tx*G_rx.  CPI looks are explicit
         # scheduled observations, not an assumed free coherent multiplier.
         self.antenna_gain = 10.0 ** ((g_tx_dBi + g_rx_dBi) / 10.0)
@@ -168,6 +251,87 @@ class DeflectionComputer:
         self.use_swerling = use_swerling
         self.use_report_link = bool(use_report_link)
 
+    def compute_dense(
+        self,
+        uav_positions: np.ndarray,
+        uav_velocities: np.ndarray,
+        target_positions: np.ndarray,
+        target_velocities: np.ndarray,
+        roles: np.ndarray,
+        fc_position: np.ndarray,
+        role_agnostic: bool = False,
+        sensing_power_w: Optional[np.ndarray] = None,
+    ) -> DenseDeflection:
+        """Compute deterministic U2U deflection without per-edge objects.
+
+        This representation is valid only when the receiver-to-fusion report
+        channel and Swerling fading are disabled.  Those mechanisms contain
+        stateful random draws whose physical ordering must remain explicit.
+        """
+        if self.use_report_link or self.use_swerling:
+            raise ValueError(
+                "dense deflection requires deterministic U2U-only execution")
+        K = uav_positions.shape[0]
+        Q = target_positions.shape[0]
+        if sensing_power_w is None:
+            power = np.full((K, Q), self.P_sense, dtype=np.float64)
+        else:
+            power = np.asarray(sensing_power_w, dtype=np.float64)
+            if power.shape != (K, Q):
+                raise ValueError(
+                    f"sensing_power_w must have shape {(K, Q)}, got "
+                    f"{power.shape}")
+            if not np.all(np.isfinite(power)) or np.any(power < -1.0e-12):
+                raise ValueError(
+                    "sensing_power_w must be finite and non-negative")
+            power = np.maximum(power, 0.0)
+
+        tau, nu, alpha = compute_all_bistatic_params(
+            uav_positions, uav_velocities,
+            target_positions, target_velocities,
+            roles, self.fc, self.rcs, role_agnostic=role_agnostic,
+        )
+        raw_scale = float(
+            self.c_det * self.antenna_gain * self.M * self.N * self.n_cpi
+            / max(self.noise_power, 1.0e-15)
+        )
+        d_raw = raw_scale * alpha * alpha * power[:, None, :]
+        finite_tau = np.isfinite(tau)
+        finite_nu = np.isfinite(nu)
+        tau_eval = np.where(finite_tau, tau, 0.0)
+        nu_eval = np.where(finite_nu, nu, 0.0)
+        delay_fraction = tau_eval * self.M * self.delta_f
+        doppler_fraction = nu_eval * self.N * self.T_sym
+        delay_offset = delay_fraction - np.round(delay_fraction)
+        doppler_offset = doppler_fraction - np.round(doppler_fraction)
+        g_dd = np.abs(np.sinc(delay_offset) * np.sinc(doppler_offset))
+        if self.dd_gain_mode == "continuous":
+            support = (
+                finite_tau
+                & finite_nu
+                & (tau_eval >= 0.0)
+                & (tau_eval < 1.0 / self.delta_f)
+                & (np.abs(nu_eval) <= 1.0 / (2.0 * self.T_sym))
+            )
+            d_eff = d_raw * support.astype(np.float64) * g_dd ** 2
+        else:
+            d_eff = d_raw * (g_dd >= self.g_min).astype(np.float64)
+
+        if role_agnostic:
+            endpoint_valid = ~np.eye(K, dtype=bool)
+        else:
+            role_array = np.asarray(roles)
+            endpoint_valid = (
+                (role_array[:, None] == 0)
+                & (role_array[None, :] == 1)
+            )
+            endpoint_valid &= ~np.eye(K, dtype=bool)
+        valid = np.broadcast_to(endpoint_valid[:, :, None], (K, K, Q)).copy()
+        return DenseDeflection(
+            tau=tau, nu=nu, alpha=alpha, d_raw=d_raw,
+            g_dd=g_dd, d_eff=d_eff, valid=valid,
+        )
+
     def compute(
         self,
         uav_positions: np.ndarray,     # (K, 3)
@@ -186,7 +350,9 @@ class DeflectionComputer:
         2. Compute raw Deflection d_raw
         3. Compute DD effectiveness g_dd
         4. Compute reporting link reliability chi_rep
-        5. Compute effective Deflection d_eff = chi_rep * d_raw if g_dd >= g_min
+        5. Compute effective Deflection.  Canonical continuous mode uses
+           chi_rep*d_raw*I_support*|A|^2; legacy binary mode uses
+           chi_rep*d_raw when g_dd >= g_min.
 
         Args:
             uav_positions: (K, 3) UAV positions
@@ -201,6 +367,14 @@ class DeflectionComputer:
         """
         K = uav_positions.shape[0]
         Q = target_positions.shape[0]
+        if not self.use_report_link and not self.use_swerling:
+            return self.compute_dense(
+                uav_positions, uav_velocities,
+                target_positions, target_velocities,
+                roles, fc_position,
+                role_agnostic=role_agnostic,
+                sensing_power_w=sensing_power_w,
+            ).to_entries()
         if sensing_power_w is not None:
             sensing_power_w = np.asarray(sensing_power_w, dtype=np.float64)
             if sensing_power_w.shape != (K, Q):
@@ -248,6 +422,79 @@ class DeflectionComputer:
             # not by a non-existent ground-report link.
             chi_rep_by_rx = {int(j): 1.0 for j in rx_indices}
 
+        # O2 (roadmap 2026-08-29): canonical-path vectorization.
+        # Canonical identity = use_report_link=True + dd_gain_mode=continuous +
+        # no Swerling (manifest pins continuous; Swerling off by default).
+        # The scalar slow path below is exactly the formula of
+        # compute_raw_deflection / compute_dd_effectiveness /
+        # compute_dd_phys_gain; the batch branch evaluates the SAME formulas
+        # as (K,K,Q) arrays (raw_scale*alpha**2*power is algebraically
+        # identical to compute_raw_deflection; compute_dd_phys_gain_batch is
+        # bit-for-bit the scalar compute_dd_phys_gain, otfs.py:146-196) and
+        # assembles entries in the original (i -> j -> q) order, so results
+        # are bit-for-bit identical.  No RNG draws in this branch.
+        # Binary legacy mode and ANY Swerling mode keep the original scalar
+        # loop below (Swerling draws are RNG-order stateful and must not be
+        # reordered; binary is the pre-G2 certified convention).
+        if self.dd_gain_mode == "continuous" and not self.use_swerling:
+            if sensing_power_w is None:
+                power = np.full((K, Q), self.P_sense, dtype=np.float64)
+            else:
+                power = np.maximum(sensing_power_w, 0.0)
+            # Same evaluation order as the scalar compute_raw_deflection
+            # (deflection.py 58-107): observation_time=T_sym*N*n_cpi,
+            # signal_energy=P*(alpha**2)*antenna_gain*observation_time,
+            # noise_psd=noise_power/(M/T_sym), result=c_det*energy/
+            # max(noise_psd, 1e-15/implied_bw).  Using the identical
+            # expression order keeps the batch path within 1-2 ULP of the
+            # scalar path (bit-for-bit not claimed: float, C1).
+            implied_bandwidth_hz = self.M / self.T_sym
+            noise_psd = self.noise_power / implied_bandwidth_hz
+            min_denom = 1.0e-15 / implied_bandwidth_hz
+            observation_time_s = self.T_sym * self.N * self.n_cpi
+            signal_energy = (
+                power[:, None, :] * (alpha ** 2)
+                * self.antenna_gain * observation_time_s)
+            denom = np.maximum(noise_psd, min_denom)
+            d_raw_all = self.c_det * signal_energy / denom
+            # compute_dd_phys_gain_batch rejects non-finite tau/nu (otfs.py:
+            # it raises before the support mask).  The geometry layer emits
+            # inf tau for invalid pairs (same node as tx/rx etc.); the scalar
+            # slow path skips those (``if np.isinf(tau): continue``).  Mask
+            # them to 0 here (support check then yields gain 0 at exactly the
+            # same positions) and keep the skip in the assembly below.
+            finite_tau = np.isfinite(tau)
+            finite_nu = np.isfinite(nu)
+            tau_safe = np.where(finite_tau, tau, 0.0)
+            nu_safe = np.where(finite_nu, nu, 0.0)
+            phys_gain_all = compute_dd_phys_gain_batch(
+                tau_safe, nu_safe, self.delta_f, self.T_sym, self.M, self.N)
+            chi_rep_all = np.zeros((1, K, 1), dtype=np.float64)
+            for j in rx_indices:
+                chi_rep_all[0, int(j), 0] = float(chi_rep_by_rx[int(j)])
+            d_eff_all = chi_rep_all * d_raw_all * phys_gain_all
+            return [
+                DeflectionEntry(
+                    i=int(i), j=int(j), q=int(q),
+                    tau=float(tau[i, j, q]),
+                    nu=float(nu[i, j, q]),
+                    alpha=float(alpha[i, j, q]),
+                    d_raw=float(d_raw_all[i, j, q]),
+                    g_dd=float(compute_dd_effectiveness(
+                        tau[i, j, q], nu[i, j, q],
+                        self.delta_f, self.T_sym, self.M, self.N)),
+                    chi_rep=float(chi_rep_by_rx[int(j)]),
+                    d_eff=float(d_eff_all[i, j, q]),
+                )
+                for i in tx_indices
+                for j in rx_indices
+                if i != j
+                for q in range(Q)
+                if not np.isinf(tau[i, j, q])
+            ]
+
+        # Legacy scalar slow path: binary gate and/or Swerling RCS fading.  The
+        # RNG draw order below is part of the reproducible random stream.
         for i in tx_indices:
             for j in rx_indices:
                 if i == j:
@@ -283,10 +530,22 @@ class DeflectionComputer:
                         d_raw = d_raw * float(self.rng.exponential(1.0))
 
                     # Step 4-5: Effective Deflection
-                    if g_dd >= self.g_min:
-                        d_eff = chi_rep * d_raw
-                    else:
-                        d_eff = 0.0
+                    if self.dd_gain_mode == "continuous":
+                        # Post-G2 physics (audit advice/001 section 5):
+                        # ``d_eff = chi_rep * d_raw * I_support * |A|^2``.
+                        # Out-of-support targets get exactly zero even if the
+                        # aliased fractional mismatch is near an integer bin.
+                        phys_gain = compute_dd_phys_gain(
+                            tau[i, j, q], nu[i, j, q],
+                            self.delta_f, self.T_sym,
+                            self.M, self.N,
+                        )
+                        d_eff = chi_rep * d_raw * phys_gain
+                    else:  # legacy binary gate
+                        if g_dd >= self.g_min:
+                            d_eff = chi_rep * d_raw
+                        else:
+                            d_eff = 0.0
 
                     entry = DeflectionEntry(
                         i=int(i), j=int(j), q=int(q),

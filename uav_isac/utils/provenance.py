@@ -21,7 +21,12 @@ _SOURCE_PATTERNS = (
     "scripts/**/*.py",
     "tools/**/*.py",
 )
-_ROOT_FILES = ("requirements.txt", "pytest.ini", ".gitignore")
+_ROOT_FILES = (
+    "requirements.txt",
+    "constraints-ci.txt",
+    "pytest.ini",
+    ".gitignore",
+)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -101,11 +106,15 @@ def build_run_provenance(
             "exists": path.is_file(),
             "sha256": sha256_file(path) if path.is_file() else None,
         })
+    commit = _git(root_path, "rev-parse", "HEAD")
     status = _git(root_path, "status", "--porcelain=v1", "--untracked-files=all")
+    git_available = commit is not None and status is not None
     return {
         "schema_version": 1,
-        "git_commit": _git(root_path, "rev-parse", "HEAD"),
-        "git_dirty": bool(status),
+        "git_commit": commit,
+        # A missing Git executable/repository is not evidence of a clean tree.
+        "git_available": git_available,
+        "git_dirty": (not git_available) or bool(status),
         "git_status_porcelain": status.splitlines() if status else [],
         "source_snapshot": source_snapshot,
         "resolved_config": resolved,

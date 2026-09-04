@@ -549,6 +549,8 @@ def test_headwise_credit_rollout_builds_four_gae_streams_and_updates():
         assert np.isfinite(metrics[f'actor_loss_{name}'])
         assert np.isfinite(metrics[f'approx_kl_{name}'])
     assert np.isfinite(metrics['credit_critic_loss'])
+    assert np.isfinite(metrics['post_update_approx_kl'])
+    assert metrics['post_update_approx_kl'] <= 1.5 * cfg.marl.target_kl
     env.close()
 
 

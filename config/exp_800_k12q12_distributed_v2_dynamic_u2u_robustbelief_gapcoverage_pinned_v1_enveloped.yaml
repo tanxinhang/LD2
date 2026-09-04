@@ -1,0 +1,5 @@
+# Research-only baseline-envelope ablation over the reproducible v1 recipe.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_pinned_v1.yaml
+
+marl:
+  distributed_gap_baseline_envelope_enabled: true

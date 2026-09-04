@@ -17,7 +17,22 @@ class TestEnvCreation:
         env = UAVISACEnv(config=small_config)
         assert env.K == 2
         assert env.Q == 1
+        assert np.allclose(env.core.reward_computer.omega_q, [1.0])
         env.close()
+
+    def test_programmatic_config_type_bypass_is_rejected(self):
+        cfg = get_default_config()
+        cfg.marl.tracking_enabled = "false"
+        with pytest.raises(ValueError, match="tracking_enabled must be a boolean"):
+            UAVISACEnv(config=cfg)
+
+    def test_programmatic_config_semantic_bypass_is_rejected(self):
+        cfg = get_default_config()
+        cfg.scenario.K = 0
+        with pytest.raises(
+            ValueError, match=r"config\.scenario\.K must be greater than zero"
+        ):
+            UAVISACEnv(config=cfg)
 
 
 class TestReset:
@@ -51,6 +66,53 @@ class TestReset:
 
 
 class TestStep:
+    def test_step_before_reset_fails_without_advancing_time(self):
+        env = UAVISACEnv()
+        actions = {
+            str(k): {"delta_p": np.zeros(2), "role": 2}
+            for k in range(env.K)
+        }
+        assert env.core.t == 0
+        with pytest.raises(
+            RuntimeError, match="environment must be reset before the first step"
+        ):
+            env.step(actions)
+        assert env.core.t == 0
+        env.close()
+
+    @pytest.mark.parametrize(
+        "defect",
+        ["nan", "inf", "shape", "role_range", "role_float", "missing"],
+    )
+    def test_invalid_action_batch_fails_before_state_mutation(self, defect):
+        env = UAVISACEnv()
+        env.reset(seed=42)
+        actions = {
+            str(k): {"delta_p": np.zeros(2), "role": 2}
+            for k in range(env.K)
+        }
+        if defect == "nan":
+            actions["0"]["delta_p"] = np.array([np.nan, 0.0])
+        elif defect == "inf":
+            actions["0"]["delta_p"] = np.array([np.inf, 0.0])
+        elif defect == "shape":
+            actions["0"]["delta_p"] = np.zeros(3)
+        elif defect == "role_range":
+            actions["0"]["role"] = 3
+        elif defect == "role_float":
+            actions["0"]["role"] = 1.5
+        else:
+            del actions["0"]
+
+        before_t = env.core.t
+        before_positions = np.array([u.pos.copy() for u in env.core.uavs])
+        with pytest.raises(ValueError):
+            env.step(actions)
+        assert env.core.t == before_t
+        assert np.array_equal(
+            np.array([u.pos for u in env.core.uavs]), before_positions)
+        env.close()
+
     def test_random_actions_no_crash(self):
         """Random policy rollout for 50 steps — no crashes."""
         env = UAVISACEnv()

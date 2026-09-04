@@ -17,6 +17,7 @@ from tools.assert_gate_thresholds import (
     assert_gate_from_csv,
     assert_medium_gate,
     medium_gate_checks,
+    read_episode_arrays,
     wilson_lower,
 )
 
@@ -101,11 +102,17 @@ def test_assert_gate_from_csv_recomputes_aggregates(tmp_path):
         assert_gate_from_csv(str(bad))
 
 
-def test_assert_gate_from_csv_on_real_4x4_formal_result():
-    # The frozen 4/4 formal result must pass the point-estimate Medium gate.
-    path = ("results/architecture_v2_structure_student_u2u_resolve_bw50k_"
-            "adaptive_b4b8_failclosed_gate100/paired_eval.csv")
-    aggregates = assert_gate_from_csv(path)
+def test_assert_gate_from_csv_on_historical_4x4_fixture(tmp_path):
+    """Lock historical aggregates without requiring an untracked artifact."""
+    path = tmp_path / "historical_4x4_paired_eval.csv"
+    successful = 72
+    failed = 28
+    steady = [0.9132] * 100
+    weak3 = [0.95] * successful + [0.7171428571428572] * failed
+    worst = [0.80] * successful + [0.5832142857142857] * failed
+    _write_csv(path, steady, weak3, worst)
+
+    aggregates = assert_gate_from_csv(str(path))
     assert aggregates["episodes"] == 100
     assert aggregates["steady"] == pytest.approx(0.9132, abs=1e-3)
     assert aggregates["weak3"] == pytest.approx(0.8848, abs=1e-3)
@@ -137,6 +144,18 @@ def test_gate_rejects_duplicate_episode_seeds(tmp_path):
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate evaluation seeds"):
         assert_gate_from_csv(str(path))
+
+
+def test_gate_rejects_duplicate_csv_columns(tmp_path):
+    path = tmp_path / "duplicate_columns.csv"
+    path.write_text(
+        "eval_episode_steady_P_D,eval_episode_steady_P_D,"
+        "eval_episode_weak3_P_D,eval_episode_worst_P_D\n"
+        '"[0.9]","[0.8]","[0.8]","[0.7]"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate CSV columns"):
+        read_episode_arrays(str(path))
 
 
 def test_gate_rejects_nonfinite_or_out_of_range_metrics(tmp_path):

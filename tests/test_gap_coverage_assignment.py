@@ -1,8 +1,9 @@
 """Tests for the gap-coverage movement (three-phase policy, Phase A/B).
 
-Coverage invariant C1: every target must have a Tx and an Rx endpoint within
-the critical radius (the P_D >= 0.6 operational radius).  The deterministic
-assignment must cover all uncovered targets, respect per-node capacity, be
+The geometric objective asks for a Tx and Rx endpoint within the configured
+design radius; it is not itself a P_D guarantee.  The deterministic
+assignment must give recovery responsibility to uncovered targets, respect
+per-node capacity, be
 reproducible from identical public views, and never leave an uncovered target
 without a responsibility when a suitable endpoint exists.
 """

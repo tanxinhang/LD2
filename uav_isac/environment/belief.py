@@ -17,6 +17,112 @@ NIS-driven covariance calibration (Layer 1 of Calibrate–Gate–Schedule–Reco
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from uav_isac.utils.types import BeliefState
+from uav_isac.physical.geometry import C_LIGHT
+
+
+def bistatic_range_doppler_measurement_and_jacobian(
+    state: np.ndarray,
+    transmitter_position_m: np.ndarray,
+    transmitter_velocity_mps: np.ndarray,
+    receiver_position_m: np.ndarray,
+    receiver_velocity_mps: np.ndarray,
+    carrier_hz: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return physical bistatic range/Doppler and its state Jacobian.
+
+    ``state`` is CV/CA ordered as ``[x,y,vx,vy,(ax,ay)]``; the target is on
+    the ground plane.  The measured Doppler convention matches the sensing
+    geometry used by the deflection computer.  Acceleration has no direct
+    measurement column and becomes observable only through CA dynamics.
+    """
+    value = np.asarray(state, dtype=np.float64).reshape(-1)
+    tx_position = np.asarray(
+        transmitter_position_m, dtype=np.float64).reshape(-1)
+    rx_position = np.asarray(
+        receiver_position_m, dtype=np.float64).reshape(-1)
+    tx_velocity = np.asarray(
+        transmitter_velocity_mps, dtype=np.float64).reshape(-1)
+    rx_velocity = np.asarray(
+        receiver_velocity_mps, dtype=np.float64).reshape(-1)
+    fc = float(carrier_hz)
+    if (
+        value.size not in (4, 6)
+        or any(item.shape != (3,) for item in (
+            tx_position, rx_position, tx_velocity, rx_velocity))
+        or any(np.any(~np.isfinite(item)) for item in (
+            value, tx_position, rx_position, tx_velocity, rx_velocity))
+        or not np.isfinite(fc) or fc <= 0.0
+    ):
+        raise ValueError('bistatic state/endpoint inputs are invalid')
+    target_position = np.asarray([value[0], value[1], 0.0])
+    target_velocity = np.asarray([value[2], value[3], 0.0])
+    measurement = np.zeros(2, dtype=np.float64)
+    jacobian = np.zeros((2, value.size), dtype=np.float64)
+    doppler_position_gradient = np.zeros(2, dtype=np.float64)
+    doppler_velocity_gradient = np.zeros(2, dtype=np.float64)
+    for node_position, node_velocity in (
+        (tx_position, tx_velocity),
+        (rx_position, rx_velocity),
+    ):
+        displacement = target_position - node_position
+        distance = float(np.linalg.norm(displacement))
+        if distance <= 1.0e-9:
+            raise ValueError('bistatic endpoint cannot coincide with target')
+        direction = displacement / distance
+        relative_velocity = node_velocity - target_velocity
+        measurement[0] += distance
+        measurement[1] += float(relative_velocity @ direction)
+        jacobian[0, :2] += direction[:2]
+        direction_derivative = (
+            np.eye(3, dtype=np.float64)
+            - np.outer(direction, direction)
+        ) / distance
+        doppler_position_gradient += (
+            direction_derivative @ relative_velocity)[:2]
+        doppler_velocity_gradient -= direction[:2]
+    doppler_scale = fc / C_LIGHT
+    measurement[1] *= doppler_scale
+    jacobian[1, :2] = doppler_scale * doppler_position_gradient
+    jacobian[1, 2:4] = doppler_scale * doppler_velocity_gradient
+    return measurement, jacobian
+
+
+def bistatic_range_doppler_crlb(
+    effective_deflection: float,
+    bandwidth_hz: float,
+    coherent_time_s: float,
+    *,
+    efficiency: float = 1.0,
+    minimum_effective_deflection: float = 1.0e-3,
+) -> np.ndarray:
+    """Ideal known-signal delay/Doppler CRLB with declared practical loss.
+
+    The deployed deflection is signal-energy/noise scaled by report and DD
+    effectiveness, so it is the consistent effective-SNR statistic here.
+    Rectangular occupied bandwidth/time use RMS spreads B/sqrt(12) and
+    T/sqrt(12).  ``efficiency>=1`` prevents calling the ideal bound achieved
+    estimator performance without calibration.
+    """
+    snr = float(effective_deflection)
+    bandwidth = float(bandwidth_hz)
+    coherent_time = float(coherent_time_s)
+    loss = float(efficiency)
+    floor = float(minimum_effective_deflection)
+    if (
+        not all(np.isfinite(item) for item in (
+            snr, bandwidth, coherent_time, loss, floor))
+        or snr < 0.0 or bandwidth <= 0.0 or coherent_time <= 0.0
+        or loss < 1.0 or floor <= 0.0
+    ):
+        raise ValueError('bistatic CRLB inputs are invalid')
+    effective_snr = max(snr, floor)
+    beta_rms = bandwidth / np.sqrt(12.0)
+    time_rms = coherent_time / np.sqrt(12.0)
+    common = 8.0 * np.pi * np.pi * effective_snr
+    range_variance = (
+        loss * C_LIGHT * C_LIGHT / (common * beta_rms * beta_rms))
+    doppler_variance = loss / (common * time_rms * time_rms)
+    return np.diag([range_variance, doppler_variance])
 
 
 def generalized_covariance_intersection(
@@ -68,6 +174,66 @@ def generalized_covariance_intersection(
     fused_covariance = 0.5 * (
         fused_covariance + fused_covariance.T)
     fused_mean = fused_covariance @ information_mean
+    return fused_mean, fused_covariance
+
+
+def batched_pair_covariance_intersection(
+    local_means: np.ndarray,
+    local_covariances: np.ndarray,
+    remote_means: np.ndarray,
+    remote_covariances: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized equal-weight CI for independent receiver/target pairs.
+
+    This is algebraically the two-estimate specialization of
+    :func:`generalized_covariance_intersection`.  Batching changes only the
+    simulator execution graph: each row remains a separate CI problem and no
+    cross-row information is introduced.
+    """
+    local_values = np.asarray(local_means, dtype=np.float64)
+    remote_values = np.asarray(remote_means, dtype=np.float64)
+    local_covs = np.asarray(local_covariances, dtype=np.float64)
+    remote_covs = np.asarray(remote_covariances, dtype=np.float64)
+    if (
+        local_values.ndim != 2
+        or remote_values.shape != local_values.shape
+        or local_covs.shape != (
+            local_values.shape[0],
+            local_values.shape[1],
+            local_values.shape[1],
+        )
+        or remote_covs.shape != local_covs.shape
+    ):
+        raise ValueError('batched pair beliefs have inconsistent shapes')
+    if local_values.shape[0] == 0:
+        return local_values.copy(), local_covs.copy()
+    if not all(np.all(np.isfinite(item)) for item in (
+        local_values, remote_values, local_covs, remote_covs,
+    )):
+        raise ValueError('batched pair beliefs must be finite')
+    local_symmetric = 0.5 * (
+        local_covs + np.swapaxes(local_covs, -1, -2))
+    remote_symmetric = 0.5 * (
+        remote_covs + np.swapaxes(remote_covs, -1, -2))
+    if (
+        np.any(np.linalg.eigvalsh(local_symmetric) <= 0.0)
+        or np.any(np.linalg.eigvalsh(remote_symmetric) <= 0.0)
+    ):
+        raise ValueError('covariances must be positive definite')
+    local_precision = np.linalg.inv(local_symmetric)
+    remote_precision = np.linalg.inv(remote_symmetric)
+    information = 0.5 * (local_precision + remote_precision)
+    information_mean = 0.5 * (
+        np.einsum('nij,nj->ni', local_precision, local_values)
+        + np.einsum('nij,nj->ni', remote_precision, remote_values)
+    )
+    fused_covariance = np.linalg.inv(information)
+    fused_covariance = 0.5 * (
+        fused_covariance
+        + np.swapaxes(fused_covariance, -1, -2)
+    )
+    fused_mean = np.einsum(
+        'nij,nj->ni', fused_covariance, information_mean)
     return fused_mean, fused_covariance
 
 
@@ -163,6 +329,15 @@ class BeliefManager:
         self.sigma_a = sigma_a
         self.meas_pos_std = meas_pos_std
         self.meas_vel_std = meas_vel_std
+        self.initial_position_std = float(initial_position_std)
+        self.initial_velocity_std = float(initial_velocity_std)
+        if (
+            not np.isfinite(self.initial_position_std)
+            or not np.isfinite(self.initial_velocity_std)
+            or self.initial_position_std < 0.0
+            or self.initial_velocity_std < 0.0
+        ):
+            raise ValueError('initial belief standard deviations must be finite and non-negative')
         self.rng = rng if rng is not None else np.random.default_rng()
         self.motion_model = motion_model
 
@@ -223,18 +398,18 @@ class BeliefManager:
         sd = self.state_dim
         for k in range(K):
             for q in range(Q):
-                pos_noise = self.rng.normal(0, initial_position_std, size=2)
-                vel_noise = self.rng.normal(0, initial_velocity_std, size=2)
+                pos_noise = self.rng.normal(0, self.initial_position_std, size=2)
+                vel_noise = self.rng.normal(0, self.initial_velocity_std, size=2)
                 self.mean[k, q, :] = 0.0
                 self.mean[k, q, 0] = initial_positions[q, 0] + pos_noise[0]
                 self.mean[k, q, 1] = initial_positions[q, 1] + pos_noise[1]
                 self.mean[k, q, 2] = initial_velocities[q, 0] + vel_noise[0]
                 self.mean[k, q, 3] = initial_velocities[q, 1] + vel_noise[1]
                 cov_init = np.zeros((sd, sd), dtype=np.float64)
-                cov_init[0, 0] = initial_position_std**2
-                cov_init[1, 1] = initial_position_std**2
-                cov_init[2, 2] = initial_velocity_std**2
-                cov_init[3, 3] = initial_velocity_std**2
+                cov_init[0, 0] = self.initial_position_std**2
+                cov_init[1, 1] = self.initial_position_std**2
+                cov_init[2, 2] = self.initial_velocity_std**2
+                cov_init[3, 3] = self.initial_velocity_std**2
                 if sd >= 6:
                     cov_init[4, 4] = 1.0; cov_init[5, 5] = 1.0
                 self.cov[k, q] = cov_init
@@ -363,11 +538,18 @@ class BeliefManager:
         target_id: int,
         observed: bool,
         true_state: Optional[np.ndarray] = None,  # (4,) [x,y,vx,vy]
+        *,
+        detection_probability: Optional[float] = None,
+        detection_probability_floor: float = 1.0e-3,
     ) -> None:
         """Kalman update if target was observed (detected by this UAV).
 
-        Uses a noisy measurement of TRUE target position/velocity with
-        covariance self.R. Resets AoI to 0 on observation.
+        Uses a noisy measurement of TRUE target position/velocity.  The
+        historical path uses covariance ``R``.  When a detection probability
+        is supplied, the deterministic expected-information approximation
+        uses ``R_eff=R/max(p,p_floor)``, because a Bernoulli-available
+        measurement contributes expected Fisher information ``p R^-1``.
+        Resets AoI to 0 on observation.
 
         When NIS calibration is enabled, computes the Normalized Innovation
         Squared and updates the per-(k,q) EMA for covariance inflation.
@@ -381,17 +563,31 @@ class BeliefManager:
         if not observed or true_state is None:
             return
 
+        effective_R = self.R
+        if detection_probability is not None:
+            probability = float(detection_probability)
+            probability_floor = float(detection_probability_floor)
+            if (
+                not np.isfinite(probability)
+                or not 0.0 <= probability <= 1.0
+                or not np.isfinite(probability_floor)
+                or not 0.0 < probability_floor <= 1.0
+            ):
+                raise ValueError(
+                    'detection probability/floor must lie in [0,1]/(0,1]')
+            effective_R = self.R / max(probability, probability_floor)
+
         mean = self.mean[uav_id, target_id]  # (sd,)
         cov = self.cov[uav_id, target_id]    # (sd, sd)
 
         # Noisy measurement of TRUE target state [x,y,vx,vy]
-        noise = self.rng.normal(0, np.sqrt(np.diag(self.R)))
+        noise = self.rng.normal(0, np.sqrt(np.diag(effective_R)))
         z = true_state + noise  # (4,)
 
         # Measurement prediction
         z_pred = self.H @ mean   # (4,)
         # Innovation covariance: S = H P H^T + R
-        S = self.H @ cov @ self.H.T + self.R  # (4, 4)
+        S = self.H @ cov @ self.H.T + effective_R  # (4, 4)
         # Kalman gain: K = P H^T S^{-1}
         K_gain = cov @ self.H.T @ np.linalg.inv(S)  # (sd, 4)
         innovation = z - z_pred  # (4,)
@@ -411,7 +607,7 @@ class BeliefManager:
         # Joseph form: P+ = (I-KH)P-(I-KH)^T + K R K^T
         I_KH = np.eye(self.state_dim) - K_gain @ self.H  # (sd, sd)
         self.cov[uav_id, target_id] = (
-            I_KH @ cov @ I_KH.T + K_gain @ self.R @ K_gain.T
+            I_KH @ cov @ I_KH.T + K_gain @ effective_R @ K_gain.T
         )
         # Ensure symmetry
         self.cov[uav_id, target_id] = 0.5 * (
@@ -419,6 +615,97 @@ class BeliefManager:
         )
 
         # Reset AoI
+        self.aoi[uav_id, target_id] = 0
+
+    def update_after_bistatic_observation(
+        self,
+        uav_id: int,
+        target_id: int,
+        observed: bool,
+        true_state: Optional[np.ndarray],
+        *,
+        transmitter_position_m: np.ndarray,
+        transmitter_velocity_mps: np.ndarray,
+        receiver_position_m: np.ndarray,
+        receiver_velocity_mps: np.ndarray,
+        carrier_hz: float,
+        effective_deflection: float,
+        bandwidth_hz: float,
+        coherent_time_s: float,
+        crlb_efficiency: float = 1.0,
+        minimum_effective_deflection: float = 1.0e-3,
+    ) -> None:
+        """EKF update from one selected physical bistatic echo.
+
+        Only the receiver-local filter should consume this update.  Simulator
+        truth is used solely to generate a noisy range/Doppler measurement;
+        the estimator receives neither Cartesian truth nor target velocity.
+        """
+        if not observed or true_state is None:
+            return
+        target_truth = np.asarray(true_state, dtype=np.float64).reshape(-1)
+        if target_truth.shape != (4,) or np.any(~np.isfinite(target_truth)):
+            raise ValueError('true_state must be finite [x,y,vx,vy]')
+        mean = self.mean[uav_id, target_id]
+        covariance = self.cov[uav_id, target_id]
+        truth_for_model = np.zeros(self.state_dim, dtype=np.float64)
+        truth_for_model[:4] = target_truth
+        true_measurement, _ = (
+            bistatic_range_doppler_measurement_and_jacobian(
+                truth_for_model,
+                transmitter_position_m,
+                transmitter_velocity_mps,
+                receiver_position_m,
+                receiver_velocity_mps,
+                carrier_hz,
+            )
+        )
+        predicted_measurement, jacobian = (
+            bistatic_range_doppler_measurement_and_jacobian(
+                mean,
+                transmitter_position_m,
+                transmitter_velocity_mps,
+                receiver_position_m,
+                receiver_velocity_mps,
+                carrier_hz,
+            )
+        )
+        measurement_covariance = bistatic_range_doppler_crlb(
+            effective_deflection,
+            bandwidth_hz,
+            coherent_time_s,
+            efficiency=crlb_efficiency,
+            minimum_effective_deflection=minimum_effective_deflection,
+        )
+        measurement = true_measurement + self.rng.normal(
+            0.0, np.sqrt(np.diag(measurement_covariance)))
+        innovation = measurement - predicted_measurement
+        innovation_covariance = (
+            jacobian @ covariance @ jacobian.T
+            + measurement_covariance
+        )
+        kalman_gain = (
+            covariance @ jacobian.T
+            @ np.linalg.inv(innovation_covariance)
+        )
+        if self.nis_enabled:
+            nis = float(
+                innovation
+                @ np.linalg.solve(innovation_covariance, innovation))
+            self._last_nis[uav_id, target_id] = nis
+            self.nis_ema[uav_id, target_id] = (
+                (1.0 - self.nis_window) * self.nis_ema[uav_id, target_id]
+                + self.nis_window * (nis / 2.0)
+            )
+        self.mean[uav_id, target_id] = mean + kalman_gain @ innovation
+        identity_minus_kh = (
+            np.eye(self.state_dim) - kalman_gain @ jacobian)
+        posterior = (
+            identity_minus_kh @ covariance @ identity_minus_kh.T
+            + kalman_gain @ measurement_covariance @ kalman_gain.T
+        )
+        self.cov[uav_id, target_id] = 0.5 * (
+            posterior + posterior.T)
         self.aoi[uav_id, target_id] = 0
 
     def get_nis_status(self, uav_id: int, target_id: int) -> Dict:
@@ -476,8 +763,10 @@ class BeliefManager:
         sd = self.state_dim
         for k in range(self.K):
             for q in range(self.Q):
-                pos_noise = self.rng.normal(0, 50.0, size=2)
-                vel_noise = self.rng.normal(0, 5.0, size=2)
+                pos_noise = self.rng.normal(
+                    0, self.initial_position_std, size=2)
+                vel_noise = self.rng.normal(
+                    0, self.initial_velocity_std, size=2)
                 self.mean[k, q, :] = 0.0
                 self.mean[k, q, 0] = initial_positions[q, 0] + pos_noise[0]
                 self.mean[k, q, 1] = initial_positions[q, 1] + pos_noise[1]
@@ -485,8 +774,10 @@ class BeliefManager:
                 self.mean[k, q, 3] = initial_velocities[q, 1] + vel_noise[1]
                 # CA: ax, ay init at 0
                 cov_init = np.zeros((sd, sd), dtype=np.float64)
-                cov_init[0, 0] = 2500.0; cov_init[1, 1] = 2500.0
-                cov_init[2, 2] = 25.0;   cov_init[3, 3] = 25.0
+                cov_init[0, 0] = self.initial_position_std**2
+                cov_init[1, 1] = self.initial_position_std**2
+                cov_init[2, 2] = self.initial_velocity_std**2
+                cov_init[3, 3] = self.initial_velocity_std**2
                 if sd >= 6:
                     cov_init[4, 4] = 1.0; cov_init[5, 5] = 1.0  # ax,ay variance
                 self.cov[k, q] = cov_init

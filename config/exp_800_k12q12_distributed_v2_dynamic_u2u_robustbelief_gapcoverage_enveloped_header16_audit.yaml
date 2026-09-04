@@ -1,0 +1,6 @@
+# Full-rate beacons with a 16-bit fixed-schema CRC header. Sender, rate and
+# schema are implicit in the configured orthogonal resource/time schedule.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  hyperedge_protocol_header_bits: 16

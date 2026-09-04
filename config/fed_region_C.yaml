@@ -1,0 +1,9 @@
+extends: exp_800_k8q8.yaml
+
+# Federated client C: less favorable LoS probability profile.
+target:
+  speed_range: [0, 5]
+
+channel:
+  los_a: 7.0
+  los_b: 0.30

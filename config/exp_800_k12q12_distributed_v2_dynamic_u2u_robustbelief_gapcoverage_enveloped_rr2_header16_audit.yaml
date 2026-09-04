@@ -1,0 +1,5 @@
+# RR2 beacons plus the explicit 16-bit fixed-schema CRC header.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_rr2_audit.yaml
+
+marl:
+  hyperedge_protocol_header_bits: 16

@@ -10,7 +10,6 @@ stress testing.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -23,6 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.params import load_config
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.reproducibility import (
+    SCENARIO_FINGERPRINT_VERSION,
+    scenario_fingerprint,
+)
 
 
 # Seeds permanently isolated after the 2026-07-29 test-set contamination
@@ -106,18 +109,7 @@ def build_disjoint_splits(
 
 
 def _scenario_fingerprint(config_path: str, cfg) -> str:
-    payload = {
-        "config": os.path.normpath(config_path),
-        "region_size": list(cfg.scenario.region_size),
-        "K": int(cfg.scenario.K),
-        "Q": int(cfg.scenario.Q),
-        "T": int(cfg.scenario.T),
-        "dt": float(cfg.scenario.dt),
-        "v_max": float(cfg.uav.v_max),
-        "tracking_enabled": bool(cfg.marl.tracking_enabled),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return scenario_fingerprint(cfg, config_path)
 
 
 def generate_seed_bank(
@@ -172,7 +164,8 @@ def generate_seed_bank(
     )
     splits["stress"] = stress_candidates[:int(stress_size)]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "fingerprint_version": SCENARIO_FINGERPRINT_VERSION,
         "scenario_fingerprint": _scenario_fingerprint(config_path, cfg),
         "source_config": os.path.normpath(config_path),
         "candidate_count": len(metadata),
@@ -209,12 +202,25 @@ def main() -> None:
     parser.add_argument("--stress-size", type=int, default=50)
     parser.add_argument("--sampling-seed", type=int, default=20260721)
     parser.add_argument(
+        "--exclude-seeds", default="",
+        help="comma-separated development/smoke seeds excluded before draw",
+    )
+    parser.add_argument(
         "--output", default="config/stratified_seeds_800_q4.json")
     args = parser.parse_args()
 
+    development_excluded = sorted({
+        int(value.strip())
+        for value in str(args.exclude_seeds).split(",")
+        if value.strip()
+    })
     bank = generate_seed_bank(
         config_path=args.config,
-        candidate_seeds=range(args.seed_start, args.seed_start + args.seed_count),
+        candidate_seeds=(
+            seed for seed in range(
+                args.seed_start, args.seed_start + args.seed_count)
+            if seed not in set(development_excluded)
+        ),
         nominal_d1_max_m=args.nominal_d1_max_m,
         split_sizes={
             "selection": args.selection_size,
@@ -224,6 +230,7 @@ def main() -> None:
         stress_size=args.stress_size,
         sampling_seed=args.sampling_seed,
     )
+    bank["development_excluded"] = development_excluded
     output = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as handle:

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.params import load_config
 from tools.pretrain_qos_commitment import build_agent
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 from uav_isac.utils.seeding import set_seed
 
 
@@ -82,9 +83,17 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     env = UAVISACEnv(config=cfg, seed=args.seed)
     agent = build_agent(cfg, env, device)
-    checkpoint = torch.load(
-        args.checkpoint, map_location=device, weights_only=False)
-    agent.load_actor_state_dict_compatible(checkpoint.get("actor", checkpoint))
+    checkpoint = safe_torch_load(
+        args.checkpoint,
+        map_location=device,
+        description="token semantic-decoder source checkpoint",
+        optional_mapping_keys=("runtime",),
+        optional_state_dict_keys=("actor",),
+    )
+    actor_state = checkpoint.get("actor", checkpoint)
+    validate_state_dict(
+        actor_state, description="token semantic-decoder actor state_dict")
+    agent.load_actor_state_dict_compatible(actor_state)
     runtime = checkpoint.get("runtime", {})
     if hasattr(agent.actor, "set_capacity_matching_blend"):
         agent.actor.set_capacity_matching_blend(float(runtime.get(

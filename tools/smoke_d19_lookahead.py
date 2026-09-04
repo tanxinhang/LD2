@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.params import load_config  # noqa: E402
 from uav_isac.agents.trainer import MAPPTrainer  # noqa: E402
+from uav_isac.utils.checkpoint_loading import safe_torch_load  # noqa: E402
 
 
 def _build_trainer(config_path: str, warm_start: str, lookahead: int):
@@ -37,7 +38,13 @@ def _build_trainer(config_path: str, warm_start: str, lookahead: int):
     if warm_start:
         import torch
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ckpt = torch.load(warm_start, map_location=device)
+        ckpt = safe_torch_load(
+            warm_start,
+            map_location=device,
+            description="D1.9 smoke warm-start checkpoint",
+            state_dict_keys=("actor",),
+            optional_state_dict_keys=("critic",),
+        )
         missing, unexpected = trainer.agents[0].actor.load_state_dict(
             ckpt["actor"], strict=False)
         trainer.agents[0].actor.to(device)

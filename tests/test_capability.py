@@ -1,8 +1,11 @@
 """Tests for the capability gauge and its monotonicity (D0.93-E)."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+import uav_isac.coordination.capability as capability_module
 from uav_isac.coordination.capability import (
     _bottom_k_sum,
     capability_gauge,
@@ -58,6 +61,25 @@ def test_gauge_none_when_target_unreachable():
     gain = np.array([[1.0, 0.0], [1.0, 0.0]])
     budget = np.array([1.0, 1.0])
     assert capability_gauge(gain, budget, P_FA, XI) is None
+
+
+def test_gauge_solver_failure_is_never_reported_as_a_certificate(monkeypatch):
+    gain = np.full((2, 2), 10.0)
+    budget = np.ones(2)
+    variable_count = gain.size + 2 + gain.shape[1]
+
+    monkeypatch.setattr(
+        capability_module,
+        "minimize",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            success=False,
+            x=np.zeros(variable_count),
+            message="forced failure",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="capability gauge solver failed"):
+        capability_gauge(gain, budget, P_FA, XI)
 
 
 def test_gauge_bottom_k_binds():

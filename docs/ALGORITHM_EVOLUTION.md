@@ -272,7 +272,10 @@ P_D^I ≤ ε 每帧保持（跨运动/结构变化）；QoS 代价随对手强�
 的"隐藏价值"面。**结论**：默认 True 但无害（超集 + stay 保留 + 对偶剪枝零成本），
 仅在评分器变为隐蔽性感知时有价值。
 
-## 最终 Gate 断言（`tools/assert_formal_gates.py`）
+## 历史 Gate 断言（`tools/assert_formal_gates.py --evidence-epoch historical`）
+
+下表为 pre-G2 算法演进证据，不是当前 continuous-DD 身份的正式认证。默认不带参数的
+命令只接受 post-G2 注册结果；当前尚无此类 confirmatory artifact，因此应 fail closed。
 
 | 结果 | steady | weak3 | worst | QoS | LCB | 判定 |
 |---|---:|---:|---:|---:|---:|---|
@@ -1092,7 +1095,7 @@ TX 边/目标）下**界零违例**（worst violation = 0.0）——理论正确
 每 score 误差 `ε_B ≤ R/(2(2^B−1))`，排序保持条件 `Δ > 2ε_B` 给出
 
 ```text
-B ≥ ⌈log₂(1 + R/Δ)⌉
+B > log₂(1 + R/Δ), 即 B_min = floor(log₂(1 + R/Δ)) + 1
 ```
 
 **事件触发**：`Δ > 2 E_stale(h) + 2ε_B ⟹ 不发 Token`（漂移界 E_stale 来自

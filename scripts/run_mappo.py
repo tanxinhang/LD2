@@ -4,29 +4,104 @@
 import sys
 import os
 import argparse
-import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import numpy as np
-import torch
 
-from config.params import get_default_config, load_config
-from uav_isac.utils.seeding import set_seed
-from uav_isac.environment.env_wrapper import UAVISACEnv
-from uav_isac.environment.action import ActionSpace
-from uav_isac.agents.mappo_agent import MAPPOAgent
-from uav_isac.agents.trainer import MAPPTrainer, load_stratified_seed_split
-from uav_isac.utils.provenance import (
-    build_run_provenance,
-    write_source_snapshot,
-)
-from uav_isac.evaluation.layer_provenance import (
-    canonical_json_sha256,
-    sha256_state_dict,
-)
+def _import_torch_with_single_windows_openmp():
+    """Import Torch without mapping a second Intel OpenMP runtime on Windows.
+
+    The reference Conda environment contains ``libiomp5md.dll`` both under
+    ``Library/bin`` (NumPy/SciPy/MKL) and ``torch/lib``.  Torch's Windows
+    loader eagerly opens every DLL in its private directory by absolute path,
+    so both copies become mapped and a later alternating Torch/MKL call aborts
+    with OMP Error #15.  Preload the environment runtime and omit only Torch's
+    duplicate runtime DLLs from that eager enumeration.  Dependent Torch DLLs
+    then bind to the already-loaded ABI-compatible runtime by module name.
+
+    This does not use ``KMP_DUPLICATE_LIB_OK``: the invariant is one mapped
+    OpenMP runtime, rather than permission for two runtimes to coexist.
+    """
+    if os.name != "nt":
+        import torch
+        return torch, None
+
+    import ctypes
+    import glob
+    import importlib.util
+
+    spec = importlib.util.find_spec("torch")
+    torch_root = (
+        os.path.dirname(os.path.abspath(spec.origin))
+        if spec is not None and spec.origin else ""
+    )
+    env_runtime = os.path.join(
+        sys.prefix, "Library", "bin", "libiomp5md.dll")
+    torch_runtime_dir = os.path.join(torch_root, "lib")
+    duplicate_paths = {
+        os.path.normcase(os.path.abspath(os.path.join(
+            torch_runtime_dir, name)))
+        for name in ("libiomp5md.dll", "libiompstubs5md.dll")
+    }
+    has_duplicate = (
+        os.path.isfile(env_runtime)
+        and os.path.isfile(os.path.join(
+            torch_runtime_dir, "libiomp5md.dll"))
+    )
+    if not has_duplicate:
+        import torch
+        return torch, None
+
+    runtime_handle = ctypes.WinDLL(env_runtime)
+    original_glob = glob.glob
+
+    def _glob_without_duplicate_openmp(pattern, *args, **kwargs):
+        paths = original_glob(pattern, *args, **kwargs)
+        return [
+            path for path in paths
+            if os.path.normcase(os.path.abspath(path)) not in duplicate_paths
+        ]
+
+    glob.glob = _glob_without_duplicate_openmp
+    try:
+        import torch
+    finally:
+        glob.glob = original_glob
+    return torch, runtime_handle
 
 
 def main():
+    # Keep heavy numerical/ML imports out of module scope.  On Windows the
+    # private-LP ProcessPool uses ``spawn``, which imports this entry module as
+    # ``__mp_main__`` in every worker.  Eager Torch/CUDA/trainer/environment
+    # imports made an LP-only worker pay the entire training-stack startup
+    # cost.  The spawn child does not call ``main()``, so local imports retain
+    # identical controller behavior while keeping the worker dependency path
+    # limited to its actual NumPy/SciPy/HiGHS solver.
+    import numpy as np
+    torch, _openmp_runtime_handle = _import_torch_with_single_windows_openmp()
+
+    from config.params import get_default_config, load_config
+    from uav_isac.utils.seeding import set_seed
+    from uav_isac.environment.env_wrapper import UAVISACEnv
+    from uav_isac.environment.action import ActionSpace
+    from uav_isac.agents.mappo_agent import MAPPOAgent
+    from uav_isac.agents.trainer import (
+        MAPPTrainer,
+        load_stratified_seed_split,
+    )
+    from uav_isac.utils.provenance import (
+        build_run_provenance,
+        write_source_snapshot,
+    )
+    from uav_isac.evaluation.layer_provenance import (
+        canonical_json_sha256,
+        sha256_state_dict,
+    )
+    from uav_isac.utils.checkpoint_loading import (
+        safe_torch_load,
+        validate_state_dict,
+    )
+
     ap = argparse.ArgumentParser(description="Train MAPPO (optionally warm-started).")
     ap.add_argument("--config", default=None, help="config YAML (default: config/default.yaml)")
     ap.add_argument("--warm-start", default=None,
@@ -552,8 +627,16 @@ def main():
     # Warm-start: load a pretrained (e.g. DAgger-cloned) actor into the SHARED actor.
     warm_runtime = None
     if args.warm_start:
-        ckpt = torch.load(args.warm_start, map_location=device)
+        ckpt = safe_torch_load(
+            args.warm_start,
+            map_location=device,
+            description="MAPPO warm-start checkpoint",
+            optional_mapping_keys=("runtime",),
+            optional_state_dict_keys=("actor", "critic"),
+        )
         actor_state = ckpt.get('actor', ckpt)  # unwrap if dict
+        validate_state_dict(
+            actor_state, description="MAPPO warm-start actor state_dict")
         if isinstance(ckpt, dict):
             warm_runtime = ckpt.get('runtime')
         # Allow missing aux head keys (added after warmstart was generated)
@@ -1370,12 +1453,15 @@ def main():
             'centralized_critic': bool(trainer.centralized_critic),
         }
         torch.save(checkpoint, os.path.join(out_dir, "best_restored.pt"))
-    except Exception as e:
-        print(f"  [warn] paired eval failed: {e}")
-        traceback.print_exc()
+    except Exception as error:
+        raise RuntimeError(
+            "final paired evaluation or deployable checkpoint persistence "
+            "failed; the run is incomplete"
+        ) from error
+    finally:
+        env.close()
 
     print(f"Results saved → {out_dir}")
-    env.close()
     print("Done.")
 
 

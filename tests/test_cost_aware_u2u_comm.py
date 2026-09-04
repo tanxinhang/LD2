@@ -1,6 +1,7 @@
 """Regression tests for tracking-free, cost-aware emergent U2U communication."""
 
 import numpy as np
+import pytest
 import torch
 
 from config.params import get_default_config, load_config
@@ -111,6 +112,53 @@ def test_canonical_medium_u2u_config_uses_soft_communication_objective():
     assert pretrain_cfg.marl.ppo_epochs == 0
     assert pretrain_cfg.marl.target_allocation_movement_blend == 0.05
     assert pretrain_cfg.marl.target_allocation_teacher_epochs == 32
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "message_nan", "message_shape", "rate_missing", "rate_float",
+        "fraction_nan", "weight_nan", "weight_zero", "mask_nan",
+    ],
+)
+def test_learned_communication_rejects_invalid_policy_payload_atomically(defect):
+    cfg = load_config("config/exp_800_q4_u2u_joint_isac.yaml")
+    env = UAVISACEnv(config=cfg, seed=5)
+    core = env.core
+    messages = {0: np.zeros(core._comm_payload_dim)}
+    rates = {0: 1}
+    fractions = {0: 0.5}
+    weights = {0: np.ones(core.Q)}
+    masks = {0: np.ones(core.Q)}
+    if defect == "message_nan":
+        messages[0][0] = np.nan
+    elif defect == "message_shape":
+        messages[0] = np.zeros(core._comm_payload_dim + 1)
+    elif defect == "rate_missing":
+        rates = {}
+    elif defect == "rate_float":
+        rates[0] = 1.5
+    elif defect == "fraction_nan":
+        fractions[0] = np.nan
+    elif defect == "weight_nan":
+        weights[0][0] = np.nan
+    elif defect == "weight_zero":
+        weights[0] = np.zeros(core.Q)
+    else:
+        masks[0][0] = np.nan
+
+    with pytest.raises(ValueError):
+        core.submit_learned_communications(
+            messages,
+            rates,
+            fractions,
+            weights,
+            token_masks=masks,
+        )
+    assert core._pending_comm_messages == {}
+    assert core._pending_comm_rates == {}
+    assert core._pending_comm_token_masks == {}
+    env.close()
 
 
 def test_qos_rate_barrier_requires_precision_only_until_floors_are_met():
@@ -1506,6 +1554,46 @@ def test_capacity_sinkhorn_respects_two_endpoint_marginals_and_gradient():
     assignment[:, 0, 0].sum().backward()
     assert logits.grad is not None
     assert logits.grad.abs().sum() > 0.0
+
+
+def test_capacity_sinkhorn_small_cuda_graph_is_bit_exact():
+    """Graph-replayed fixed bisection preserves values and gradients."""
+    if not torch.cuda.is_available():
+        return
+    torch.manual_seed(372)
+    native_logits = torch.randn(
+        12, 12, 12, device='cuda', requires_grad=True)
+    offload_logits = native_logits.detach().clone().requires_grad_(True)
+    auto_logits = native_logits.detach().clone()
+
+    native = capacity_sinkhorn_normalize(
+        native_logits, row_capacity=2, column_capacity=2,
+        iterations=16, temperature=0.35, use_cuda_graph=False)
+    replayed = capacity_sinkhorn_normalize(
+        offload_logits, row_capacity=2, column_capacity=2,
+        iterations=16, temperature=0.35, use_cuda_graph=True)
+    automatic = capacity_sinkhorn_normalize(
+        auto_logits, row_capacity=2, column_capacity=2,
+        iterations=16, temperature=0.35)
+
+    assert torch.equal(replayed, native)
+    assert torch.equal(automatic, native.detach())
+    native_gradient = torch.autograd.grad(
+        native[:, 0, 0].sum(), native_logits)[0]
+    replay_gradient = torch.autograd.grad(
+        replayed[:, 0, 0].sum(), offload_logits)[0]
+    assert torch.equal(replay_gradient, native_gradient)
+
+    # Reuse must copy new logits into the static graph input, not replay the
+    # first result accidentally.
+    second_logits = torch.randn(12, 12, 12, device='cuda')
+    second_native = capacity_sinkhorn_normalize(
+        second_logits, row_capacity=2, column_capacity=2,
+        iterations=16, temperature=0.35, use_cuda_graph=False)
+    second_replayed = capacity_sinkhorn_normalize(
+        second_logits, row_capacity=2, column_capacity=2,
+        iterations=16, temperature=0.35, use_cuda_graph=True)
+    assert torch.equal(second_replayed, second_native)
 
 
 def test_compatible_warmstart_zeroes_new_capacity_bid_layers():

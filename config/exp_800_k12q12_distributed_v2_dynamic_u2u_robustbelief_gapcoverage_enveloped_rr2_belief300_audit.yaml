@@ -1,0 +1,6 @@
+# RR2 coordination plus a fully charged three-posterior global freshness
+# budget. Every selected 4D posterior still carries its full 88-bit state.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_rr2_audit.yaml
+
+marl:
+  u2u_belief_feedback_bit_budget: 300

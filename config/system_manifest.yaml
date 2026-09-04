@@ -1,0 +1,106 @@
+# system_manifest.yaml -- frozen post-G2 base identity (advice/001 C0)
+# =============================================================================
+# Scope: inherited physical/protocol contract for the canonical paper system.
+# A formal run must use a runtime profile that transitively extends this file
+# and binds a reset-distribution/v2 bank.  The current executable profile is
+# ``exp_strict_distributed_k16q16.yaml``.  Loading this base file alone retains
+# the legacy K4/Q2 defaults and K8 bank pointer for historical compatibility;
+# ``check_system_identity.py --strict`` therefore rejects it as a formal run.
+#
+# Frozen semantics (checked by tools/check_system_identity.py):
+#   scope        : U2U-only distributed ISAC, no UAV-ground fusion link
+#   ground       : false (strict_no_ground_fusion = ground=false AND
+#                  detection_fusion_mode in {local_only, u2u_distributed})
+#   joint RF     : true  (one P_isac_total=1 W cap per UAV; comm+sensing)
+#   local belief : true  (distributed coordination uses local tracker belief;
+#                  no simulator truth enters hyperedge/coefficient/movement)
+#   OTFS         : fc=28 GHz, B=1 MHz, delta_f=15.625 kHz, M=64, N=16,
+#                  T_sym=6.4e-5 s, n_cpi=1  ->  T_sense = N*T_sym = 1.024 ms
+#   detector     : real_gaussian_shift, c_det=1, P_FA=0.001, g_min=0.5
+#   DD model     : continuous ``I_support * |A(tau,nu)|^2`` gain (no binary
+#                  g_dd gate on the deflection coefficients)
+#   sensing clock: cpi_frame  (battery billed on T_sense, not P_sense*dt)
+#   fusion cov   : independent receiver evidence (whitened) -> additive
+#                  deflection D_q = sum_edges a_ijq p_ijq
+#   seed scheme  : 100-seed blind bank (no cross-run/training leak),
+#                  eval/final on the test split, no checkpoint confirmation.
+#
+# The manifest is a strict config: every key must exist in config/params.py
+# (unknown keys are rejected by the loader), so loading it already validates
+# the identity pins against the current code.
+
+extends: default.yaml
+
+scenario:
+  # Post-G2 time-energy closure: one control step executes n_cpi OTFS frames,
+  # so sensing energy is charged on the CPI clock instead of the frame clock.
+  sensing_energy_mode: cpi_frame
+
+uav:
+  P_isac_total: 1.0    # power model version G2-0.7: joint RF cap (1 W ceiling)
+
+otfs:
+  fc: 2.8e+10
+  B: 1.0e+6
+  delta_f: 1.5625e+4
+  M: 64
+  N: 16
+  T_sym: 6.4e-5
+  n_cpi: 1
+
+detection:
+  P_FA: 0.001
+  c_det: 1.0
+  g_min: 0.5
+  # Canonical DD model: continuous physical gain, not the legacy binary gate.
+  dd_gain_mode: continuous
+
+marl:
+  # Deployment kernel contract: fixed-assignment no-op difference rewards are
+  # training-only credit assignment.  They require K+1 counterfactual physics
+  # evaluations per frame but do not affect actions, scheduling, power, sensing,
+  # communication, or tracking.  Training profiles may opt in explicitly; the
+  # frozen online system must not bill this work to inference latency.
+  use_difference_reward: false
+  # Strict distributed no-truth identity: local-belief coordination REQUIRES the
+  # tracker (belief manager), so tracking_enabled must be true here even though
+  # the legacy tracking-free default.yaml stays off (mission-known targets are a
+  # separate, non-distributed mode).
+  tracking_enabled: true
+  ground_communication_enabled: false
+  joint_isac_power_enabled: true
+  distributed_coordination_use_local_belief_targets: true
+  distributed_no_truth_fail_closed: true
+  # Scalar score-order quantization primitives exist, but the current learned
+  # target-token decoder has no certified Lipschitz/action-margin bound.  A
+  # distance-score margin therefore cannot prove that dropping or coarsening
+  # an arbitrary neural payload preserves the receiver action.  Keep the C6
+  # online chain fail-closed until an explicit score-token protocol and its
+  # downstream decision certificate are implemented.
+  distributed_decision_sufficient_comm_enabled: false
+  distributed_decision_sufficient_event_trigger_enabled: false
+  distributed_decision_sufficient_adaptive_bits_enabled: false
+  distributed_decision_sufficient_dynamic_range: 1.0
+  distributed_decision_sufficient_max_bits: 32
+  detection_fusion_mode: local_only
+  learn_roles: false
+  # The v2 structured actor is target-equivariant only when its allocation
+  # head, per-target message tokens and receiver cross-attention are jointly
+  # active.  The latter two are supplied by target_tokens + default cross-
+  # attention; pin allocation here so the frozen training entrypoint can be
+  # constructed with the same architecture it claims to train.
+  target_allocation_enabled: true
+  comm_rate_bits_per_dim: [0, 4]
+  comm_payload_mode: target_tokens
+  comm_deadline_s: 0.005
+  comm_processing_delay_s: 0.0002
+  comm_bandwidth_hz: 100000
+  comm_tx_power_w: 0.25
+  # Historical compatibility pointer only.  Formal runtime profiles must
+  # override this with a scenario-matched reset-distribution/v2 bank.
+  eval_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
+  eval_seed_split: test
+  final_eval_seed_split: test
+  checkpoint_confirmation_enabled: false
+  checkpoint_confidence_alpha: 0.05
+  checkpoint_bootstrap_samples: 2000

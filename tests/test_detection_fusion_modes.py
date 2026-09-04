@@ -1,5 +1,7 @@
 """Detection evidence must respect the configured execution boundary."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -12,8 +14,10 @@ from uav_isac.evaluation.quantized_evidence_audit import (
 from uav_isac.physical.evidence import (
     DeflectionConfidenceQuantizer,
     EvidencePacketLayout,
+    detection_probability_to_deflection,
     estimate_quantized_evidence_detection,
     quantize_belief_feedback,
+    quantize_llr,
     receiver_deflection_from_broadcast_waveforms,
     receiver_deflection_from_selected,
     route_structured_evidence,
@@ -55,6 +59,111 @@ def _link_model(message_dim=1, **overrides):
     )
     params.update(overrides)
     return InterUAVCommunicationModel(**params)
+
+
+def _full_normal_evidence_reference(
+    receiver_deflection,
+    transport,
+    *,
+    llr_bits,
+    clip_max,
+    standardized_threshold,
+    p_fa,
+    confidence_quantizer,
+    draws,
+    seed,
+):
+    """Pre-sparse full-tensor reference for the normal evidence payload."""
+    receiver_d = np.asarray(receiver_deflection, dtype=np.float64)
+    K, Q = receiver_d.shape
+    peer_mask = np.asarray(transport.delivered_peer_mask, dtype=bool)
+    owner_mask = np.asarray(transport.owner_mask, dtype=bool)
+    sample_count = max(1, int(draws))
+    rng = np.random.default_rng(int(seed))
+    shape = (sample_count, K, Q)
+    noise_h0 = rng.standard_normal(shape)
+    noise_h1 = rng.standard_normal(shape)
+    local_h0 = (
+        -0.5 * receiver_d[None]
+        + np.sqrt(receiver_d[None]) * noise_h0
+    )
+    local_h1 = (
+        +0.5 * receiver_d[None]
+        + np.sqrt(receiver_d[None]) * noise_h1
+    )
+    peer_d_hat = (
+        receiver_d
+        if confidence_quantizer is None
+        else confidence_quantizer.quantize(receiver_d)
+    )
+    quantized_peer_h0 = quantize_llr(local_h0, llr_bits, clip_max)
+    quantized_peer_h1 = quantize_llr(local_h1, llr_bits, clip_max)
+    fused_h0 = np.sum(np.where(
+        owner_mask[None],
+        local_h0,
+        np.where(peer_mask[None], quantized_peer_h0, 0.0),
+    ), axis=1)
+    fused_h1 = np.sum(np.where(
+        owner_mask[None],
+        local_h1,
+        np.where(peer_mask[None], quantized_peer_h1, 0.0),
+    ), axis=1)
+    threshold_d = np.sum(np.where(
+        owner_mask,
+        receiver_d,
+        np.where(peer_mask, peer_d_hat, 0.0),
+    ), axis=0)
+    threshold = (
+        -0.5 * threshold_d
+        + np.sqrt(threshold_d) * float(standardized_threshold)
+    )
+    positive = threshold_d > 0.0
+    observed_pfa = np.where(
+        positive,
+        np.mean(fused_h0 > threshold[None], axis=0),
+        float(p_fa),
+    )
+    pd = np.where(
+        positive,
+        np.mean(fused_h1 > threshold[None], axis=0),
+        float(p_fa),
+    )
+    transmitted = np.broadcast_to(peer_mask[None], local_h0.shape)
+    raw_values = np.concatenate([
+        local_h0[transmitted],
+        local_h1[transmitted],
+    ])
+    quantized_values = np.concatenate([
+        quantized_peer_h0[transmitted],
+        quantized_peer_h1[transmitted],
+    ])
+    if raw_values.size:
+        clip_rate = float(np.mean(np.abs(raw_values) > float(clip_max)))
+        quantization_mse = float(np.mean(
+            (quantized_values - raw_values) ** 2))
+        nonzero = np.abs(raw_values) > 1e-15
+        sign_flip_rate = float(np.mean(
+            np.signbit(raw_values[nonzero])
+            != np.signbit(quantized_values[nonzero])
+        )) if np.any(nonzero) else 0.0
+    else:
+        clip_rate = quantization_mse = sign_flip_rate = 0.0
+    fused_d = np.sum(np.where(
+        owner_mask | peer_mask, receiver_d, 0.0), axis=0)
+    return {
+        "pd": np.asarray(pd, dtype=np.float64),
+        "equivalent_deflection": detection_probability_to_deflection(
+            pd, p_fa),
+        "pfa": np.asarray(observed_pfa, dtype=np.float64),
+        "aggregate_pfa": float(np.mean(observed_pfa)),
+        "threshold_deflection": threshold_d,
+        "available_true_deflection": fused_d,
+        "clip_rate": clip_rate,
+        "quantization_mse": quantization_mse,
+        "sign_flip_rate": sign_flip_rate,
+        "draws": int(sample_count),
+        "content_mode": "normal",
+    }
 
 
 def test_pure_local_and_central_fusion_are_distinct():
@@ -254,6 +363,86 @@ def test_online_quantized_frame_matches_offline_gate_core():
     )
 
 
+@pytest.mark.parametrize(
+    "owner_mask,peer_mask,use_confidence",
+    [
+        (
+            np.eye(4, dtype=bool),
+            np.asarray([
+                [False, True, False, False],
+                [False, False, True, False],
+                [False, False, False, True],
+                [True, False, False, False],
+            ]),
+            True,
+        ),
+        (np.eye(4, dtype=bool), np.zeros((4, 4), dtype=bool), False),
+        # Defensive overlap: owner-local evidence wins fusion, while the peer
+        # record remains represented in packet-value diagnostics.
+        (np.eye(4, dtype=bool), np.eye(4, dtype=bool), True),
+        (
+            np.asarray([
+                [True, False, False, False],
+                [False, False, False, False],
+                [False, False, True, False],
+                [False, False, False, False],
+            ]),
+            np.asarray([
+                [False, False, False, False],
+                [True, False, False, True],
+                [False, False, False, False],
+                [False, True, False, False],
+            ]),
+            False,
+        ),
+    ],
+)
+def test_sparse_normal_evidence_is_bit_exact_to_full_tensor_reference(
+    owner_mask,
+    peer_mask,
+    use_confidence,
+):
+    receiver_d = np.asarray([
+        [0.0, 0.25, 2.0, 12.0],
+        [1.0e-12, 0.5, 3.0, 15.0],
+        [0.1, 0.75, 4.0, 20.0],
+        [0.2, 1.0, 5.0, 25.0],
+    ])
+    transport = SimpleNamespace(
+        owner_mask=np.asarray(owner_mask, dtype=bool),
+        delivered_peer_mask=np.asarray(peer_mask, dtype=bool),
+    )
+    quantizer = (
+        DeflectionConfidenceQuantizer(
+            bits=2,
+            log_boundaries=np.asarray([0.2, 1.0, 2.5]),
+            representatives=np.asarray([0.1, 0.8, 4.0, 16.0]),
+        )
+        if use_confidence else None
+    )
+    kwargs = dict(
+        llr_bits=8,
+        clip_max=12.5,
+        standardized_threshold=3.05,
+        p_fa=0.001,
+        confidence_quantizer=quantizer,
+        draws=257,
+        seed=20260831,
+    )
+    expected = _full_normal_evidence_reference(
+        receiver_d, transport, **kwargs)
+    actual = estimate_quantized_evidence_detection(
+        receiver_d, transport, content_mode="normal", **kwargs)
+
+    assert actual.keys() == expected.keys()
+    for key, expected_value in expected.items():
+        actual_value = actual[key]
+        if isinstance(expected_value, np.ndarray):
+            np.testing.assert_array_equal(actual_value, expected_value)
+        else:
+            assert actual_value == expected_value
+
+
 def test_evidence_route_obeys_scheduled_owner_even_when_not_quality_argmax():
     receiver_d = np.asarray([[9.0], [4.0], [1.0]])
     positions = np.asarray([
@@ -375,6 +564,26 @@ def test_belief_feedback_quantization_is_conservative_and_charged():
         feedback_bits_per_entry=4 * 12 + 4 * 8 + 8,
     )
     assert feedback.broadcast_bits(3, 8) - base.broadcast_bits(3, 8) == 3 * 88
+
+
+def test_ca_belief_feedback_quantization_preserves_six_dimensional_contract():
+    mean = np.asarray([321.25, 678.75, 4.2, -3.7, 0.8, -0.6])
+    covariance = np.diag([40.0, 55.0, 5.0, 7.0, 0.5, 0.7])
+    covariance[0, 4] = covariance[4, 0] = 0.8
+    decoded_mean, decoded_covariance = quantize_belief_feedback(
+        mean,
+        covariance,
+        area_size_xy=(1200.0, 1200.0),
+        velocity_bound_mps=25.0,
+        acceleration_bound_mps2=2.0,
+        mean_bits=12,
+        covariance_bits=8,
+    )
+
+    assert decoded_mean.shape == (6,)
+    assert decoded_covariance.shape == (6, 6)
+    assert np.min(np.linalg.eigvalsh(
+        decoded_covariance - covariance)) >= -1.0e-9
 
 
 def test_dynamic_u2u_feedback_is_enabled_and_payload_is_physically_charged():

@@ -40,7 +40,9 @@ def _fake_link_model():
 
         def transmit(self, messages, rate_indices, xyz, tx_powers_w,
                      extra_payload_bits, base_payload_dimensions,
-                     suppress_message_payload):
+                     suppress_message_payload,
+                     header_bits_by_sender=None,
+                     service_envelope_payload_bits_by_sender=None):
             deliveries = []
             stats = CommunicationStepStats()
             for sender, message in messages.items():
@@ -122,10 +124,9 @@ def test_route_evidence_carries_decoupled_belief_mask():
         belief_selected_mask=belief_mask,
     )
     assert transport.belief_selected_mask is not None
-    # Hybrid semantics: the supplied mask is the freshness TOP-UP set; the
-    # effective fusion schedule is the union of evidence selection and top-ups.
-    expected_union = transport.selected_mask | belief_mask
-    assert np.array_equal(transport.belief_schedule_mask, expected_union)
+    # The supplied posterior schedule remains explicit: evidence for another
+    # target cannot silently reveal that target's 4D posterior.
+    assert np.array_equal(transport.belief_schedule_mask, belief_mask)
     # The belief schedule is decoupled: it is not a copy of the evidence
     # selection, and the evidence selection stays owner-aware (a receiver
     # never broadcasts evidence about a target it owns).
@@ -133,8 +134,8 @@ def test_route_evidence_carries_decoupled_belief_mask():
         transport.selected_mask, transport.belief_schedule_mask)
     for k in range(K):
         assert not transport.selected_mask[k, int(k)]
-    # The belief entries pay their posterior bits: the per-sender payload is
-    # the union broadcast cost with belief_entries charged separately.
+    # The belief entries pay their posterior bits; target metadata is shared
+    # through the union packet but the 88-bit state is never free.
     layout = _layout()
     for s in range(K):
         union_count = int(np.sum(
@@ -172,6 +173,35 @@ def test_route_evidence_legacy_coupled_belief_default():
     )
     assert np.array_equal(
         transport.belief_schedule_mask, transport.selected_mask)
+
+
+def test_decoupled_posterior_pays_even_when_target_id_overlaps_evidence():
+    rng = np.random.default_rng(17)
+    K, Q = 12, 12
+    receiver_d = rng.uniform(0.0, 50.0, (K, Q))
+    positions = rng.uniform(0.0, 1386.0, (K, 3))
+    power = np.full(K, 0.05)
+    owner = np.arange(Q, dtype=np.int64) % K
+    no_feedback = route_structured_evidence(
+        receiver_d, positions, power,
+        observation_frame=1, topk=1, llr_bits=8,
+        layout=_layout(feedback_bits=0), link_model=_fake_link_model(),
+        fusion_owner=owner, owner_aware=True,
+        belief_selected_mask=np.zeros((K, Q), dtype=bool),
+    )
+    overlap = no_feedback.selected_mask.copy()
+    charged = route_structured_evidence(
+        receiver_d, positions, power,
+        observation_frame=1, topk=1, llr_bits=8,
+        layout=_layout(feedback_bits=88), link_model=_fake_link_model(),
+        fusion_owner=owner, owner_aware=True,
+        belief_selected_mask=overlap,
+    )
+    np.testing.assert_array_equal(charged.belief_schedule_mask, overlap)
+    np.testing.assert_array_equal(
+        charged.payload_bits_by_sender - no_feedback.payload_bits_by_sender,
+        88 * np.sum(overlap, axis=1),
+    )
 
 
 def test_serialized_protocol_accounting():

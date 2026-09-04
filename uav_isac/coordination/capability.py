@@ -121,6 +121,16 @@ def capability_gauge(
         bounds=[(0.0, None)] * (n_p + 2 + Q),
         options={"maxiter": 4000, "ftol": 1e-11},
     )
+    if (
+        not bool(getattr(res, "success", False))
+        or getattr(res, "x", None) is None
+        or np.asarray(res.x).shape != (n_p + 2 + Q,)
+        or np.any(~np.isfinite(np.asarray(res.x, dtype=np.float64)))
+    ):
+        raise RuntimeError(
+            "capability gauge solver failed; no certificate may be emitted: "
+            f"{getattr(res, 'message', 'unknown optimizer failure')}"
+        )
     gamma = float(res.x[n_p])
     p = res.x[:n_p].reshape(K, Q)
     d = np.sum(gain * p, axis=0)
@@ -675,6 +685,8 @@ def capability_geometry_gradient(
     target_pos: np.ndarray,
     power: np.ndarray,
     prices: np.ndarray,
+    *,
+    height_m: float | np.ndarray = 0.0,
 ) -> np.ndarray:
     """Gradient of gamma* w.r.t. UAV positions under the Friis gain model.
 
@@ -687,17 +699,30 @@ def capability_geometry_gradient(
                            [1[k=i]   * (-2 a_iq (x_i-x_q)/R_iq^2)
                           + 1[k=owner_q] * (-2 a_iq (x_owner_q-x_q)/R_owner_q^2)]
 
-    Returns a (K, dim) array.  Valid only inside the DD-support-stable trust
-    region (the caller must not cross a support boundary).
+    ``height_m`` supplies the vertical endpoint--target separation when the
+    positions contain horizontal coordinates only.  It may be scalar or
+    broadcastable to ``(K,Q)``.  Returns a (K, dim) array.  Valid only inside
+    the DD-support-stable trust region (the caller must not cross a support
+    boundary).
     """
     K, Q = gain.shape
     dim = int(np.asarray(uav_pos).shape[1])
     owner = np.asarray(owner, dtype=np.int64).reshape(-1)
     uav = np.asarray(uav_pos, dtype=np.float64)
     tgt = np.asarray(target_pos, dtype=np.float64)
-    # Distances.
-    rtx = np.linalg.norm(uav[:, None, :] - tgt[None, :, :], axis=2)  # (K,Q)
-    rrx = np.linalg.norm(uav[owner] - tgt, axis=1)  # (Q,)
+    delta = uav[:, None, :] - tgt[None, :, :]
+    vertical = np.asarray(height_m, dtype=np.float64)
+    if np.any(~np.isfinite(vertical)):
+        raise ValueError("height_m must be finite")
+    if dim >= 3 and np.any(vertical != 0.0):
+        raise ValueError(
+            "height_m must be zero when positions already contain altitude")
+    try:
+        vertical_sq = np.broadcast_to(vertical * vertical, (K, Q))
+    except ValueError as exc:
+        raise ValueError("height_m must be scalar or broadcastable to (K,Q)") from exc
+    rtx_sq = np.sum(delta * delta, axis=2) + vertical_sq
+    rrx_sq = rtx_sq[owner, np.arange(Q)]
     grad = np.zeros((K, dim), dtype=np.float64)
     for i in range(K):
         for q in range(Q):
@@ -706,10 +731,14 @@ def capability_geometry_gradient(
                 continue
             a = gain[i, q]
             # Tx effect (UAV i).
-            grad[i] += weight * (-2.0 * a) * (uav[i] - tgt[q]) / max(rtx[i, q] ** 2, 1e-9)
+            grad[i] += (
+                weight * (-2.0 * a) * delta[i, q]
+                / max(float(rtx_sq[i, q]), 1e-9))
             # Rx/owner effect (UAV owner(q)).
             jq = owner[q]
-            grad[jq] += weight * (-2.0 * a) * (uav[jq] - tgt[q]) / max(rrx[q] ** 2, 1e-9)
+            grad[jq] += (
+                weight * (-2.0 * a) * delta[jq, q]
+                / max(float(rrx_sq[q]), 1e-9))
     return grad
 
 
@@ -722,6 +751,8 @@ def local_capability_gradient_k(
     own_uav_pos: np.ndarray,
     target_pos: np.ndarray,
     support: dict,
+    *,
+    height_m: float | np.ndarray = 0.0,
 ) -> np.ndarray:
     """Distributed per-UAV geometry gradient (Tx + Rx/owner), info-boundary safe.
 
@@ -742,6 +773,18 @@ def local_capability_gradient_k(
     own_gain = np.asarray(own_gain, dtype=np.float64).reshape(-1)
     uav = np.asarray(own_uav_pos, dtype=np.float64)
     tgt = np.asarray(target_pos, dtype=np.float64)
+    vertical = np.asarray(height_m, dtype=np.float64)
+    if np.any(~np.isfinite(vertical)):
+        raise ValueError("height_m must be finite")
+    if dim >= 3 and np.any(vertical != 0.0):
+        raise ValueError(
+            "height_m must be zero when positions already contain altitude")
+    try:
+        vertical_sq = np.broadcast_to(vertical * vertical, (Q,))
+    except ValueError as exc:
+        raise ValueError("height_m must be scalar or broadcastable to (Q,)") from exc
+    delta = uav[None, :] - tgt
+    range_sq = np.sum(delta * delta, axis=1) + vertical_sq
     g = np.zeros(dim, dtype=np.float64)
     # Tx effect: own gain a_{k,owner_q,q} and own distance R_{k,q}.
     for q in range(Q):
@@ -750,16 +793,18 @@ def local_capability_gradient_k(
             continue
         a = own_gain[q]
         jq = owner[q]
-        r_kq = float(np.linalg.norm(uav - tgt[q]))
-        g += w * (-2.0 * a) * (uav - tgt[q]) / max(r_kq ** 2, 1e-9)
+        g += (
+            w * (-2.0 * a) * delta[q]
+            / max(float(range_sq[q]), 1e-9))
     # Rx/owner effect: for targets q owned by k, use delivered transmitter records.
     for q in range(Q):
         if owner[q] != k:
             continue
-        r_kq = float(np.linalg.norm(uav - tgt[q]))
         for i, (p_iq, a_iq) in support.get(q, {}).items():
             w = prices[q] * p_iq
             if abs(w) < 1e-15:
                 continue
-            g += w * (-2.0 * a_iq) * (uav - tgt[q]) / max(r_kq ** 2, 1e-9)
+            g += (
+                w * (-2.0 * a_iq) * delta[q]
+                / max(float(range_sq[q]), 1e-9))
     return g

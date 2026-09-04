@@ -272,6 +272,7 @@ _t2_pareto_baseline
 _t2_pareto_exp10
 _t2_pareto_standoff100
 _v3_baseline_smoke3
+_v3_t1_trace6
 _v3_t1_trace_pass3
 _v3_t4_866_recheck_on
 _v3_t4_866_rev3_recheck

@@ -29,6 +29,7 @@ from config.params import load_config
 from tools.pretrain_qos_commitment import build_agent
 from uav_isac.agents.trainer import load_stratified_seed_split
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 from uav_isac.utils.seeding import set_seed
 
 
@@ -145,6 +146,8 @@ def collect_dataset(
     env = UAVISACEnv(config=cfg, seed=0)
     agent = build_agent(cfg, env, device)
     actor_state = checkpoint.get("actor", checkpoint)
+    validate_state_dict(
+        actor_state, description="token-semantics actor state_dict")
     missing, unexpected = agent.load_actor_state_dict_compatible(actor_state)
     if unexpected:
         raise RuntimeError(f"unexpected checkpoint actor keys: {unexpected[:5]}")
@@ -730,10 +733,12 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    checkpoint = torch.load(
+    checkpoint = safe_torch_load(
         args.checkpoint,
         map_location="cpu",
-        weights_only=False,
+        description="token-semantics probe checkpoint",
+        optional_mapping_keys=("runtime",),
+        optional_state_dict_keys=("actor",),
     )
     train_seeds = load_stratified_seed_split(
         args.seed_bank, args.train_split)[:max(1, args.train_episodes)]

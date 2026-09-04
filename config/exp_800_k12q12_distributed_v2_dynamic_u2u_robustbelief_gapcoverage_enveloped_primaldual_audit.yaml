@@ -1,0 +1,9 @@
+# Audit-only third movement candidate.  It reuses the existing delivered
+# endpoint state, local robust gain reconstruction, replicated full-power
+# witness and simplex price; no payload field or communication bit is added.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  distributed_gap_primal_dual_candidate_enabled: true
+  distributed_gap_primal_dual_margin: 0.0
+  distributed_gap_primal_dual_strong_only: false

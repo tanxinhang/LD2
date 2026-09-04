@@ -32,10 +32,57 @@ import math
 import sys
 from typing import Dict, List, Optional, Tuple
 
-# Medium average thresholds (docs/SYSTEM_OVERVIEW_AND_ROADMAP.md §5).
-MEDIUM_FLOORS = {"steady": 0.80, "weak3": 0.70, "worst": 0.60}
+# R15 (roadmap 2026-08-29): the acceptance floors now have ONE source --
+# config/params.py ``marl.qos_acceptance_floors`` (order worst/weak3/steady).
+# MEDIUM_FLOORS below is the canonical default (identical to the params
+# default; equality is locked by tests/test_qos_gate_provenance.py, not by a
+# shared reference).  Tools that receive ``--config`` read the floors from the
+# frozen config so a gate change cannot silently diverge from the manifest.
+DEFAULT_ACCEPTANCE_FLOORS = {"worst": 0.60, "weak3": 0.70, "steady": 0.80}
+MEDIUM_FLOORS = dict(DEFAULT_ACCEPTANCE_FLOORS)
 QOS_FLOOR = 0.70
 Z_95 = 1.96
+
+
+def acceptance_floors_from_config(
+    config_path: Optional[str] = None,
+) -> Dict[str, float]:
+    """Return {worst, weak3, steady} acceptance floors.
+
+    With ``config_path``, read ``marl.qos_acceptance_floors`` from the frozen
+    config (strict loader rejects unknown keys, so a manifest that reaches this
+    path is already schema-consistent).  Without it, return the canonical
+    defaults (== config/params.py default; locked by
+    tests/test_qos_gate_provenance.py).  Failure to read a supplied config is
+    a loud RuntimeError -- a silent fallback to defaults would fake a gate.
+    """
+    if not config_path:
+        return dict(DEFAULT_ACCEPTANCE_FLOORS)
+    import os
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    if root not in _sys.path:
+        _sys.path.insert(0, root)
+    from config.params import load_config
+    cfg = load_config(config_path)
+    floors = list(getattr(
+        cfg.marl, "qos_acceptance_floors",
+        [DEFAULT_ACCEPTANCE_FLOORS["worst"],
+         DEFAULT_ACCEPTANCE_FLOORS["weak3"],
+         DEFAULT_ACCEPTANCE_FLOORS["steady"]]))
+    if len(floors) < 3:
+        raise RuntimeError(
+            f"{config_path}: qos_acceptance_floors needs 3 values, got {len(floors)}")
+    if any(not math.isfinite(float(f)) or not 0.0 < float(f) < 1.0
+           for f in floors[:3]):
+        raise RuntimeError(
+            f"{config_path}: qos_acceptance_floors must lie in (0,1)")
+    return {
+        "worst": float(floors[0]),
+        "weak3": float(floors[1]),
+        "steady": float(floors[2]),
+    }
 
 
 def wilson_lower(successes: int, total: int, z: float = Z_95) -> float:
@@ -61,18 +108,24 @@ def medium_gate_checks(
     qos_feasible: float,
     qos_wilson_lcb: Optional[float] = None,
     qos_floor: float = QOS_FLOOR,
+    floors: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, object]]:
-    """Return per-threshold checks; each check has passed/value/floor."""
+    """Return per-threshold checks; each check has passed/value/floor.
+
+    ``floors`` overrides the acceptance triple (R15 single source); defaults
+    to MEDIUM_FLOORS.
+    """
+    floors = floors or MEDIUM_FLOORS
     checks = [
         {"name": "steady", "value": steady,
-         "floor": MEDIUM_FLOORS["steady"],
-         "passed": steady >= MEDIUM_FLOORS["steady"]},
+         "floor": floors["steady"],
+         "passed": steady >= floors["steady"]},
         {"name": "weak3", "value": weak3,
-         "floor": MEDIUM_FLOORS["weak3"],
-         "passed": weak3 >= MEDIUM_FLOORS["weak3"]},
+         "floor": floors["weak3"],
+         "passed": weak3 >= floors["weak3"]},
         {"name": "mean_worst", "value": worst,
-         "floor": MEDIUM_FLOORS["worst"],
-         "passed": worst >= MEDIUM_FLOORS["worst"]},
+         "floor": floors["worst"],
+         "passed": worst >= floors["worst"]},
         {"name": "qos_feasible", "value": qos_feasible,
          "floor": qos_floor,
          "passed": qos_feasible >= qos_floor},
@@ -92,10 +145,12 @@ def assert_medium_gate(
     qos_wilson_lcb: Optional[float] = None,
     qos_floor: float = QOS_FLOOR,
     label: str = "run",
+    floors: Optional[Dict[str, float]] = None,
 ) -> None:
     """Raise AssertionError listing every unmet threshold."""
     checks = medium_gate_checks(
-        steady, weak3, worst, qos_feasible, qos_wilson_lcb, qos_floor)
+        steady, weak3, worst, qos_feasible, qos_wilson_lcb, qos_floor,
+        floors=floors)
     failed = [c for c in checks if not c["passed"]]
     if failed:
         lines = [f"Gate assertion FAILED for {label}:"]
@@ -110,7 +165,16 @@ def assert_medium_gate(
 def read_episode_arrays(csv_path: str) -> Dict[str, List[float]]:
     """Parse the per-episode arrays from a single-row trainer paired_eval.csv."""
     with open(csv_path, "r", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        duplicate_columns = sorted({
+            name for name in fieldnames if fieldnames.count(name) > 1
+        })
+        if duplicate_columns:
+            raise ValueError(
+                f"{csv_path} contains duplicate CSV columns: "
+                + ", ".join(repr(name) for name in duplicate_columns))
+        rows = list(reader)
     if len(rows) != 1:
         raise ValueError(
             f"expected one aggregate row in {csv_path}, got {len(rows)}")
@@ -152,6 +216,7 @@ def assert_gate_from_csv(
     qos_floor: float = QOS_FLOOR,
     require_wilson_lcb: bool = False,
     qos_tol: float = 0.0,
+    floors: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
     """Recompute aggregates from episode arrays and assert the Medium gate.
 
@@ -163,6 +228,7 @@ def assert_gate_from_csv(
     enforcing the LCB retroactively would reject the deployed baseline).
     Returns the aggregates so callers can log them.
     """
+    floors = floors or MEDIUM_FLOORS
     arrays = read_episode_arrays(csv_path)
     n = len(arrays["steady"])
     steady = _mean(arrays["steady"])
@@ -171,15 +237,15 @@ def assert_gate_from_csv(
     feasible = sum(
         1 for s, w, wo in zip(arrays["steady"], arrays["weak3"],
                               arrays["worst"])
-        if (s >= MEDIUM_FLOORS["steady"] - qos_tol
-            and w >= MEDIUM_FLOORS["weak3"] - qos_tol
-            and wo >= MEDIUM_FLOORS["worst"] - qos_tol))
+        if (s >= floors["steady"] - qos_tol
+            and w >= floors["weak3"] - qos_tol
+            and wo >= floors["worst"] - qos_tol))
     qos = feasible / n
     lcb = wilson_lower(feasible, n)
     assert_medium_gate(
         steady, weak3, worst, qos,
         qos_wilson_lcb=lcb if require_wilson_lcb else None,
-        qos_floor=qos_floor, label=csv_path)
+        qos_floor=qos_floor, label=csv_path, floors=floors)
     return {
         "episodes": n, "steady": steady, "weak3": weak3,
         "worst": worst, "qos_feasible": qos, "qos_wilson_lcb": lcb,
@@ -190,6 +256,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", help="paired_eval.csv path (trainer format)")
     parser.add_argument("--qos-floor", type=float, default=QOS_FLOOR)
+    parser.add_argument(
+        "--config", default=None,
+        help="frozen config to read marl.qos_acceptance_floors (R15 single "
+             "source); absent -> canonical defaults")
     parser.add_argument("--require-lcb", action="store_true",
                         help="also require the QoS Wilson LCB to clear the "
                              "floor (audit-recommended future standard)")
@@ -198,10 +268,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        floors = acceptance_floors_from_config(args.config)
         aggregates = assert_gate_from_csv(
             args.csv, qos_floor=args.qos_floor,
-            require_wilson_lcb=args.require_lcb)
-    except (ValueError, AssertionError) as exc:
+            require_wilson_lcb=args.require_lcb, floors=floors)
+    except (ValueError, AssertionError, RuntimeError) as exc:
         print(f"gate assertion error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(aggregates, indent=2))

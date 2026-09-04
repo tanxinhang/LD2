@@ -51,11 +51,20 @@ def compute_doppler(
 ) -> float:
     """Compute bistatic Doppler shift.
 
-    nu = (fc/c) * [v_tx · u_tx_target + v_target · u_bistatic + v_rx · u_target_rx]
-    where u_* are unit vectors pointing along the respective paths.
+    With total bistatic range ``R = R_iq + R_jq`` (i = tx, j = rx, q = target):
 
-    The sign convention: positive Doppler means target is moving toward the
-    bistatic bisector.
+        u_iq = (x_q - x_i)/R_iq     (tx -> target)
+        u_qj = (x_j - x_q)/R_jq     (target -> rx)
+        dot_R = (v_q - v_i)^T u_iq + (v_j - v_q)^T u_qj
+
+    Using the convention "total propagation distance shrinking = positive
+    Doppler" (audit advice/001.md section 4, 2026-08-26):
+
+        nu = -(f_c/c)*dot_R
+           = (f_c/c) * [ v_tx^T u_iq - v_rx^T u_qj + v_target^T (u_qj - u_iq) ].
+
+    Physics contract locked by tests: with Tx/target stationary, an Rx flying
+    TOWARD the target yields positive Doppler (and away yields negative).
 
     Args:
         tx_pos, tx_vel: Transmitter UAV position and velocity
@@ -64,7 +73,7 @@ def compute_doppler(
         fc: Carrier frequency (Hz)
 
     Returns:
-        Doppler shift in Hz
+        Doppler shift in Hz (signed, this convention)
     """
     eps = 1e-10
 
@@ -75,11 +84,15 @@ def compute_doppler(
     u_target_rx = rx_pos - target_pos
     u_target_rx = u_target_rx / (np.linalg.norm(u_target_rx) + eps)
 
-    # Target velocity projected onto bistatic bisector
-    # The bistatic Doppler has contributions from tx→target and target→rx paths
-    doppler_tx = np.dot(tx_vel, u_tx_target)  # tx motion toward target
-    doppler_target = np.dot(target_vel, u_target_rx - u_tx_target)  # target motion
-    doppler_rx = np.dot(rx_vel, u_target_rx)  # rx motion toward target (if rx moves)
+    # Audit 2026-08-26 (P0, advice/001 section 4): the receiver term previously
+    # used ``+v_rx^T u_qj``; the derivative of the total bistatic range carries
+    # ``(v_j - v_q)^T u_qj``, so with the "shrinking range = positive Doppler"
+    # convention the receiver contribution is ``-v_rx^T u_qj``.  The old sign
+    # was latent while only |nu| was consumed, but becomes P0 once Phase C
+    # uses signed Doppler for direction control.
+    doppler_tx = np.dot(tx_vel, u_tx_target)      # + v_i^T u_iq
+    doppler_target = np.dot(target_vel, u_target_rx - u_tx_target)  # v_q^T(u_qj - u_iq)
+    doppler_rx = -np.dot(rx_vel, u_target_rx)     # - v_j^T u_qj  (audit fix)
 
     # Total Doppler shift
     nu = (fc / C_LIGHT) * (doppler_tx + doppler_target + doppler_rx)
@@ -159,32 +172,47 @@ def compute_all_bistatic_params(
     K = uav_positions.shape[0]
     Q = target_positions.shape[0]
 
-    tau = np.full((K, K, Q), np.inf, dtype=np.float64)
-    nu = np.zeros((K, K, Q), dtype=np.float64)
-    alpha = np.zeros((K, K, Q), dtype=np.float64)
+    # Endpoint-target quantities have shape (K,Q).  Bistatic pair quantities
+    # then follow from broadcasting the Tx endpoint on axis 0 and the Rx
+    # endpoint on axis 1.  This is algebraically identical to the scalar triple
+    # loop above but avoids O(K^2 Q) Python calls on every online frame.
+    endpoint_vector = (
+        target_positions[None, :, :] - uav_positions[:, None, :])
+    endpoint_range = np.linalg.norm(endpoint_vector, axis=-1)
+    endpoint_unit = endpoint_vector / (
+        endpoint_range[..., None] + 1.0e-10)
+
+    tau = (
+        endpoint_range[:, None, :] + endpoint_range[None, :, :]
+    ) / C_LIGHT
+    node_radial = np.sum(
+        uav_velocities[:, None, :] * endpoint_unit, axis=-1)
+    target_radial = np.sum(
+        target_velocities[None, :, :] * endpoint_unit, axis=-1)
+    nu = (float(fc) / C_LIGHT) * (
+        node_radial[:, None, :] + node_radial[None, :, :]
+        - target_radial[:, None, :] - target_radial[None, :, :]
+    )
+
+    safe_range = np.maximum(endpoint_range, 1.0e-6)
+    wavelength = C_LIGHT / float(fc)
+    alpha_sq = (
+        wavelength * wavelength * float(rcs) / (4.0 * np.pi) ** 3
+    ) / (
+        safe_range[:, None, :] ** 2 * safe_range[None, :, :] ** 2
+    )
+    alpha = np.sqrt(np.maximum(alpha_sq, 0.0))
 
     if role_agnostic:
-        tx_indices = np.arange(K)             # every UAV may transmit
-        rx_indices = np.arange(K)             # every UAV may receive
+        valid_pair = np.ones((K, K), dtype=bool)
     else:
-        tx_indices = np.where(roles == 0)[0]  # tx UAVs
-        rx_indices = np.where(roles == 1)[0]  # rx UAVs
-
-    for i in tx_indices:
-        for j in rx_indices:
-            if i == j:
-                continue  # same UAV cannot be both tx and rx
-            for q in range(Q):
-                bistatic_range = compute_bistatic_range(
-                    uav_positions[i], uav_positions[j], target_positions[q])
-                tau[i, j, q] = compute_delay(bistatic_range)
-                nu[i, j, q] = compute_doppler(
-                    uav_positions[i], uav_velocities[i],
-                    uav_positions[j], uav_velocities[j],
-                    target_positions[q], target_velocities[q],
-                    fc)
-                alpha[i, j, q] = compute_path_gain(
-                    uav_positions[i], uav_positions[j],
-                    target_positions[q], fc, rcs)
-
+        valid_pair = (
+            (np.asarray(roles)[:, None] == 0)
+            & (np.asarray(roles)[None, :] == 1)
+        )
+    valid_pair &= ~np.eye(K, dtype=bool)
+    invalid = ~valid_pair[:, :, None]
+    tau = np.where(invalid, np.inf, tau)
+    nu = np.where(invalid, 0.0, nu)
+    alpha = np.where(invalid, 0.0, alpha)
     return tau, nu, alpha

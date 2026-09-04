@@ -1,0 +1,108 @@
+# Strict pure-distributed no-truth pilot (audit advice/001 P0, C6 direction).
+# ============================================================================
+# Unique identity: config/system_manifest.yaml (extends default.yaml) with
+#   tracking_enabled=true (belief manager for local-belief coordination),
+#   ground=false, joint RF power=true, detection_fusion_mode=local_only,
+#   distributed_coordination_use_local_belief_targets=true,
+#   distributed_no_truth_fail_closed=true.
+# No simulator ground truth enters hyperedge offers, public-coefficient
+# reconstruction, replicated-power fallback, or L3/L3-warm-start movement:
+# all of them consume only local tracker belief + physically delivered U2U
+# anchors, and fail closed when belief is unavailable.
+#
+# This pilot is the reproducible entry point for the strict no-truth scenario:
+#   python tools/run_strict_distributed_pilot.py --config config/exp_strict_distributed_no_truth_pilot.yaml
+# The runner defaults to a control-carrier period of 3 (selected by paired
+# 7/14/29-seed A/B); pass --carrier-period 1 to reproduce the full-rate
+# communication baseline.
+# (see tools/check_system_identity.py for the enforced C0 contract).
+extends: system_manifest.yaml
+
+scenario:
+  # Match the frozen 1130_k8q8 seed bank named below.  The previous 800 m
+  # override silently evaluated a different geometry under an 1130 m bank.
+  region_size: [1130, 1130]
+  K: 8
+  Q: 8
+  T: 150
+
+target:
+  omega_q: [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
+
+marl:
+  eval_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
+  eval_seed_split: test
+  final_eval_seed_split: test
+  movement_decision_interval: 2
+  # Deployment/evaluation never consumes counterfactual difference rewards.
+  # Leaving this training-only signal on recomputes one full physical scene
+  # per UAV and makes the K-agent online path scale roughly K times slower.
+  use_difference_reward: false
+  comm_rate_bits_per_dim: [0, 4]
+  # K16/Q16 capacity point for the physically billed 5 ms control packet.
+  # With 16 orthogonal senders, 100 kHz cannot carry endpoint state,
+  # composable certificate and one sparse owner posterior before deadline.
+  # 500 kHz is the smallest tested explicit bandwidth restoring 100% delivery
+  # on seeds 7/19/43; it is a declared resource, not an algorithmic free link.
+  comm_bandwidth_hz: 500000
+  comm_payload_mode: target_tokens
+  distributed_coordination_use_local_belief_targets: true
+  distributed_no_truth_fail_closed: true
+  # Conditional robust set for target position/velocity.  The reconstructed
+  # gain now lower-bounds path loss and continuous DD alignment over this set;
+  # statistical coverage of the 3-sigma belief ellipsoid is reported as an
+  # assumption, not silently promoted to a deterministic guarantee.
+  distributed_target_position_uncertainty_sigma: 3.0
+  # The physical sensing receiver for each target broadcasts its causal
+  # posterior on the next control carrier. Peers use covariance intersection,
+  # avoiding false independence while reducing stale local-track dispersion.
+  distributed_owner_posterior_enabled: true
+  distributed_owner_posterior_mean_bits: 12
+  distributed_owner_posterior_cov_bits: 8
+  distributed_owner_posterior_aoi_bits: 8
+  distributed_owner_posterior_max_age_frames: 5
+
+  # Strict distributed deployment stack.  An earlier pilot left every protocol
+  # producer OFF, so a 150-frame run transmitted zero bits and still used no
+  # distributed structure.  This
+  # stack sends physically charged endpoint-state beacons, forms a mutual
+  # finite-round hyperedge structure with no centralized fallback, and solves
+  # fixed-structure power independently from the reconstructed public view.
+  architecture_v2_enabled: true
+  analytical_sensing_power_enabled: true
+  analytical_power_geometry_reuse_enabled: true
+  analytical_structure_ranking_enabled: true
+  hyperedge_negotiation_enabled: true
+  hyperedge_pair_score_mode: budget_reconstructable
+  hyperedge_coordination_mode: reserved_endpoint
+  hyperedge_state_stream_enabled: true
+  hyperedge_protocol_only_enabled: true
+  hyperedge_state_bits_per_dim: 8
+  hyperedge_share_topk: 1
+  hyperedge_consensus_rounds: 1
+  hyperedge_assignment_hold_frames: 5
+  hyperedge_min_target_coverage: 1.0
+  hyperedge_robust_quantization_enabled: true
+  hyperedge_safety_fallback_enabled: false
+  distributed_replicated_power_enabled: true
+  # Compose the executed private rows at deterministic target responsibility
+  # nodes. Reports are downward-quantized lower contributions and their exact
+  # payload is billed to the same physical U2U carrier.
+  distributed_composable_certificate_enabled: true
+  distributed_composable_certificate_bits_per_target: 16
+  distributed_composable_certificate_frame_bits: 32
+  distributed_composable_certificate_scale: 1.0e-6
+  distributed_composable_certificate_max_deflection: 1.0e+6
+  distributed_composable_certificate_max_age_frames: 5
+  # Match on a Tx/Rx-aware bistatic cost instead of one-way distance.  A
+  # 20-frame hold is a hysteresis guard: it tracks moving targets without
+  # allowing frame-to-frame assignment chatter.
+  distributed_bottleneck_matching_movement_enabled: false
+  distributed_bistatic_bottleneck_movement_enabled: true
+  distributed_greedy_matching_hold_frames: 20
+  task_constrained_power_enabled: false
+  bargaining_objective_enabled: false
+  intercept_constrained_power_enabled: false
+  p0_maxmin_event_triggered_enabled: false
+  p0_maxmin_bypass_commitment_filter: false
+  p0_uses_belief: true

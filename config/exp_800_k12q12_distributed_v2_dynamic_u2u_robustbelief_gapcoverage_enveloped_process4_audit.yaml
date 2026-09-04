@@ -1,0 +1,14 @@
+# Compute-only audit candidate.  Private replicated max-min LPs depend only on
+# immutable local gain views and the public sensing budget, so four persistent
+# isolated workers may evaluate them concurrently.  Radio scheduling, RNG,
+# row assembly, power projection and sensing physics remain in the main
+# process.  This file is not promoted until paired traces are bit-exact and
+# end-to-end P95 improves without process fallback.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  distributed_replicated_power_process_parallel_enabled: true
+  distributed_replicated_power_process_workers: 4
+  distributed_replicated_power_process_timeout_s: 0.1
+  distributed_replicated_power_parallel_fallback_to_serial: true
+  distributed_replicated_power_parallel_failure_mode: serial

@@ -1,9 +1,56 @@
 """Configuration parameter dataclasses and YAML loader."""
 
-from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
-import yaml
+import dataclasses
+import math
 import os
+import types
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple, Union, get_args, get_origin
+
+import yaml
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    if not isinstance(node, yaml.MappingNode):
+        raise yaml.constructor.ConstructorError(
+            None,
+            None,
+            f"expected a mapping node, got {node.id}",
+            node.start_mark,
+        )
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise ValueError(
+                "duplicate YAML mapping key "
+                f"{key!r} at line {key_node.start_mark.line + 1}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def load_unique_yaml(stream):
+    """Parse safe YAML while refusing duplicate-key last-value wins."""
+    return yaml.load(stream, Loader=_UniqueKeySafeLoader)
 
 
 @dataclass
@@ -15,6 +62,14 @@ class ScenarioParams:
     T: int = 150                                        # traversable: 2.5*150=375m > half-diag 283m
     dt: float = 0.1
     C: int = 1
+    # Post-G2 time-energy closure (audit advice/001 section 3, 2026-08-26).
+    # ``cpi_frame``: one control step executes n_cpi OTFS frames, so sensing
+    # energy is charged on the OTFS clock ``T_sense = n_cpi*N*T_sym``
+    # (≈1.024 ms at the canonical numerology) instead of the 100 ms `dt` slot;
+    # deflection and battery then share the same clock.  ``dt_frame`` is the
+    # legacy pre-G2 billing (P_sense*dt), retained to reproduce historical
+    # certified results.  The canonical post-G2 manifest pins ``cpi_frame``.
+    sensing_energy_mode: str = "dt_frame"
 
 
 @dataclass
@@ -82,6 +137,11 @@ class DetectionParams:
     # G2-0.5: H0 Z~N(0,1), H1 Z~N(sqrt(D),1), so D=c_det*Es/En.
     c_det: float = 1.0
     g_min: float = 0.5
+    # Post-G2 DD model (audit advice/001 section 5, 2026-08-26):
+    #   binary      -- legacy ``1[g_dd >= g_min]`` support gate (historical).
+    #   continuous  -- physical ``I_support * |A(tau,nu)|^2`` gain (canonical
+    #                  post-G2 manifest; all new formal runs use this).
+    dd_gain_mode: str = "binary"
     K_q_max: int = 3
     B_q: int = 64
     # Long-term fairness floor (constraint D4). 0.8 was unreachable even for the
@@ -117,6 +177,12 @@ class MARLParams:
     # central_oracle reconstructs it explicitly; local_only forbids
     # cross-receiver fusion; u2u_distributed consumes delivered evidence.
     detection_fusion_mode: str = "local_only"
+    # Tracking-model identity used by every local belief filter.  TARGET keeps
+    # the historical behaviour (match target.motion_model); CV/CA explicitly
+    # pin the estimator so maneuver-model mismatch experiments do not silently
+    # change both plant and filter at once.  CT targets are tracked by CV when
+    # CV is selected because the current belief manager has no CT filter.
+    belief_motion_model: str = "TARGET"
     # Structured receiver-evidence packet. Calibration values are deliberately
     # unset by default; a u2u_distributed experiment must name an explicit
     # calibration profile rather than inherit hidden stress-set constants.
@@ -158,6 +224,21 @@ class MARLParams:
     evidence_packet_owner_aware: bool = True
     evidence_packet_llr_bits: int = 8
     evidence_packet_confidence_bits: int = 2
+    # Optional fixed-schema evidence header. Zero retains comm_header_bits.
+    # In the synchronous sensing sub-slot a 16-bit CRC plus the explicitly
+    # charged source index is sufficient; no dynamic rate/schema is inferred.
+    evidence_fixed_schema_header_bits: int = 0
+    # Explicit on-air observation-frame field. Set to zero only when the
+    # fixed synchronous sub-slot makes the current frame uniquely inferable.
+    evidence_timestamp_bits: int = 16
+    # Compatibility envelope for protocol-only compression. The short packet
+    # is physically serialized, but delivery admission, erasure coupling and
+    # billed RF airtime use the legacy generic evidence packet. This preserves
+    # the deployed policy's service distribution while reclaiming bits/latency.
+    evidence_legacy_service_envelope_enabled: bool = False
+    # AoI width of the reference packet retained by the legacy service
+    # envelope. This may exceed the lossless physical categorical width.
+    evidence_legacy_service_aoi_bits: int = 8
     evidence_packet_clip_max: float = 0.0
     evidence_packet_standardized_threshold: float = 0.0
     evidence_packet_confidence_log_boundaries: List[float] = field(
@@ -196,12 +277,56 @@ class MARLParams:
     # reserve-first per-target floor derived from that detection probability.
     analytical_sensing_power_enabled: bool = False
     analytical_sensing_power_reserve_pd: float = 0.0
+    # Reuse unit-power true-geometry entries after the analytical LP and scale
+    # only d_raw/d_eff by p_kq. Valid only for deterministic linear-in-power
+    # sensing (no report-link draw or Swerling draw); otherwise execution
+    # automatically falls back to a fresh physical computation.
+    analytical_power_geometry_reuse_enabled: bool = False
     # Certificate-light distributed L1. Each UAV solves from its own delivered
     # public-state cache and executes only its own power row. No primal/dual
     # gap or ACK certificate is exchanged. Common views recover the
     # deterministic LP optimum; partial views preserve the local RF budget.
     distributed_replicated_power_enabled: bool = False
     distributed_replicated_power_inertia: float = 0.0
+    # Optional causal two-stage envelope for the private LP.  With a valid
+    # previous local full-plan cache, target q receives the feasible reserve
+    # min{D_q(previous plan under the current private view), D(P_D=cap)} before
+    # the usual max-min objective is optimized.  Zero disables the envelope.
+    distributed_replicated_power_history_reserve_pd: float = 0.0
+    # Simulator-only execution organization. Independent private LPs may run
+    # in persistent isolated processes; this implies no radio concurrency or
+    # additional inter-node information. Off preserves historical replay.
+    distributed_replicated_power_process_parallel_enabled: bool = False
+    distributed_replicated_power_process_workers: int = 4
+    distributed_replicated_power_process_timeout_s: float = 0.1
+    distributed_replicated_power_parallel_fallback_to_serial: bool = True
+    # On worker failure, "serial" preserves the legacy exact recomputation;
+    # "cached_or_uniform" performs no LP after the sub-deadline and executes a
+    # projected incumbent/uniform safeguard. "cached_or_harmonic" replaces an
+    # uncertified incumbent row by the closed-form conservative row max-min.
+    distributed_replicated_power_parallel_failure_mode: str = "serial"
+    distributed_replicated_power_deadline_incumbent_relative_tolerance: float = 0.05
+    distributed_replicated_power_max_consecutive_process_failures: int = 3
+    # Diagnostic only: solve one common conservative-gain LP to measure the
+    # ceiling available to a composable allocator. Never used for execution.
+    distributed_replicated_power_certificate_shadow_global_lp_enabled: bool = False
+    # Per-node cross-frame LP reuse.  Each UAV evaluates its own cached primal
+    # row allocation and cached simplex prices on its current private gain
+    # view.  The LP is skipped only when the resulting local primal/dual
+    # relative gap is below this tolerance. Zero preserves every-frame solves.
+    distributed_replicated_power_reuse_relative_tolerance: float = 0.0
+    # Target-responsibility certificate for the *assembled executed rows*.
+    # Each transmitter broadcasts Q downward-quantized conservative
+    # contributions a_lower[k,q]*p[k,q]. Target q is owned by q mod K and is
+    # certified only after all K same-frame reports arrive within the AoI cap.
+    # This proves a joint achieved-QoS lower bound; it does not claim global LP
+    # optimality. Disabled by default for historical run reproducibility.
+    distributed_composable_certificate_enabled: bool = False
+    distributed_composable_certificate_bits_per_target: int = 16
+    distributed_composable_certificate_frame_bits: int = 32
+    distributed_composable_certificate_scale: float = 1.0e-6
+    distributed_composable_certificate_max_deflection: float = 1.0e6
+    distributed_composable_certificate_max_age_frames: int = 5
     # Under an incomplete local public graph, reserve this fraction for a
     # uniform unknown-target floor and optimize the remainder over targets
     # reachable in that cache. One preserves the legacy all-uniform fallback.
@@ -209,6 +334,12 @@ class MARLParams:
     # Robust public-gain reconstruction: add this many local posterior
     # position standard deviations to each target-endpoint range.
     distributed_target_position_uncertainty_sigma: float = 0.0
+    # Experimental nominal-to-robust risk homotopy for the replicated LP:
+    # a_rho=(1-rho)*a_point+rho*a_lower.  rho=0 exactly preserves the nominal
+    # controller; rho=1 uses the full covariance-set lower coefficient already
+    # computed for the composable certificate.  The certificate itself always
+    # retains the full lower bound, independent of this control preference.
+    distributed_replicated_power_robust_gain_mix: float = 0.0
     # When the public graph is incomplete, use the row-separable minimax
     # transmitter-range prior p_kq proportional to R_kq^2 for the non-uniform
     # share. It needs only self position and the common target map.
@@ -446,10 +577,53 @@ class MARLParams:
     distributed_gap_nearfield_radius_m: float = 300.0
     distributed_gap_complete_radius_m: float = 350.0
     distributed_gap_focus_weight: float = 4.0
+    # Baseline-enveloped gap control. Both the gap-coverage action and the
+    # legacy role-aware bottleneck action are reconstructed from the same
+    # delivered public view and evaluated under the same safety operator.
+    # Analytically certified no-op candidates skip redundant projection;
+    # uncertified candidates are projected before comparison.
+    # Gap control executes only when its lexicographic reachability potential
+    # strictly improves on baseline; exact ties retain baseline.
+    distributed_gap_baseline_envelope_enabled: bool = False
+    # Optional third candidate inside the existing baseline envelope.  A
+    # local robust lower/upper gain reconstruction, cached row-feasible power
+    # witness and simplex target price form a primal--dual certificate without
+    # adding any wire fields.  The candidate may execute only when the public
+    # geometry score is no worse and its robust witness lower bound improves.
+    distributed_gap_primal_dual_candidate_enabled: bool = False
+    distributed_gap_primal_dual_margin: float = 0.0
+    # Research gate: require the much stronger L_candidate > U_incumbent
+    # condition instead of witness monotonicity.  Usually conservative.
+    distributed_gap_primal_dual_strong_only: bool = False
     # Dynamic-target coordination must be computed from each viewer's own
     # tracker state.  When enabled, no target ground truth is used to create
     # hyperedge offers, reconstruct pair coefficients, or plan movement.
     distributed_coordination_use_local_belief_targets: bool = False
+    # Post-G2 strict no-truth closure (audit advice/001 P0, 2026-08-26):
+    # when enabled, distributed decision paths (coordination target resolver,
+    # replicated-power range fallback) may NEVER read simulator ground truth;
+    # they fail closed instead of silently exposing ``self.targets``.
+    # Requires ``distributed_coordination_use_local_belief_targets=true``
+    # (which itself requires ``tracking_enabled=true`` for the belief manager).
+    # The canonical post-G2 manifest pins this true.
+    distributed_no_truth_fail_closed: bool = False
+    # Experimental scalar score-order communication primitive.  The current
+    # learned aggregate/target-token payloads do not have a certified decoder
+    # and action-margin bound, so EnvironmentCore rejects this online switch.
+    # Keep OFF until an explicit score-token protocol closes that proof chain.
+    distributed_decision_sufficient_comm_enabled: bool = False
+    # Decision-preserving quantization dynamic range for the local margin
+    # (uniform quant error eps_B = R / (2(2^B - 1))).
+    distributed_decision_sufficient_dynamic_range: float = 1.0
+    # Max bits for the decision-preserving token when the margin cannot certify
+    # silence (falls back to the richest certified precision).
+    distributed_decision_sufficient_max_bits: int = 32
+    # Experimental event-trigger stage; unavailable for learned payloads until
+    # the downstream decision certificate above exists.
+    distributed_decision_sufficient_event_trigger_enabled: bool = False
+    # Experimental adaptive-bit stage; exact-bit transport remains separately
+    # tested, but learned-payload bit selection is fail-closed.
+    distributed_decision_sufficient_adaptive_bits_enabled: bool = False
     distributed_movement_safety_projection_enabled: bool = False
     distributed_movement_safety_margin_m: float = 0.0
     # Additional two-endpoint motion uncertainty per public-cache age frame.
@@ -467,6 +641,11 @@ class MARLParams:
     # Endpoint-split CBF constraints remain valid when independently computed
     # per-UAV action rows are assembled after packet loss.
     distributed_movement_independently_composable_safety: bool = False
+    # Proof-gated reduction for independently composable movement. If every
+    # affine/bound constraint contains zero, Euclidean projection cannot
+    # increase the reference norm, so per-node speed balls are redundant and
+    # the nonlinear program reduces exactly to a linearly constrained QP.
+    distributed_movement_analytic_composable_projection_enabled: bool = False
     # D1.1-B (advice 010): bounded multi-candidate trust-region L3.  Instead of
     # one normalized gradient step per frame, generate ~6 whole-fleet movement
     # candidates (stay, dual-price step, half step, capability-price step, and
@@ -627,11 +806,27 @@ class MARLParams:
     # Tracking-free sensing mode. When False, targets are fixed sensing objects
     # whose locations are mission-known; the actor receives their current
     # coordinates directly and the Kalman predict/update loop is bypassed.
-    tracking_enabled: bool = True
+    # Post-G2 identity (audit advice/001 C0, 2026-08-26): the canonical system
+    # is tracking-free; the dataclass default now matches default.yaml so the
+    # no-YAML construction path cannot silently enable a legacy Kalman loop.
+    tracking_enabled: bool = False
+    # Physically billed receiver-owner posterior broadcast for strict local
+    # tracking.  The selected bistatic receiver sends its causal 4D posterior;
+    # peers fuse it by covariance intersection, which remains conservative
+    # under unknown cross-correlation.  This is independent of detection
+    # fusion and never shares simulator truth.
+    distributed_owner_posterior_enabled: bool = False
+    distributed_owner_posterior_mean_bits: int = 12
+    distributed_owner_posterior_cov_bits: int = 8
+    distributed_owner_posterior_aoi_bits: int = 8
+    distributed_owner_posterior_max_age_frames: int = 5
     # Current paper scope uses only UAV-to-UAV links. When disabled, the old
     # receiver-to-ground-fusion reporting link, its energy, bit penalty and
     # capacity/latency constraints are removed from the sensing pipeline.
-    ground_communication_enabled: bool = True
+    # Post-G2 identity (audit advice/001 C0): U2U-only is the canonical scope;
+    # the dataclass default now matches default.yaml so direct construction
+    # cannot silently reintroduce the ground reporting link.
+    ground_communication_enabled: bool = False
     critic_lr_mult: float = 5.0  # critic LR = lr * this (critic needs to track moving returns)
     bc_beta_init: float = 0.05  # BC anchor strength; sweet spot: prevents collapse, allows improvement
     use_p0_sinr_gated: bool = False  # gate P0 features by SINR threshold
@@ -725,6 +920,26 @@ class MARLParams:
     hyperedge_state_stream_enabled: bool = False
     hyperedge_protocol_only_enabled: bool = False
     hyperedge_state_bits_per_dim: int = 0
+    # Optional fixed per-field precision for protocol-only beacons. An empty
+    # list preserves uniform hyperedge_state_bits_per_dim. Both endpoints know
+    # this manifest-level codec, so no adaptive-rate header is required.
+    hyperedge_state_field_bits: List[int] = field(default_factory=list)
+    # Preserve the uniform-codec service distribution when a shorter fixed
+    # field codec is deployed. Actual bits/latency use the shorter packet;
+    # admission, erasure coupling and RF billing use the old uniform length.
+    hyperedge_state_codec_service_envelope_enabled: bool = False
+    # Header length of the reference packet preserved by the codec service
+    # envelope. Zero uses the actual hyperedge_protocol_header_bits.
+    hyperedge_state_codec_service_reference_header_bits: int = 0
+    # Optional compact fixed-schema header for protocol-only beacon packets.
+    # Zero retains the generic communication header. A fixed orthogonal slot
+    # identifies the sender/rate/schema; the compact header remains on-air and
+    # is intended for CRC/error detection rather than hidden free metadata.
+    hyperedge_protocol_header_bits: int = 0
+    # Deterministic sender-cohort schedule for protocol-only state beacons.
+    # Period H sends node k when frame mod H == k mod H; no schedule bits are
+    # required. H must fit both the transport TTL and movement public-age cap.
+    hyperedge_beacon_round_robin_period: int = 1
     # Optional common near-field position refinement. The beacon appends the
     # nearest static target ID and a bounded (dx,dy) residual; this is physical
     # state, not an optimizer certificate. Absolute state remains the fallback.
@@ -737,6 +952,11 @@ class MARLParams:
     hyperedge_state_relay_enabled: bool = False
     hyperedge_tx_coalition_max: int = 2
     hyperedge_robust_quantization_enabled: bool = False
+    # For the physical bistatic EKF candidate, let each reserved receiver
+    # greedily maximize a monotone submodular sum of log(1+Deflection) and
+    # prior-normalized log-det Fisher information over its incoming edges.
+    hyperedge_bistatic_information_ranking_enabled: bool = False
+    hyperedge_bistatic_information_weight: float = 1.0
     hyperedge_reserved_tx_nodes: Tuple[int, ...] = ()
     hyperedge_consensus_rounds: int = 2
     hyperedge_assignment_hold_frames: int = 1
@@ -761,6 +981,20 @@ class MARLParams:
     # only if a detection event delta_q ~ Bernoulli(P_D_q) fires; else predict-only
     # and AoI keeps growing. See docs/KNOWN_ISSUES.md B7.
     belief_detection_sampling: bool = False
+    # Deterministic expected-information alternative to Bernoulli gating.
+    # A detection probability p contributes expected measurement information
+    # p*R^-1, implemented as R_eff=R/max(p,p_floor).  This is opt-in because it
+    # changes the historical optimistic tracker even without random misses.
+    belief_expected_detection_information_enabled: bool = False
+    belief_expected_detection_information_floor: float = 1.0e-3
+    # Tracker measurement physics. ``cartesian`` is the historical optimistic
+    # [x,y,vx,vy] observation. ``bistatic_range_doppler`` uses only the
+    # selected Tx/Rx geometry and OTFS delay/Doppler information in an EKF.
+    belief_measurement_model: str = "cartesian"
+    # Practical loss above the ideal known-signal CRLB (>=1), and a numerical
+    # SNR/Deflection floor used only to keep a finite fail-weak covariance.
+    belief_bistatic_crlb_efficiency: float = 4.0
+    belief_bistatic_min_effective_deflection: float = 1.0e-3
     # Fixed evaluation scenarios (reused every eval + across decode modes).
     eval_seeds: List[int] = field(default_factory=lambda: [10001, 10002, 10003, 10004, 10005])
     # Optional versioned geometry-stratified bank. When set, ``eval_seed_split``
@@ -838,6 +1072,9 @@ class MARLParams:
     # reliability guarantee.
     comm_finite_blocklength_enabled: bool = False
     comm_finite_blocklength_target_bler: float = 1.0e-5
+    # Maximum accepted probability of an erroneous codeword passing the CRC.
+    # A fixed r-bit CRC must satisfy target_bler*2^-r <= this budget.
+    comm_undetected_error_probability_max: float = 1.0e-7
     comm_finite_blocklength_max_channel_uses: int = 100_000_000
     comm_finite_blocklength_sample_errors: bool = True
     # Code blocklength is selected at nominal SNR minus this design fade.
@@ -889,6 +1126,18 @@ class MARLParams:
     comm_qos_steady_min: float = 0.80
     comm_qos_weak3_min: float = 0.70
     comm_qos_worst_min: float = 0.60
+    # R15 (roadmap 2026-08-29): single source for the FORMAL acceptance gates.
+    # tools/assert_gate_thresholds.py (MEDIUM_FLOORS) and
+    # tools/report_blind_certification.py read these values when --config is
+    # given.  Training reward floors (coord_reward_*) and communication
+    # constraint floors (comm_qos_*) are numerically identical to this triple
+    # by default, and that equality is LOCKED by tests/test_qos_gate_provenance.py
+    # (a test, not a shared reference: the three sources stay semantically
+    # independent -- acceptance / reward / constraint, C1).
+    # Order: [worst, weak3, steady].
+    qos_acceptance_floors: List[float] = field(
+        default_factory=lambda: [0.60, 0.70, 0.80])
+    qos_acceptance_wilson_lcb_floor: float = 0.70
     comm_qos_dual_lr: float = 0.05
     comm_qos_lambda_init: float = 0.5
     comm_qos_lambda_max: float = 5.0
@@ -1236,6 +1485,241 @@ class MasterConfig:
     marl: MARLParams = field(default_factory=MARLParams)
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])
 
+    def validate_runtime_boundary(self) -> None:
+        """Validate a possibly programmatically resized live configuration.
+
+        File-backed configurations require one normalized target weight per
+        target.  Tests and small programmatic probes historically resize K/Q
+        after loading: the environment normalizes a weight prefix (or uses a
+        uniform vector when Q grows), and a reporter cap above a reduced K is
+        simply non-binding.  Those two resizing consequences are the only
+        relaxed invariants; every other physical and protocol check remains
+        active.
+        """
+        self.validate(allow_target_weight_resize=True)
+
+    def validate(self, *, allow_target_weight_resize: bool = False) -> None:
+        """Fail closed on malformed or physically invalid core parameters.
+
+        Every declared field is type-checked so YAML booleans, strings, and
+        null values cannot silently enter numeric code. Semantic checks are
+        intentionally limited to the stable scenario/physics/training spine;
+        experimental options keep their existing freedom beyond their type.
+        """
+        _validate_dataclass_types(self, "config")
+        marl = self.marl
+        _require_positive(
+            "config.marl.distributed_decision_sufficient_dynamic_range",
+            marl.distributed_decision_sufficient_dynamic_range,
+        )
+        for name in (
+            "distributed_decision_sufficient_max_bits",
+            "u2u_belief_feedback_mean_bits",
+            "u2u_belief_feedback_cov_bits",
+            "u2u_belief_feedback_aoi_bits",
+        ):
+            _require_positive(f"config.marl.{name}", getattr(marl, name))
+
+        scenario = self.scenario
+        for name in ("K", "Q", "T", "C"):
+            _require_positive(f"config.scenario.{name}", getattr(scenario, name))
+        for index, extent in enumerate(scenario.region_size):
+            _require_positive(f"config.scenario.region_size[{index}]", extent)
+        _require_positive("config.scenario.height", scenario.height)
+        _require_positive("config.scenario.dt", scenario.dt)
+        _require_choice(
+            "config.scenario.sensing_energy_mode",
+            scenario.sensing_energy_mode,
+            {"dt_frame", "cpi_frame"},
+        )
+
+        uav = self.uav
+        for name in (
+                "v_max", "d_safe", "P_sense", "P_report",
+                "P_fly_static", "P_fly_coeff"):
+            _require_nonnegative(f"config.uav.{name}", getattr(uav, name))
+        for name in ("P_sense_max", "P_isac_total", "B_max"):
+            _require_positive(f"config.uav.{name}", getattr(uav, name))
+        if uav.P_sense > uav.P_sense_max:
+            raise ValueError(
+                "config.uav.P_sense must not exceed config.uav.P_sense_max")
+        if uav.P_sense_max > uav.P_isac_total:
+            raise ValueError(
+                "config.uav.P_sense_max must not exceed "
+                "config.uav.P_isac_total")
+
+        target = self.target
+        _require_choice(
+            "config.target.motion_model", target.motion_model, {"CV", "CT", "CA"})
+        _require_finite("config.target.ct_turn_rate", target.ct_turn_rate)
+        for index, speed in enumerate(target.speed_range):
+            _require_nonnegative(f"config.target.speed_range[{index}]", speed)
+        if target.speed_range[0] > target.speed_range[1]:
+            raise ValueError(
+                "config.target.speed_range minimum must not exceed maximum")
+        _require_nonnegative("config.target.sigma_a", target.sigma_a)
+        _require_positive("config.target.rcs", target.rcs)
+        if not target.omega_q:
+            raise ValueError("config.target.omega_q must not be empty")
+        if allow_target_weight_resize:
+            effective_weights = (
+                target.omega_q[:scenario.Q]
+                if len(target.omega_q) >= scenario.Q
+                else target.omega_q
+            )
+        else:
+            if len(target.omega_q) != scenario.Q:
+                raise ValueError(
+                    "config.target.omega_q must contain exactly "
+                    "config.scenario.Q weights")
+            effective_weights = target.omega_q
+        for index, weight in enumerate(effective_weights):
+            _require_nonnegative(f"config.target.omega_q[{index}]", weight)
+        if sum(effective_weights) <= 0.0:
+            raise ValueError(
+                "config.target.omega_q effective weights must have "
+                "positive sum")
+        if (not allow_target_weight_resize
+                and not math.isclose(
+                    sum(effective_weights), 1.0, rel_tol=1.0e-8,
+                    abs_tol=1.0e-8)):
+            raise ValueError("config.target.omega_q must sum to 1")
+
+        otfs = self.otfs
+        for name in ("fc", "B", "delta_f", "T_sym"):
+            _require_positive(f"config.otfs.{name}", getattr(otfs, name))
+        for name in ("M", "N", "n_cpi"):
+            _require_positive(f"config.otfs.{name}", getattr(otfs, name))
+        for name in ("g_tx_dBi", "g_rx_dBi"):
+            _require_finite(f"config.otfs.{name}", getattr(otfs, name))
+        if not math.isclose(otfs.B, otfs.M * otfs.delta_f,
+                            rel_tol=1.0e-6):
+            raise ValueError(
+                "config.otfs.B must equal config.otfs.M * config.otfs.delta_f")
+        if not math.isclose(otfs.T_sym * otfs.delta_f, 1.0,
+                            rel_tol=1.0e-6):
+            raise ValueError(
+                "config.otfs.T_sym must equal 1 / config.otfs.delta_f")
+        cpi_duration = otfs.n_cpi * otfs.N * otfs.T_sym
+        if cpi_duration > scenario.dt:
+            raise ValueError(
+                "OTFS CPI duration must not exceed config.scenario.dt")
+
+        channel = self.channel
+        for name in ("NF", "kT"):
+            _require_positive(f"config.channel.{name}", getattr(channel, name))
+        for name in (
+                "ric_K", "los_a", "los_b", "eta_los_dB", "eta_nlos_dB"):
+            _require_nonnegative(f"config.channel.{name}", getattr(channel, name))
+
+        detection = self.detection
+        _require_probability("config.detection.P_FA", detection.P_FA, strict=True)
+        _require_positive("config.detection.c_det", detection.c_det)
+        _require_probability("config.detection.g_min", detection.g_min)
+        _require_choice(
+            "config.detection.dd_gain_mode", detection.dd_gain_mode,
+            {"binary", "continuous"})
+        _require_positive("config.detection.K_q_max", detection.K_q_max)
+        if (not allow_target_weight_resize
+                and detection.K_q_max > scenario.K):
+            raise ValueError(
+                "config.detection.K_q_max must not exceed config.scenario.K")
+        _require_positive("config.detection.B_q", detection.B_q)
+        _require_probability("config.detection.P_D_min", detection.P_D_min)
+
+        p0_solver = self.p0_solver
+        _require_positive(
+            "config.p0_solver.capacity_per_rx", p0_solver.capacity_per_rx)
+        _require_positive("config.p0_solver.latency_max", p0_solver.latency_max)
+        if p0_solver.latency_max > scenario.dt:
+            raise ValueError(
+                "config.p0_solver.latency_max must not exceed "
+                "config.scenario.dt")
+
+        marl = self.marl
+        if not marl.hidden_layers:
+            raise ValueError("config.marl.hidden_layers must not be empty")
+        for index, width in enumerate(marl.hidden_layers):
+            _require_positive(f"config.marl.hidden_layers[{index}]", width)
+        # Evaluation-only profiles intentionally use lr=0 and/or ppo_epochs=0
+        # to make accidental training a no-op.  These sentinels are valid;
+        # negative values are never meaningful.
+        _require_nonnegative("config.marl.lr", marl.lr)
+        _require_positive("config.marl.ppo_clip", marl.ppo_clip)
+        _require_probability("config.marl.gamma", marl.gamma, strict=True)
+        _require_probability("config.marl.gae_lambda", marl.gae_lambda)
+        for name in ("ppo_epochs", "num_episodes"):
+            _require_nonnegative(f"config.marl.{name}", getattr(marl, name))
+        for name in (
+                "rollout_steps", "minibatch_size", "num_envs",
+                "assignment_hold_frames", "actor_decision_interval",
+                "movement_decision_interval", "obs_history_frames"):
+            _require_positive(f"config.marl.{name}", getattr(marl, name))
+        for name in ("entropy_init", "entropy_final"):
+            _require_nonnegative(f"config.marl.{name}", getattr(marl, name))
+        if marl.entropy_final > marl.entropy_init:
+            raise ValueError(
+                "config.marl.entropy_final must not exceed "
+                "config.marl.entropy_init")
+        _require_choice(
+            "config.marl.detection_fusion_mode", marl.detection_fusion_mode,
+            {"legacy_global", "central_oracle", "local_only", "u2u_distributed"})
+
+        if marl.distributed_no_truth_fail_closed:
+            if not marl.tracking_enabled:
+                raise ValueError(
+                    "config.marl.distributed_no_truth_fail_closed requires "
+                    "config.marl.tracking_enabled")
+            if not marl.distributed_coordination_use_local_belief_targets:
+                raise ValueError(
+                    "config.marl.distributed_no_truth_fail_closed requires "
+                    "config.marl.distributed_coordination_use_local_belief_targets")
+
+        _require_positive(
+            "config.marl.comm_bandwidth_hz", marl.comm_bandwidth_hz)
+        _require_nonnegative(
+            "config.marl.comm_tx_power_w", marl.comm_tx_power_w)
+        _require_positive("config.marl.comm_deadline_s", marl.comm_deadline_s)
+        _require_nonnegative(
+            "config.marl.comm_processing_delay_s", marl.comm_processing_delay_s)
+        if marl.comm_processing_delay_s >= marl.comm_deadline_s:
+            raise ValueError(
+                "config.marl.comm_processing_delay_s must be less than "
+                "config.marl.comm_deadline_s")
+        if not marl.comm_rate_bits_per_dim:
+            raise ValueError("config.marl.comm_rate_bits_per_dim must not be empty")
+        for index, bits in enumerate(marl.comm_rate_bits_per_dim):
+            _require_nonnegative(
+                f"config.marl.comm_rate_bits_per_dim[{index}]", bits)
+        _require_probability(
+            "config.marl.comm_power_fraction_min", marl.comm_power_fraction_min)
+        _require_probability(
+            "config.marl.comm_power_fraction_max", marl.comm_power_fraction_max)
+        if marl.comm_power_fraction_min > marl.comm_power_fraction_max:
+            raise ValueError(
+                "config.marl.comm_power_fraction_min must not exceed "
+                "config.marl.comm_power_fraction_max")
+
+        qos_floors = (
+            marl.comm_qos_worst_min,
+            marl.comm_qos_weak3_min,
+            marl.comm_qos_steady_min,
+        )
+        for name, value in zip(
+                ("comm_qos_worst_min", "comm_qos_weak3_min",
+                 "comm_qos_steady_min"), qos_floors):
+            _require_probability(f"config.marl.{name}", value)
+        if tuple(sorted(qos_floors)) != qos_floors:
+            raise ValueError(
+                "communication QoS floors must satisfy worst <= weak3 <= steady")
+
+        if not self.seeds:
+            raise ValueError("config.seeds must not be empty")
+        for index, seed in enumerate(self.seeds):
+            _require_nonnegative(f"config.seeds[{index}]", seed)
+        if len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("config.seeds must not contain duplicates")
+
     def to_small_config(self) -> "MasterConfig":
         """Return a reduced config for fast smoke tests."""
         small = MasterConfig()
@@ -1250,13 +1734,114 @@ class MasterConfig:
         return small
 
 
+def _validate_dataclass_types(value, path: str) -> None:
+    """Validate one dataclass tree against its runtime type annotations."""
+    if not dataclasses.is_dataclass(value) or isinstance(value, type):
+        raise ValueError(f"{path} must be a configuration mapping")
+    for item in dataclasses.fields(value):
+        _validate_value_type(getattr(value, item.name), item.type,
+                             f"{path}.{item.name}")
+
+
+def _validate_value_type(value, expected_type, path: str) -> None:
+    origin = get_origin(expected_type)
+    args = get_args(expected_type)
+
+    if dataclasses.is_dataclass(expected_type):
+        if not isinstance(value, expected_type):
+            raise ValueError(f"{path} must be a configuration mapping")
+        _validate_dataclass_types(value, path)
+        return
+    if origin is list:
+        if type(value) is not list:
+            raise ValueError(f"{path} must be a list")
+        for index, element in enumerate(value):
+            _validate_value_type(element, args[0], f"{path}[{index}]")
+        return
+    if origin is tuple:
+        if type(value) is not tuple:
+            raise ValueError(f"{path} must be a tuple-compatible sequence")
+        if len(args) == 2 and args[1] is Ellipsis:
+            item_types = [args[0]] * len(value)
+        else:
+            if len(value) != len(args):
+                raise ValueError(
+                    f"{path} must contain exactly {len(args)} elements")
+            item_types = args
+        for index, (element, item_type) in enumerate(zip(value, item_types)):
+            _validate_value_type(element, item_type, f"{path}[{index}]")
+        return
+    if origin in (Union, types.UnionType):
+        for option in args:
+            try:
+                _validate_value_type(value, option, path)
+                return
+            except ValueError:
+                pass
+        raise ValueError(f"{path} has an invalid type")
+    if expected_type is type(None):
+        if value is not None:
+            raise ValueError(f"{path} must be null")
+        return
+    if expected_type is bool:
+        if type(value) is not bool:
+            raise ValueError(f"{path} must be a boolean")
+        return
+    if expected_type is int:
+        if type(value) is not int:
+            raise ValueError(f"{path} must be an integer")
+        return
+    if expected_type is float:
+        if type(value) not in (int, float):
+            raise ValueError(f"{path} must be a number")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{path} must be finite")
+        return
+    if expected_type is str:
+        if type(value) is not str:
+            raise ValueError(f"{path} must be a string")
+        return
+    if not isinstance(value, expected_type):
+        raise ValueError(f"{path} has an invalid type")
+
+
+def _require_finite(path: str, value) -> None:
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{path} must be finite")
+
+
+def _require_positive(path: str, value) -> None:
+    _require_finite(path, value)
+    if value <= 0:
+        raise ValueError(f"{path} must be greater than zero")
+
+
+def _require_nonnegative(path: str, value) -> None:
+    _require_finite(path, value)
+    if value < 0:
+        raise ValueError(f"{path} must be nonnegative")
+
+
+def _require_probability(path: str, value, *, strict: bool = False) -> None:
+    _require_finite(path, value)
+    valid = 0.0 < value < 1.0 if strict else 0.0 <= value <= 1.0
+    if not valid:
+        interval = "(0, 1)" if strict else "[0, 1]"
+        raise ValueError(f"{path} must be in {interval}")
+
+
+def _require_choice(path: str, value: str, choices: set) -> None:
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"{path} must be one of: {allowed}")
+
+
 def _dict_to_dataclass(cls, d: dict, path: str = "config"):
     """Recursively convert a mapping and reject unknown configuration keys.
 
     Silent key dropping is unsafe for experiments: a misspelled switch can
     otherwise produce a valid-looking run under a different controller.
     """
-    import dataclasses
     field_types = {f.name: f.type for f in dataclasses.fields(cls)}
     kwargs = {}
     for key, value in d.items():
@@ -1268,6 +1853,9 @@ def _dict_to_dataclass(cls, d: dict, path: str = "config"):
         elif hasattr(ft, '__origin__') and ft.__origin__ in (list, List):
             kwargs[key] = value
         elif hasattr(ft, '__origin__') and ft.__origin__ in (tuple, Tuple):
+            if type(value) not in (list, tuple):
+                raise ValueError(
+                    f"{path}.{key} must be a list/tuple sequence")
             kwargs[key] = tuple(value)
         else:
             kwargs[key] = value
@@ -1292,7 +1880,7 @@ def _load_raw_config(path: str, seen: set) -> dict:
         raise ValueError(f'cyclic config inheritance involving {resolved}')
     seen.add(resolved)
     with open(resolved, 'r', encoding='utf-8') as f:
-        raw = yaml.safe_load(f) or {}
+        raw = load_unique_yaml(f) or {}
     if not isinstance(raw, dict):
         raise ValueError(f'config root must be a mapping: {resolved}')
     parent = raw.pop('extends', None)
@@ -1310,7 +1898,9 @@ def _load_raw_config(path: str, seen: set) -> dict:
 
 def load_config(path: str) -> MasterConfig:
     """Load YAML, optionally inheriting another file via ``extends``."""
-    return _dict_to_dataclass(MasterConfig, _load_raw_config(path, set()))
+    config = _dict_to_dataclass(MasterConfig, _load_raw_config(path, set()))
+    config.validate()
+    return config
 
 
 def get_default_config() -> MasterConfig:

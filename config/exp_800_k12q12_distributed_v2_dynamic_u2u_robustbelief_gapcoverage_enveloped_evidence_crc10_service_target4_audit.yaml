@@ -1,0 +1,13 @@
+# Reliability-derived CRC10 plus lossless AoI2. Target BLER 1e-3 and a
+# per-packet undetected-error budget 1e-6 require r>=ceil(log2(1000))=10.
+# The freshness guard admits AoI only in 0..3, so two physical bits are exact;
+# the service envelope retains the legacy 8-bit-AoI packet length.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_evidence_fixed16_service_target4_audit.yaml
+
+marl:
+  evidence_fixed_schema_header_bits: 10
+  hyperedge_protocol_header_bits: 10
+  hyperedge_state_codec_service_reference_header_bits: 16
+  comm_undetected_error_probability_max: 1.0e-6
+  u2u_belief_feedback_aoi_bits: 2
+  evidence_legacy_service_aoi_bits: 8

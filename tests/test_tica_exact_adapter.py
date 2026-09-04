@@ -18,6 +18,7 @@ import pytest
 from uav_isac.agents.tica_actor import TICAActor, D1TICAResidualActor
 from uav_isac.agents.networks import StructuredActorNetwork
 from uav_isac.environment.observation_slices import ObservationSlices
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 
 
 def build_adapter(K=4, Q=4, D=64, L=8):
@@ -190,7 +191,13 @@ def test_real_d1_checkpoint_controlled_load():
     if not os.path.exists(d1_path):
         pytest.skip(f"{d1_path} not found")
 
-    d1_ckpt = torch.load(d1_path, map_location='cpu', weights_only=False)
+    d1_ckpt = safe_torch_load(
+        d1_path,
+        map_location="cpu",
+        description="D1 adapter regression checkpoint",
+    )
+    validate_state_dict(
+        d1_ckpt, description="D1 adapter regression state_dict")
     K, Q = 4, 4
     sl = ObservationSlices.from_config(K=K, Q=Q)
     obs_dim = sl.total_dim

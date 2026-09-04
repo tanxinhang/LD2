@@ -6,14 +6,13 @@ Aggregates: self_enc, target_enc, neighbor_gru, neighbor_proj, attn, attn_norm
 Keeps local: dp_head, comm_head, role_head, dp_log_std, comm_proj, gate, critic
 """
 
-import sys, os, copy, argparse
+import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
 import torch
 
-from config.params import get_default_config, load_config
-from uav_isac.utils.seeding import set_seed
+from config.params import load_config
 from uav_isac.environment.env_wrapper import UAVISACEnv
 from uav_isac.environment.action import ActionSpace
 from uav_isac.agents.mappo_agent import MAPPOAgent
@@ -23,6 +22,12 @@ from uav_isac.agents.trainer import MAPPTrainer
 # ── Which params to aggregate (FedPer: encoder-only) ──
 SHARED_KEYS = {'self_enc', 'target_enc', 'neighbor_gru', 'neighbor_proj',
                'attn', 'attn_norm', 'global_enc'}
+
+DEFAULT_REGION_CONFIGS = [
+    'config/fed_region_A.yaml',
+    'config/fed_region_B.yaml',
+    'config/fed_region_C.yaml',
+]
 
 
 def get_encoder_params(agent):
@@ -184,31 +189,7 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
 
-    if args.configs is None:
-        # Default: 3 non-IID regions
-        base = 'config/exp_800_k8q8.yaml'
-        # Create variant configs by modifying the base
-        import yaml
-        with open(base) as f:
-            base_cfg = yaml.safe_load(f)
-
-        configs = []
-        for i, (speed_range, los_a, los_b) in enumerate([
-            ([0, 5], 4.88, 0.43),     # Region A: standard
-            ([2, 10], 4.88, 0.43),    # Region B: fast targets
-            ([0, 5], 7.0, 0.30),      # Region C: poor comm (more NLoS)
-        ]):
-            cfg = copy.deepcopy(base_cfg)
-            cfg['target']['speed_range'] = list(speed_range)
-            cfg['channel']['los_a'] = los_a
-            cfg['channel']['los_b'] = los_b
-            path = f'config/fed_region_{chr(65+i)}.yaml'
-            with open(path, 'w') as f:
-                yaml.dump(cfg, f)
-            configs.append(path)
-            print(f'Created {path}: speed={speed_range} los_a={los_a} los_b={los_b}')
-    else:
-        configs = args.configs
+    configs = args.configs or DEFAULT_REGION_CONFIGS
 
     ft = FederatedTrainer(configs, base_seed=args.seed)
     ft.run(warmup_eps=args.warmup, fed_rounds=args.rounds,
@@ -216,5 +197,4 @@ def main():
 
 
 if __name__ == '__main__':
-    import yaml
     main()

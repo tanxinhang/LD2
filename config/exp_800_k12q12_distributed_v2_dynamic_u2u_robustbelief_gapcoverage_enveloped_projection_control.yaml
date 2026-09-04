@@ -1,0 +1,6 @@
+# Same deployed algorithm as the enveloped gap-coverage pilot, with the
+# proof-gated redundant speed-ball elimination disabled for strict A/B audit.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  distributed_movement_analytic_composable_projection_enabled: false

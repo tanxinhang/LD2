@@ -1,0 +1,6 @@
+# Development-only diagnostic. The extra common-view LP is never executed as
+# control and its time must not be used for deployment or simulator claims.
+extends: exp_strict_distributed_k16q16_process4.yaml
+
+marl:
+  distributed_replicated_power_certificate_shadow_global_lp_enabled: true

@@ -1,0 +1,9 @@
+extends: exp_800_k8q8.yaml
+
+# Federated client A: nominal target dynamics and air-to-ground channel.
+target:
+  speed_range: [0, 5]
+
+channel:
+  los_a: 4.88
+  los_b: 0.43

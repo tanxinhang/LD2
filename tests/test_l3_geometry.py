@@ -100,3 +100,45 @@ def test_gradient_matches_numerical_geometry():
             fd = (gp[0] - gm[0]) / (2.0 * eps)
             assert np.isclose(fd, grad[k, d], atol=5e-2), (
                 f"uav {k} dim {d}: fd {fd} vs grad {grad[k,d]}")
+
+
+def test_slant_range_gradient_matches_finite_difference() -> None:
+    """Horizontal motion must retain the fixed vertical range in Friis R^2."""
+    rng = np.random.default_rng(611)
+    K, Q = 3, 2
+    height = 20.0
+    uav = rng.uniform(10.0, 90.0, size=(K, 2))
+    target = rng.uniform(10.0, 90.0, size=(Q, 2))
+    owner = np.asarray([1, 2])
+    path_constant = rng.uniform(0.5e8, 1.5e8, size=(K, Q))
+    power = rng.uniform(0.1, 1.0, size=(K, Q))
+    prices = rng.uniform(0.1, 1.0, size=Q)
+
+    def gain_of(position: np.ndarray) -> np.ndarray:
+        horizontal_sq = np.sum(
+            (position[:, None, :] - target[None, :, :]) ** 2, axis=2)
+        range_sq = horizontal_sq + height ** 2
+        return path_constant / (
+            range_sq * range_sq[owner, np.arange(Q)][None, :])
+
+    def objective(position: np.ndarray) -> float:
+        return float(np.sum(prices[None, :] * power * gain_of(position)))
+
+    gain = gain_of(uav)
+    analytic = capability_geometry_gradient(
+        gain, owner, uav, target, power, prices, height_m=height)
+    eps = 1.0e-4
+    for k in range(K):
+        for dimension in range(2):
+            positive = uav.copy()
+            negative = uav.copy()
+            positive[k, dimension] += eps
+            negative[k, dimension] -= eps
+            finite_difference = (
+                objective(positive) - objective(negative)) / (2.0 * eps)
+            assert np.isclose(
+                finite_difference,
+                analytic[k, dimension],
+                rtol=2.0e-6,
+                atol=1.0e-8,
+            )

@@ -10,7 +10,9 @@ imitation accuracy to certified sensing-task regret:
    m = t*(A) - d_req strictly exceeds the bound.
 
 2. **Decision-preserving communication bound**
-       B >= ceil( log2( 1 + R / margin ) )
+       B > log2(1 + R / margin)
+
+   so the minimum integer is ``floor(log2(1 + R/margin)) + 1``.
    (B-bit uniform quantization, per-score error R/(2(2^B-1)); order survives
    iff margin > 2 eps_B).  The event trigger suppresses the Token while
    margin > 2 E_stale(h) + 2 eps_B (advice/016 §13-14).
@@ -106,9 +108,9 @@ def test_qos_floor_preserved_when_margin_exceeds_error():
 # ---------------------------------------------------------------------------
 
 def test_decision_preserving_bits_formula():
-    """B = ceil(log2(1 + R/margin)): order preserved iff margin > 2 eps_B."""
-    # margin 1.0, R 1.0 -> ratio 1 -> B=1
-    assert decision_preserving_bits(1.0, 1.0) == 1
+    """Strict order needs ``2**B - 1 > R / margin``, not equality."""
+    # margin == R gives equality at B=1, so B=2 is the first certificate.
+    assert decision_preserving_bits(1.0, 1.0) == 2
     # margin 0.1, R 1.0 -> log2(11) = 3.46 -> 4
     assert decision_preserving_bits(0.1, 1.0) == 4
     # margin 0.5, R 2.0 -> log2(5) = 2.32 -> 3
@@ -116,6 +118,20 @@ def test_decision_preserving_bits_formula():
     # degenerate: non-positive margin -> cannot certify -> minimal bits
     assert decision_preserving_bits(0.0, 1.0) == 1
     assert decision_preserving_bits(1.0, 0.0) == 1
+
+
+@pytest.mark.parametrize("boundary_bits", [1, 2, 3, 4, 8, 16])
+def test_decision_preserving_bits_is_safe_on_exact_power_of_two_boundary(
+    boundary_bits,
+):
+    """The old ceil formula returned ``boundary_bits`` at an unsafe tie."""
+    dynamic_range = 1.0
+    margin = dynamic_range / (2 ** boundary_bits - 1)
+    selected = decision_preserving_bits(margin, dynamic_range)
+
+    assert selected == boundary_bits + 1
+    assert margin > 2.0 * quantization_error_bound(
+        selected, dynamic_range)
 
 
 def test_certified_bits_reserve_stale_and_physical_error_or_fail_closed():
@@ -248,3 +264,93 @@ def test_task_regret_gamma_penalizes_feasibility_loss():
     assert feas <= 1.0
     assert R_g in (0.0, 1.0)
     assert R_t >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# C6: decision-sufficient local plan (advice/001 §12–13, 2026-08-26)
+# ---------------------------------------------------------------------------
+
+def test_local_decision_margin_gap_between_top_two():
+    from uav_isac.coordination.structure_regret import local_decision_margin
+
+    scores = np.array([0.9, 0.6, 0.1])
+    assert local_decision_margin(scores, top_k=2) == pytest.approx(0.3)
+
+
+def test_local_decision_margin_fail_closed_on_few_candidates():
+    from uav_isac.coordination.structure_regret import local_decision_margin
+
+    assert local_decision_margin(np.array([0.9]), top_k=2) == 0.0
+    assert local_decision_margin(np.array([np.nan, 0.5]), top_k=2) == 0.0
+
+
+def test_decision_sufficient_plan_suppresses_large_margin():
+    from uav_isac.coordination.structure_regret import decision_sufficient_plan
+
+    scores = np.array([0.95, 0.10, 0.05])
+    # margin 0.85 > 2*0 + 2*eps(32) -> suppressed (no airtime)
+    transmit, bits = decision_sufficient_plan(
+        scores, 1.0, stale_drift_bound=0.0,
+        physical_error_bound=0.0, max_bits=32,
+    )
+    assert transmit is False and bits == 0
+
+
+def test_decision_sufficient_plan_sends_when_margin_tight():
+    from uav_isac.coordination.structure_regret import decision_sufficient_plan
+
+    scores = np.array([0.51, 0.50, 0.00])
+    # margin 0.01 not certifiable under drift 0.1 -> must transmit
+    transmit, bits = decision_sufficient_plan(
+        scores, 1.0, stale_drift_bound=0.1,
+        physical_error_bound=0.0, max_bits=32,
+    )
+    assert transmit is True and bits >= 1
+
+
+def test_decision_sufficient_plan_bits_shrink_as_margin_grows():
+    from uav_isac.coordination.structure_regret import decision_sufficient_plan
+
+    bits_narrow = decision_sufficient_plan(
+        np.array([0.52, 0.48]), 1.0, max_bits=32,
+    )[1]
+    bits_wide = decision_sufficient_plan(
+        np.array([0.90, 0.10]), 1.0, max_bits=32,
+    )[1]
+    # wider margin -> either suppressed or fewer bits; never more.
+    assert bits_wide == 0 or bits_wide <= bits_narrow
+
+
+def test_decision_sufficient_plan_counts_physical_error_when_suppressing():
+    from uav_isac.coordination.structure_regret import decision_sufficient_plan
+
+    # Delta=0.2 is safe only if the physical-error term is accidentally
+    # ignored.  With E_phys=0.11 the uncertainty alone consumes 0.22 margin,
+    # so the sender must remain active at the richest available precision.
+    transmit, bits = decision_sufficient_plan(
+        np.array([0.6, 0.4]),
+        1.0,
+        stale_drift_bound=0.0,
+        physical_error_bound=0.11,
+        max_bits=32,
+    )
+    assert transmit is True
+    assert bits == 32
+
+
+def test_decision_sufficient_plan_uses_receiver_reference_precision():
+    from uav_isac.coordination.structure_regret import decision_sufficient_plan
+
+    # The receiver holds a 4-bit token.  Testing silence against an imaginary
+    # 32-bit reference underestimates eps_B and incorrectly suppresses this
+    # update: Delta=0.2 <= 2*0.0833 + 2*eps_4.
+    transmit, bits = decision_sufficient_plan(
+        np.array([0.6, 0.4]),
+        1.0,
+        stale_drift_bound=0.0833,
+        physical_error_bound=0.0,
+        max_bits=32,
+        reference_bits=4,
+    )
+    assert transmit is True
+    assert bits >= 1

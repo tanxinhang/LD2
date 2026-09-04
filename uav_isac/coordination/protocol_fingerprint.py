@@ -159,7 +159,9 @@ def fingerprint_protocol_implementation(
         domain=b"uav-isac-u2u-protocol-fingerprint-v1",
         result_type=ProtocolImplementationFingerprint,
     )
-    assert isinstance(result, ProtocolImplementationFingerprint)
+    if not isinstance(result, ProtocolImplementationFingerprint):
+        raise RuntimeError(
+            "protocol fingerprint builder returned an invalid result type")
     return result
 
 
@@ -199,5 +201,7 @@ def fingerprint_controller_implementation(
         domain=b"uav-isac-complete-controller-fingerprint-v1",
         result_type=ControllerImplementationFingerprint,
     )
-    assert isinstance(result, ControllerImplementationFingerprint)
+    if not isinstance(result, ControllerImplementationFingerprint):
+        raise RuntimeError(
+            "controller fingerprint builder returned an invalid result type")
     return result

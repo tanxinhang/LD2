@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from uav_isac.utils.checkpoint_loading import safe_torch_load
+
 
 @dataclass(frozen=True)
 class EquivariantMovementPlanMetadata:
@@ -444,10 +446,14 @@ class FrozenEquivariantMovementPlanner:
         allow_uniform_region_scaling: bool = False,
         validation_domain_key: str | None = None,
     ) -> "FrozenEquivariantMovementPlanner":
-        try:
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            payload = torch.load(path, map_location="cpu")
+        payload = safe_torch_load(
+            path,
+            map_location="cpu",
+            description="equivariant movement-plan checkpoint",
+            required_keys=("hidden_dim",),
+            mapping_keys=("metadata",),
+            state_dict_keys=("model_state_dict",),
+        )
         metadata = EquivariantMovementPlanMetadata.from_dict(payload["metadata"])
         if not metadata.selection_admitted:
             raise ValueError("movement-plan checkpoint failed holdout admission")

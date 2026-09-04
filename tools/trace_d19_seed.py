@@ -22,6 +22,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.params import load_config  # noqa: E402
+from uav_isac.utils.checkpoint_loading import (  # noqa: E402
+    safe_torch_load,
+    validate_state_dict,
+)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -46,9 +50,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # env may consult the structure student / learned comm on some paths; load
     # for parity with the certified runs).
     if args.warm_start:
-        ckpt = torch.load(args.warm_start, map_location=device)
+        ckpt = safe_torch_load(
+            args.warm_start,
+            map_location=device,
+            description="D1.9 trace warm-start checkpoint",
+            optional_state_dict_keys=("actor",),
+        )
         if "actor" in ckpt:
             ckpt = ckpt["actor"]
+        validate_state_dict(
+            ckpt, description="D1.9 trace actor state_dict")
         # The actor is only used through the trainer; env-only trace relies on
         # the analytical hooks, so loading is best-effort here.
         print("warm-start checkpoint loaded (analytical stack drives L0-L3)")

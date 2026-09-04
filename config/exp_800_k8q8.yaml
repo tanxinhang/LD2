@@ -1,4 +1,4 @@
-﻿# Experiment config: large-area, 8-UAV 8-target scenario for genuine MARL.
+# Experiment config: large-area, 8-UAV 8-target scenario for genuine MARL.
 # K=8 Q=8: Greedy=0.80 ceiling, Random=0.43 floor, 0.37 learning gap.
 #"
 # irrelevant and a trained policy shows no gain over random (null result).
@@ -96,7 +96,6 @@ marl:
   freeze_attention: true          # S1: Attention frozen, EH-only update
   cvar_tau: 0.0                   # disabled
   cvar_epsilon: 0.05
-  target_kl: 0.003
   vf_coef: 0.5
   max_grad_norm: 0.5
   lagrangian_lr: 0.002

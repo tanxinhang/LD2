@@ -271,8 +271,12 @@ def test_train_chunk_bptt_multi_uav_shape():
         (chunk_mse * L / T).backward()
 
     opt.step()
-    # If we got here without shape errors, the test passes
-    assert True
+    # Verify the chunked training actually backpropagated: the model must have
+    # received gradients from the chunked forward/backward (not a shape-only pass).
+    grads = [p.grad for p in actor.parameters() if p.grad is not None]
+    assert grads, "chunk-BPTT backward produced no gradients on the actor"
+    for g in grads:
+        assert torch.isfinite(g).all(), "chunk-BPTT produced a non-finite gradient"
 
 
 @pytest.mark.parametrize("k,q", [(4, 4)])

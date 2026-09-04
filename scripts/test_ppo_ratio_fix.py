@@ -22,6 +22,7 @@ from uav_isac.environment.action import ActionSpace
 from uav_isac.agents.networks import StructuredActorNetwork, split_param_groups
 from uav_isac.agents.mappo_agent import MAPPOAgent
 from uav_isac.agents.trainer import MAPPTrainer
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 
 cfg = load_config('config/exp_800_k8_q8.yaml')
 cfg.marl.num_envs = 1  # single env for speed + strict reproducibility
@@ -152,7 +153,12 @@ aspace.structured_actor = True
 aspace.structured_entity_dim = 64
 
 dag_path = 'results/warmstart_gru_dagger.pt'
-dag_ckpt = torch.load(dag_path, map_location=device, weights_only=False)
+dag_ckpt = safe_torch_load(
+    dag_path,
+    map_location=device,
+    description="DAgger warm-start checkpoint",
+)
+validate_state_dict(dag_ckpt, description="DAgger warm-start actor state_dict")
 dag_keys = set(dag_ckpt.keys())
 
 # Build a standalone actor for baseline eval

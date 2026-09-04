@@ -1,0 +1,12 @@
+# Development-only bottom-physics tracker closure.  The receiver obtains only
+# bistatic range and Doppler from each selected echo.  Noise follows the OTFS
+# bandwidth/coherent-time known-signal CRLB, scaled by the edge's realized
+# effective Deflection and an explicit practical-efficiency loss.
+extends: exp_strict_distributed_k16q16_ca_cabelief_process4.yaml
+
+marl:
+  belief_measurement_model: bistatic_range_doppler
+  belief_bistatic_crlb_efficiency: 4.0
+  belief_bistatic_min_effective_deflection: 0.001
+  hyperedge_bistatic_information_ranking_enabled: true
+  hyperedge_bistatic_information_weight: 1.0

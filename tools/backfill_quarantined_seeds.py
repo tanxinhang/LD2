@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """P2 (advice 014): backfill quarantined seeds out of 800_q4 / 1130_k8q8 splits.
 
-The quarantined set {795, 747, 105, 860, 2} (docs/KNOWN_ISSUES.md) leaked into
+The quarantined set {795, 747, 105, 860, 2} (docs/EXPERIMENT_LOG.md) leaked into
 the selection/confirmation splits of the 800_q4 and 1130_k8q8 banks.  This tool
 writes v2 banks that replace every quarantined seed with a clean, unused seed
 drawn deterministically from the same bank's seed_metadata (preferring the same

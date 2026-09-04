@@ -1,0 +1,17 @@
+# Reproducible gap-coverage v1 candidate.
+#
+# The original 25-seed candidate predated the later pursuit-radius,
+# deficit-priority and near-field-focus extensions.  Its reported baseline gap
+# (mean worst +0.115, weak3 +0.096 at equal U2U bits) therefore depended on an
+# implicit always-pursue recipe.  Pin that algorithm explicitly so future
+# dataclass defaults cannot silently change the evaluated controller.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_pilot.yaml
+
+marl:
+  # A 1 m radius is only a numerical coincidence hold; operationally every
+  # assigned endpoint continues radial pursuit as in the v1 implementation.
+  distributed_gap_pursuit_radius_m: 1.0
+  distributed_gap_deficit_priority: false
+  distributed_gap_nearfield_focus: false
+  distributed_gap_tangential_phase: false
+  distributed_gap_baseline_envelope_enabled: false

@@ -4,8 +4,125 @@ import numpy as np
 import pytest
 from uav_isac.environment.belief import (
     BeliefManager,
+    batched_pair_covariance_intersection,
+    bistatic_range_doppler_crlb,
+    bistatic_range_doppler_measurement_and_jacobian,
     generalized_covariance_intersection,
 )
+
+
+def test_expected_detection_information_is_monotone_and_unit_exact():
+    kwargs = dict(
+        K=1,
+        Q=1,
+        initial_positions=np.asarray([[200.0, 300.0, 0.0]]),
+        initial_velocities=np.asarray([[2.0, -1.0, 0.0]]),
+    )
+    historical = BeliefManager(
+        **kwargs, rng=np.random.default_rng(91))
+    unit = BeliefManager(
+        **kwargs, rng=np.random.default_rng(91))
+    weak = BeliefManager(
+        **kwargs, rng=np.random.default_rng(91))
+    true_state = np.asarray([201.0, 299.0, 2.0, -1.0])
+
+    historical.update_after_observation(0, 0, True, true_state)
+    unit.update_after_observation(
+        0, 0, True, true_state, detection_probability=1.0)
+    weak.update_after_observation(
+        0, 0, True, true_state, detection_probability=0.25)
+
+    np.testing.assert_allclose(unit.mean, historical.mean, atol=1.0e-12)
+    np.testing.assert_allclose(unit.cov, historical.cov, atol=1.0e-12)
+    assert np.trace(weak.cov[0, 0]) > np.trace(unit.cov[0, 0])
+
+
+def test_expected_detection_information_rejects_invalid_probability():
+    manager = BeliefManager(
+        K=1,
+        Q=1,
+        initial_positions=np.asarray([[0.0, 0.0, 0.0]]),
+        initial_velocities=np.asarray([[0.0, 0.0, 0.0]]),
+        rng=np.random.default_rng(3),
+    )
+    with pytest.raises(ValueError, match="probability/floor"):
+        manager.update_after_observation(
+            0,
+            0,
+            True,
+            np.zeros(4),
+            detection_probability=1.1,
+        )
+
+
+def test_bistatic_measurement_jacobian_matches_finite_difference():
+    state = np.asarray([260.0, 190.0, 4.0, -2.0, 0.3, -0.1])
+    tx_position = np.asarray([80.0, 110.0, 20.0])
+    rx_position = np.asarray([470.0, 330.0, 20.0])
+    tx_velocity = np.asarray([2.0, 1.0, 0.0])
+    rx_velocity = np.asarray([-1.0, 0.5, 0.0])
+    args = (
+        tx_position, tx_velocity, rx_position, rx_velocity, 28.0e9)
+    measurement, jacobian = (
+        bistatic_range_doppler_measurement_and_jacobian(state, *args))
+    numerical = np.zeros_like(jacobian)
+    epsilon = 1.0e-5
+    for index in range(state.size):
+        plus = state.copy(); plus[index] += epsilon
+        minus = state.copy(); minus[index] -= epsilon
+        numerical[:, index] = (
+            bistatic_range_doppler_measurement_and_jacobian(plus, *args)[0]
+            - bistatic_range_doppler_measurement_and_jacobian(minus, *args)[0]
+        ) / (2.0 * epsilon)
+    assert np.all(np.isfinite(measurement))
+    np.testing.assert_allclose(jacobian, numerical, rtol=2.0e-6, atol=2.0e-7)
+    np.testing.assert_array_equal(jacobian[:, 4:], np.zeros((2, 2)))
+
+
+def test_bistatic_crlb_improves_with_snr_bandwidth_and_coherent_time():
+    baseline = bistatic_range_doppler_crlb(10.0, 1.0e6, 1.0e-3)
+    strong = bistatic_range_doppler_crlb(20.0, 1.0e6, 1.0e-3)
+    wide = bistatic_range_doppler_crlb(10.0, 2.0e6, 1.0e-3)
+    long = bistatic_range_doppler_crlb(10.0, 1.0e6, 2.0e-3)
+    assert strong[0, 0] == pytest.approx(0.5 * baseline[0, 0])
+    assert strong[1, 1] == pytest.approx(0.5 * baseline[1, 1])
+    assert wide[0, 0] == pytest.approx(0.25 * baseline[0, 0])
+    assert wide[1, 1] == pytest.approx(baseline[1, 1])
+    assert long[0, 0] == pytest.approx(baseline[0, 0])
+    assert long[1, 1] == pytest.approx(0.25 * baseline[1, 1])
+
+
+def test_bistatic_ekf_is_psd_and_information_monotone_in_deflection():
+    kwargs = dict(
+        K=1,
+        Q=1,
+        initial_positions=np.asarray([[200.0, 300.0, 0.0]]),
+        initial_velocities=np.asarray([[2.0, -1.0, 0.0]]),
+        motion_model='CA',
+    )
+    weak = BeliefManager(**kwargs, rng=np.random.default_rng(73))
+    strong = BeliefManager(**kwargs, rng=np.random.default_rng(73))
+    update = dict(
+        uav_id=0,
+        target_id=0,
+        observed=True,
+        true_state=np.asarray([201.0, 299.0, 2.0, -1.0]),
+        transmitter_position_m=np.asarray([50.0, 100.0, 20.0]),
+        transmitter_velocity_mps=np.zeros(3),
+        receiver_position_m=np.asarray([450.0, 350.0, 20.0]),
+        receiver_velocity_mps=np.zeros(3),
+        carrier_hz=28.0e9,
+        bandwidth_hz=1.0e6,
+        coherent_time_s=1.024e-3,
+        crlb_efficiency=4.0,
+    )
+    weak.update_after_bistatic_observation(
+        **update, effective_deflection=1.0)
+    strong.update_after_bistatic_observation(
+        **update, effective_deflection=100.0)
+    assert np.min(np.linalg.eigvalsh(weak.cov[0, 0])) >= -1.0e-10
+    assert np.min(np.linalg.eigvalsh(strong.cov[0, 0])) >= -1.0e-10
+    assert np.trace(strong.cov[0, 0]) < np.trace(weak.cov[0, 0])
 
 
 def test_generalized_ci_does_not_double_count_repeated_posterior():
@@ -36,6 +153,53 @@ def test_generalized_ci_is_permutation_invariant_with_equal_weights():
     np.testing.assert_allclose(fused[0], permuted[0], atol=1.0e-12)
     np.testing.assert_allclose(fused[1], permuted[1], atol=1.0e-12)
     assert np.min(np.linalg.eigvalsh(fused[1])) > 0.0
+
+
+def test_batched_pair_ci_matches_scalar_generalized_ci():
+    rng = np.random.default_rng(17)
+    local_mean = rng.normal(size=(12, 4))
+    remote_mean = rng.normal(size=(12, 4))
+    local_factor = rng.normal(size=(12, 4, 4))
+    remote_factor = rng.normal(size=(12, 4, 4))
+    local_cov = (
+        local_factor @ np.swapaxes(local_factor, -1, -2)
+        + 0.2 * np.eye(4)[None])
+    remote_cov = (
+        remote_factor @ np.swapaxes(remote_factor, -1, -2)
+        + 0.2 * np.eye(4)[None])
+
+    batch_mean, batch_cov = batched_pair_covariance_intersection(
+        local_mean, local_cov, remote_mean, remote_cov)
+    scalar = [
+        generalized_covariance_intersection(
+            np.stack([local_mean[index], remote_mean[index]]),
+            np.stack([local_cov[index], remote_cov[index]]),
+        )
+        for index in range(local_mean.shape[0])
+    ]
+    np.testing.assert_allclose(
+        batch_mean, np.stack([item[0] for item in scalar]), atol=1.0e-12)
+    np.testing.assert_allclose(
+        batch_cov, np.stack([item[1] for item in scalar]), atol=1.0e-12)
+
+
+def test_reset_preserves_configured_initial_uncertainty():
+    positions = np.zeros((1, 3), dtype=np.float64)
+    velocities = np.zeros((1, 3), dtype=np.float64)
+    manager = BeliefManager(
+        K=1,
+        Q=1,
+        initial_positions=positions,
+        initial_velocities=velocities,
+        initial_position_std=2.0,
+        initial_velocity_std=3.0,
+        rng=np.random.default_rng(7),
+    )
+    np.testing.assert_allclose(
+        np.diag(manager.cov[0, 0]), [4.0, 4.0, 9.0, 9.0])
+    manager.reset(positions, velocities)
+    np.testing.assert_allclose(
+        np.diag(manager.cov[0, 0]), [4.0, 4.0, 9.0, 9.0])
 
 
 class TestNISComputation:

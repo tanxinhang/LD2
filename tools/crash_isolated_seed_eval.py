@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """P1-5 (advice 014 §9): crash-isolated per-seed certification evaluation.
 
-The Windows/MKL ``numpy.linalg.eigvalsh`` native abort (KNOWN_ISSUES #4) can
-kill the whole certification process when it fires inside a merged-belief
+The historical Windows/MKL ``numpy.linalg.eigvalsh`` native abort documented
+in ``docs/EXPERIMENT_LOG.md`` can kill the whole certification process when it
+fires inside a merged-belief
 eigen-decomposition.  This wrapper runs the final evaluation ONE SEED PER
 SUBPROCESS with ``MKL_NUM_THREADS=1`` / ``OMP_NUM_THREADS=1``, so a native
 library crash terminates only that seed's worker; the parent records the seed
@@ -127,6 +128,39 @@ def _merge_rows(rows: list[dict[str, str]]) -> dict[str, str]:
     return merged
 
 
+def _order_rows_by_requested_seeds(
+    rows: list[dict[str, str]], requested_seeds: list[int]
+) -> list[dict[str, str]]:
+    """Restore protocol seed order after asynchronous worker completion.
+
+    Numeric sorting is deterministic but is not paired-evaluation safe when
+    the baseline CSV preserves a deliberately stratified request order.
+    Downstream paired arrays are positional, so the merged seed column and
+    every episode array must follow the caller's order exactly.
+    """
+    requested = [int(seed) for seed in requested_seeds]
+    if len(set(requested)) != len(requested):
+        raise ValueError("requested evaluation seeds must be unique")
+    order = {seed: index for index, seed in enumerate(requested)}
+    keyed: list[tuple[int, dict[str, str]]] = []
+    seen: set[int] = set()
+    for row in rows:
+        parsed = _parse(row.get("eval_episode_seeds", ""))
+        if (
+            not isinstance(parsed, list) or len(parsed) != 1
+            or not isinstance(parsed[0], int)
+        ):
+            raise ValueError(
+                "each isolated worker row must contain exactly one integer seed")
+        seed = int(parsed[0])
+        if seed not in order or seed in seen:
+            raise ValueError(
+                "isolated worker rows do not match unique requested seeds")
+        seen.add(seed)
+        keyed.append((order[seed], row))
+    return [row for _, row in sorted(keyed, key=lambda item: item[0])]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -247,8 +281,7 @@ def main() -> int:
     elapsed = time.perf_counter() - started
 
     if rows:
-        rows.sort(key=lambda row: int(
-            _parse(row.get("eval_episode_seeds", "[0]"))[0]))
+        rows = _order_rows_by_requested_seeds(rows, seeds)
         merged = _merge_rows(rows)
         with open(out_dir / "paired_eval.csv", "w", newline="",
                   encoding="utf-8") as fh:

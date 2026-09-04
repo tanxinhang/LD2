@@ -24,6 +24,7 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 import numpy as np
 
 from uav_isac.utils.math_utils import Q_inverse, compute_PD
+from uav_isac.utils.sentinels import OWNER_INDEX_NONE
 
 
 DETECTION_FUSION_MODES = frozenset({
@@ -148,8 +149,9 @@ def quantize_belief_feedback(
     velocity_bound_mps: float,
     mean_bits: int,
     covariance_bits: int,
+    acceleration_bound_mps2: float | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Quantize one ``[x,y,vx,vy]`` posterior conservatively.
+    """Quantize one CV or CA posterior conservatively.
 
     Position/velocity coordinates use bounded uniform quantization.  The
     deterministic nearest-level error bound ``Delta^2/4`` is added to the
@@ -161,16 +163,27 @@ def quantize_belief_feedback(
     """
     state = np.asarray(mean, dtype=np.float64).reshape(-1)
     cov = np.asarray(covariance, dtype=np.float64)
-    if state.shape != (4,) or cov.shape != (4, 4):
-        raise ValueError('belief feedback requires a 4D mean/covariance')
+    if state.shape not in {(4,), (6,)} or cov.shape != (
+            state.size, state.size):
+        raise ValueError('belief feedback requires a 4D or 6D mean/covariance')
     if not (np.all(np.isfinite(state)) and np.all(np.isfinite(cov))):
         raise ValueError('belief feedback must be finite')
     bits_m = max(1, int(mean_bits))
     bits_c = max(1, int(covariance_bits))
     width, height = (max(float(v), 1.0e-9) for v in area_size_xy)
     speed = max(float(velocity_bound_mps), 1.0e-9)
-    lower = np.asarray([0.0, 0.0, -speed, -speed], dtype=np.float64)
-    upper = np.asarray([width, height, speed, speed], dtype=np.float64)
+    lower = [0.0, 0.0, -speed, -speed]
+    upper = [width, height, speed, speed]
+    if state.size == 6:
+        acceleration = max(
+            float(1.0 if acceleration_bound_mps2 is None
+                  else acceleration_bound_mps2),
+            1.0e-9,
+        )
+        lower.extend((-acceleration, -acceleration))
+        upper.extend((acceleration, acceleration))
+    lower = np.asarray(lower, dtype=np.float64)
+    upper = np.asarray(upper, dtype=np.float64)
     levels_m = max(2, 1 << bits_m)
     step = (upper - lower) / float(levels_m - 1)
     clipped = np.clip(state, lower, upper)
@@ -358,6 +371,7 @@ class EvidenceTransportResult:
     reliability_failed_links: int
     burst_failed_links: int
     burst_bad_links: int
+    service_envelope_filtered_links: int
     useful_unique_entries: int
     mean_latency_s: float
     p95_latency_s: float
@@ -418,6 +432,8 @@ class EvidenceTransportResult:
             "evidence_comm_mean_latency_s": float(self.mean_latency_s),
             "evidence_comm_p95_latency_s": float(self.p95_latency_s),
             "evidence_comm_max_latency_s": float(self.max_latency_s),
+            "evidence_comm_service_envelope_filtered_links": float(
+                self.service_envelope_filtered_links),
             "evidence_transmitted_entries": float(
                 np.sum(self.selected_mask)),
             "evidence_adaptive_extra_entries": float(
@@ -454,6 +470,7 @@ def route_structured_evidence(
     ambiguity_second_ratio: Optional[float] = None,
     ambiguity_second_min_deflection: float = 0.0,
     belief_selected_mask: Optional[np.ndarray] = None,
+    service_envelope_layout: Optional[EvidencePacketLayout] = None,
 ) -> EvidenceTransportResult:
     """Select local evidence and transport structured broadcasts.
 
@@ -464,12 +481,11 @@ def route_structured_evidence(
     the detector only when it reaches that target's scheduled owner.
 
     ``belief_selected_mask`` optionally decouples the posterior-feedback
-    schedule from the evidence selection.  It must then hold the freshness
-    TOP-UP entries beyond the evidence selection: the packet carries the union
-    of evidence and top-ups, evidence entries free-ride the posterior as in
-    the legacy coupled schedule, and only the top-up entries pay the per-entry
-    posterior payload.  When it is None the belief rides on the evidence
-    selection (legacy coupled schedule).
+    schedule from the evidence selection. The packet carries the union of the
+    two target sets, while every selected posterior pays its explicit
+    per-entry payload even when its target ID is shared with an evidence entry.
+    When it is None the legacy coupled schedule selects a posterior for every
+    evidence entry and charges every one.
     """
     receiver_d = np.asarray(receiver_deflection, dtype=np.float64)
     xyz = np.asarray(positions, dtype=np.float64)
@@ -490,7 +506,7 @@ def route_structured_evidence(
     owner = np.asarray(fusion_owner, dtype=np.int64).reshape(-1)
     if owner.shape != (Q,):
         raise ValueError("fusion_owner must have shape (Q,)")
-    if np.any((owner < -1) | (owner >= K)):
+    if np.any((owner < OWNER_INDEX_NONE) | (owner >= K)):
         raise ValueError("fusion_owner contains an invalid receiver index")
     owned_target = owner >= 0
     owner_mask = np.zeros((K, Q), dtype=bool)
@@ -512,22 +528,18 @@ def route_structured_evidence(
     adaptive_extra_entries = int(
         np.count_nonzero(selected & ~base_selected))
 
-    # Belief schedule semantics: when a decoupled ``belief_selected_mask`` is
-    # supplied it holds the freshness TOP-UP entries beyond the evidence
-    # selection.  Evidence entries already in the broadcast free-ride the
-    # posterior (legacy coupled behaviour), so only the top-ups pay the
-    # per-entry posterior payload.  The effective fusion schedule is the
-    # union of evidence and top-ups.
+    # Belief schedule semantics: the posterior mask is independent from the
+    # evidence mask. Target metadata may be shared in the union packet, but
+    # the posterior state itself is always charged.
     if belief_selected_mask is not None:
-        topup = belief_mask
-        belief_selected = np.asarray(selected, dtype=bool) | topup
+        belief_selected = belief_mask
         belief_entries_by_sender = [
-            int(np.sum(topup[source])) for source in range(K)]
+            int(np.sum(belief_selected[source])) for source in range(K)]
     else:
         belief_selected = np.asarray(selected, dtype=bool)
         belief_entries_by_sender = [
             int(np.sum(selected[source])) for source in range(K)]
-    union_selected = belief_selected
+    union_selected = np.asarray(selected, dtype=bool) | belief_selected
 
     payload_bits = np.asarray([
         layout.broadcast_bits(
@@ -537,6 +549,17 @@ def route_structured_evidence(
         )
         for source in range(K)
     ], dtype=np.int64)
+    service_payload_bits = (
+        np.asarray([
+            service_envelope_layout.broadcast_bits(
+                int(np.sum(union_selected[source])),
+                llr_bits,
+                belief_entries=belief_entries_by_sender[source],
+            )
+            for source in range(K)
+        ], dtype=np.int64)
+        if service_envelope_layout is not None else payload_bits
+    )
     active = np.flatnonzero(payload_bits > 0)
     delivery = np.zeros((K, K), dtype=bool)
     packets = []
@@ -562,12 +585,20 @@ def route_structured_evidence(
         for source in active
     }
     extra_bits = {}
+    evidence_headers = {}
     for source in active:
-        remainder = int(payload_bits[source]) - int(link_model.header_bits)
+        # The structured layout is the source of truth for its physical
+        # header.  A synchronous fixed-schema evidence sub-slot may use a
+        # compact CRC header while retaining explicitly charged source/target
+        # indices.  The transport override keeps that header inside the FBL
+        # codeword, latency and energy accounting.
+        physical_header = max(0, int(layout.header_bits))
+        remainder = int(payload_bits[source]) - physical_header
         if remainder <= 0:
             raise ValueError(
                 'evidence packet layout must include the physical header')
         extra_bits[int(source)] = remainder
+        evidence_headers[int(source)] = physical_header
     deliveries, comm_stats = link_model.transmit(
         messages,
         {int(source): 0 for source in active},
@@ -579,6 +610,11 @@ def route_structured_evidence(
         extra_payload_bits=extra_bits,
         base_payload_dimensions={int(source): 0 for source in active},
         suppress_message_payload={int(source): True for source in active},
+        header_bits_by_sender=evidence_headers,
+        service_envelope_payload_bits_by_sender={
+            int(source): int(service_payload_bits[source])
+            for source in active
+        },
     )
     for item in deliveries:
         delivery[int(item.sender), int(item.receiver)] = True
@@ -623,6 +659,8 @@ def route_structured_evidence(
         reliability_failed_links=int(comm_stats.reliability_failed_links),
         burst_failed_links=int(comm_stats.burst_failed_links),
         burst_bad_links=int(comm_stats.burst_bad_links),
+        service_envelope_filtered_links=int(
+            comm_stats.service_envelope_filtered_links),
         useful_unique_entries=int(useful),
         mean_latency_s=float(comm_stats.mean_latency_s),
         p95_latency_s=float(comm_stats.p95_latency_s),
@@ -766,19 +804,81 @@ def estimate_quantized_evidence_detection(
     shape = (sample_count, K, Q)
     noise_h0 = rng.standard_normal(shape)
     noise_h1 = rng.standard_normal(shape)
-    local_h0 = (
-        -0.5 * receiver_d[None]
-        + np.sqrt(receiver_d[None]) * noise_h0
-    )
-    local_h1 = (
-        +0.5 * receiver_d[None]
-        + np.sqrt(receiver_d[None]) * noise_h1
-    )
     normalized_content = str(content_mode).strip().lower()
     if confidence_quantizer is None:
         peer_d_hat = receiver_d
     else:
         peer_d_hat = confidence_quantizer.quantize(receiver_d)
+
+    if normalized_content == "normal":
+        # The physical evidence graph is sparse (one owner and only delivered
+        # peers per target), while the historical implementation evaluated and
+        # quantized every one of the K*Q receiver-target cells.  Preserve both
+        # full RNG draws above: compacting the random stream would change the
+        # finite-Monte-Carlo detector.  Gather only the active arithmetic, then
+        # scatter it into a zero contribution tensor so ``sum(axis=1)`` retains
+        # the exact historical receiver order and floating-point reduction.
+        peer_i, peer_q = np.nonzero(peer_mask)
+        owner_i, owner_q = np.nonzero(owner_mask)
+
+        peer_d = receiver_d[peer_i, peer_q]
+        peer_root = np.sqrt(peer_d[None])
+        raw_peer_h0 = (
+            -0.5 * peer_d[None]
+            + peer_root * noise_h0[:, peer_i, peer_q]
+        )
+        raw_peer_h1 = (
+            +0.5 * peer_d[None]
+            + peer_root * noise_h1[:, peer_i, peer_q]
+        )
+        quantized_peer_h0 = quantize_llr(
+            raw_peer_h0, llr_bits, clip_max)
+        quantized_peer_h1 = quantize_llr(
+            raw_peer_h1, llr_bits, clip_max)
+
+        contribution_h0 = np.zeros(shape, dtype=np.float64)
+        contribution_h1 = np.zeros(shape, dtype=np.float64)
+        contribution_h0[:, peer_i, peer_q] = quantized_peer_h0
+        contribution_h1[:, peer_i, peer_q] = quantized_peer_h1
+
+        owner_d = receiver_d[owner_i, owner_q]
+        owner_root = np.sqrt(owner_d[None])
+        owner_h0 = (
+            -0.5 * owner_d[None]
+            + owner_root * noise_h0[:, owner_i, owner_q]
+        )
+        owner_h1 = (
+            +0.5 * owner_d[None]
+            + owner_root * noise_h1[:, owner_i, owner_q]
+        )
+        # Owner-local evidence has precedence even for a defensive overlapping
+        # mask.  Peer values are nevertheless kept above for diagnostics, just
+        # as in the full-tensor reference implementation.
+        contribution_h0[:, owner_i, owner_q] = owner_h0
+        contribution_h1[:, owner_i, owner_q] = owner_h1
+        fused_h0 = np.sum(contribution_h0, axis=1)
+        fused_h1 = np.sum(contribution_h1, axis=1)
+
+        # ``np.nonzero`` is row-major, so flattening these (draw, edge) arrays
+        # matches boolean indexing of the old (draw, receiver, target) tensor.
+        raw_values = np.concatenate([
+            raw_peer_h0.reshape(-1),
+            raw_peer_h1.reshape(-1),
+        ])
+        quantized_values = np.concatenate([
+            quantized_peer_h0.reshape(-1),
+            quantized_peer_h1.reshape(-1),
+        ])
+    else:
+        local_h0 = (
+            -0.5 * receiver_d[None]
+            + np.sqrt(receiver_d[None]) * noise_h0
+        )
+        local_h1 = (
+            +0.5 * receiver_d[None]
+            + np.sqrt(receiver_d[None]) * noise_h1
+        )
+
     if normalized_content == "standardized_score":
         # z=(L+D/2)/sqrt(D) is N(0,1) under H0 for every D>0.  Quantizing
         # this scale-free innovation avoids sacrificing weak-evidence
@@ -800,7 +900,7 @@ def estimate_quantized_evidence_detection(
         quantized_h1 = (
             -0.5 * peer_d_hat[None]
             + np.sqrt(peer_d_hat[None]) * quantized_peer_h1)
-    else:
+    elif normalized_content != "normal":
         raw_peer_h0 = local_h0
         raw_peer_h1 = local_h1
         quantized_peer_h0 = quantize_llr(
@@ -828,16 +928,26 @@ def estimate_quantized_evidence_detection(
             "content_mode must be normal, standardized_score, zero, or "
             "value_roll")
 
-    fused_h0 = np.sum(np.where(
-        owner_mask[None],
-        local_h0,
-        np.where(peer_mask[None], quantized_h0, 0.0),
-    ), axis=1)
-    fused_h1 = np.sum(np.where(
-        owner_mask[None],
-        local_h1,
-        np.where(peer_mask[None], quantized_h1, 0.0),
-    ), axis=1)
+    if normalized_content != "normal":
+        fused_h0 = np.sum(np.where(
+            owner_mask[None],
+            local_h0,
+            np.where(peer_mask[None], quantized_h0, 0.0),
+        ), axis=1)
+        fused_h1 = np.sum(np.where(
+            owner_mask[None],
+            local_h1,
+            np.where(peer_mask[None], quantized_h1, 0.0),
+        ), axis=1)
+        transmitted = np.broadcast_to(peer_mask[None], local_h0.shape)
+        raw_values = np.concatenate([
+            raw_peer_h0[transmitted],
+            raw_peer_h1[transmitted],
+        ])
+        quantized_values = np.concatenate([
+            quantized_peer_h0[transmitted],
+            quantized_peer_h1[transmitted],
+        ])
 
     threshold_d = np.sum(np.where(
         owner_mask,
@@ -860,15 +970,6 @@ def estimate_quantized_evidence_detection(
         float(p_fa),
     )
 
-    transmitted = np.broadcast_to(peer_mask[None], local_h0.shape)
-    raw_values = np.concatenate([
-        raw_peer_h0[transmitted],
-        raw_peer_h1[transmitted],
-    ])
-    quantized_values = np.concatenate([
-        quantized_peer_h0[transmitted],
-        quantized_peer_h1[transmitted],
-    ])
     if raw_values.size:
         clip_rate = float(np.mean(
             np.abs(raw_values) > float(clip_max)))

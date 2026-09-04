@@ -1,0 +1,15 @@
+# Development-only paired candidate. It changes only how independent private
+# LPs are emulated on one workstation; physical U2U transport remains the
+# orthogonal strict baseline inherited below.
+extends: exp_strict_distributed_k16q16.yaml
+
+marl:
+  distributed_replicated_power_process_parallel_enabled: true
+  distributed_replicated_power_process_workers: 4
+  # 15 ms node-compute sub-deadline leaves room for the measured non-LP
+  # simulator path and an O(KQ) incumbent projection before the 100 ms frame.
+  distributed_replicated_power_process_timeout_s: 0.015
+  distributed_replicated_power_parallel_fallback_to_serial: true
+  distributed_replicated_power_parallel_failure_mode: cached_or_harmonic
+  distributed_replicated_power_deadline_incumbent_relative_tolerance: 0.05
+  distributed_replicated_power_max_consecutive_process_failures: 3

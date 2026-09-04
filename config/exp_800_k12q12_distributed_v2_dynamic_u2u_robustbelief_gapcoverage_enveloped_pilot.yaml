@@ -1,0 +1,54 @@
+# Baseline-enveloped gap-coverage candidate.
+#
+# At every complete public view, both the gap-coverage action and the legacy
+# role-aware bottleneck action are reconstructed under the same pairwise
+# safety set.  The gap action executes only when it strictly
+# improves the lexicographic public-belief reachability score
+#   (uncovered count, max endpoint deficit, sum endpoint deficit,
+#    max log bistatic product, sum log bistatic product).
+# If both raw actions are analytically certified as projection no-ops, only
+# the selected action is projected; all other frames project both candidates.
+# Thus the fast path is trajectory-identical to the exact two-projection rule.
+# Exact ties retain baseline.  No simulator truth or extra U2U payload is used.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_pilot.yaml
+
+marl:
+  distributed_gap_baseline_envelope_enabled: true
+  distributed_movement_analytic_composable_projection_enabled: true
+  # Fixed-geometry deflection is exactly linear in target-wise Tx power.
+  # Runtime reuses the unit-power dense tensor only in deterministic U2U-only
+  # frames; report-link or Swerling randomness automatically forces recompute.
+  analytical_power_geometry_reuse_enabled: true
+  # K independent private-view LPs form a direct-product map. Four persistent
+  # spawn-isolated workers use deterministic round-robin shards; results are
+  # restored in canonical viewer order and each worker is limited to one
+  # native numerical thread. Paired hard-seed traces are bit-exact, and the
+  # measured 0.583 s warm-up amortizes within one 150-frame episode.
+  distributed_replicated_power_process_parallel_enabled: true
+  distributed_replicated_power_process_workers: 4
+  distributed_replicated_power_process_timeout_s: 0.1
+  distributed_replicated_power_parallel_fallback_to_serial: true
+  distributed_replicated_power_parallel_failure_mode: serial
+  # Deterministic two-cohort TDMA beaconing. Fixed-schema CRC length follows
+  # P_undetected <= BLER*2^-r: BLER=1e-3 and budget=1e-6 require r>=10.
+  hyperedge_beacon_round_robin_period: 2
+  hyperedge_protocol_header_bits: 10
+  comm_undetected_error_probability_max: 1.0e-6
+
+  # x/y/vx/vy and residuals retain 8-bit precision. The target code has only
+  # Q+1=13 symbols, so 4 bits recover every category exactly. Decode through
+  # the legacy 8-bit representative and preserve the old 16-bit-header service
+  # distribution for policy compatibility while reporting physical wire cost.
+  hyperedge_state_field_bits: [8, 8, 8, 8, 4, 8, 8]
+  hyperedge_state_codec_service_envelope_enabled: true
+  hyperedge_state_codec_service_reference_header_bits: 16
+
+  # The synchronous evidence sub-slot makes observation frame implicit; source
+  # and target IDs remain explicitly charged. AoI is guarded to 0..3 and is
+  # therefore lossless in two bits. Scheduling/admission/energy retain the
+  # legacy generic-header, timestamp16 and AoI8 service envelope.
+  evidence_fixed_schema_header_bits: 10
+  evidence_timestamp_bits: 0
+  evidence_legacy_service_envelope_enabled: true
+  evidence_legacy_service_aoi_bits: 8
+  u2u_belief_feedback_aoi_bits: 2

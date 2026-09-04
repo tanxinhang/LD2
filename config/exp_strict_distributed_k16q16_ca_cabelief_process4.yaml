@@ -1,0 +1,8 @@
+# Development-only matched-model control for the CA plant.
+extends: exp_strict_distributed_k16q16_process4.yaml
+
+target:
+  motion_model: CA
+
+marl:
+  belief_motion_model: CA

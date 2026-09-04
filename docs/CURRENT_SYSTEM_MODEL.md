@@ -1,5 +1,21 @@
 # 当前系统模型（Architecture V2 + 认证化分布式控制）
 
+> **2026-08-26 系统身份冻结（advice/001 C0，post-G2 基础契约）**：本文档描述的
+> 物理/协议基础身份由 **[`config/system_manifest.yaml`](../config/system_manifest.yaml)**
+> 声明；当前可执行正式 profile 是
+> **[`config/exp_strict_distributed_k16q16.yaml`](../config/exp_strict_distributed_k16q16.yaml)**，
+> 它传递继承该 manifest，并绑定 K16/Q16 的 reset-distribution/v2 盲测库。基础 manifest
+> 单独加载仍继承 legacy K4/Q2 默认值和旧 K8 bank 指针，只用于历史兼容，严格身份门会
+> 明确拒绝。冻结契约包括 U2U-only（`ground=false`）、strict no-ground-fusion、joint RF power=true、
+> distributed local-belief=true、OTFS numerology（fc=28 GHz, B=1 MHz, Δf=15.625 kHz,
+> M=64, N=16, T_sym=6.4e-5, n_cpi=1）、detector `real_gaussian_shift`（c_det=1）、
+> DD 连续增益 `I_support·|A|²`、sensing clock `cpi_frame`（T_sense=N·T_sym≈1.024 ms）、
+> fusion covariance = independent/whitened（additive D）、seed scheme = 100-seed
+> 独立盲测 bank + paired CRN。**正式论文结果只能由传递继承该 manifest 且通过 strict
+> bank fingerprint 校验的 runtime profile 启动**；下文 §5.6.3/§6.8
+> 中的 V3 小节是已删除机制的**历史审计记录**（默认 OFF、已从代码移除），不再是当前
+> 系统语义。一致性由 `tools/check_system_identity.py` 强制校验。
+
 > 文档日期：2026-08-20（2026-08-16 更新：§10 补 6/6 干净种子重跑结果并关闭污染
 > 待办、§12 补回填/清理状态与最新测试基线；2026-08-17 刷新：§10 盲测三行与 LCB
 > 口径（z=1.96）、§11 D1.7–D1.10 状态；2026-08-17 二次刷新：§5.6.2 并入 D1.8/D1.9
@@ -40,6 +56,43 @@
 > 使用最小 L2 范数规范对偶；决策保持通信同时计入陈旧误差与物理误差；检测器固定为
 > 实高斯 shift-in-mean 充分统计量并由 Monte Carlo ROC 验证。所有既有
 > 100-seed 数据均为 pre-G2 历史数据，等待同协议重认证。
+
+---
+
+## 0.0 系统身份（System Identity，post-G2 基础契约 + K16 可执行 profile）
+
+> **2026-08-26 C0 收敛（advice/001 审计，2026-09-01 门禁收口）**：当前系统的冻结
+> 基础身份由 **`config/system_manifest.yaml`** 声明；正式执行入口为传递继承它的
+> **`config/exp_strict_distributed_k16q16.yaml`**。运行配置还必须通过 seed-bank schema、
+> fingerprint、K/Q/region/dynamics 双向一致性检查。与该基础契约不一致的历史章节
+> （如 V3 dual-priced L2 等已被删除机制）
+> 一律视为历史记录，不再是当前系统语义。一致性由
+> `tools/check_system_identity.py` 强制校验（并纳入测试套件）。
+
+冻结基础身份要点（规模与 bank 由可执行 profile 绑定）：
+
+| 身份项 | 冻结值 | 意义 |
+|---|---|---|
+| 系统边界 | **U2U-only，`ground=false`** | 没有 UAV→地面融合链路 |
+| 融合边界 | `detection_fusion_mode ∈ {local_only, u2u_distributed}` | strict no-ground fusion |
+| RF 功率 | `joint_isac_power_enabled=true`，`P_isac_total=1 W` | comm+sensing 共享 1 W 上限 |
+| 分布式信息 | `distributed_coordination_use_local_belief_targets=true` | 协调只用局部 belief，无 simulator truth |
+| OTFS | `fc=28 GHz, B=1 MHz, delta_f=15.625 kHz, M=64, N=16, T_sym=6.4e-5, n_cpi=1` | 论文 numerology |
+| 感知时钟 | `sensing_energy_mode=cpi_frame`，`T_sense = n_cpi·N·T_sym ≈ 1.024 ms` | battery 与 deflection 同钟（不再 `P_sense·dt` 100 ms） |
+| 检测器 | `c_det=1`（real Gaussian shift 约定），`P_FA=0.001`，`g_min=0.5` | detector convention 冻结 |
+| DD 模型 | `dd_gain_mode=continuous`：`d_eff = χ_rep·d_raw·I_support·|A(τ,ν)|²` | 不再二值 `g_dd≥g_min` 门；无歧义 support + 连续 ambiguity² |
+| 融合协方差 | 独立接收机证据（whitened）→ additive `D_q = Σ_edges a_ijq·p_ijq` | fusion covariance assumption |
+| 种子方案 | 100-seed blind bank，eval/final 用 test split | 无训练/确认泄漏 |
+
+**物理契约（C1 封口，2026-08-26）**：
+
+- Doppler 符号：`ν = (f_c/c)·[v_txᵀ·u_iq − v_rxᵀ·u_qj + v_qᵀ·(u_qj − u_iq)]`；“Tx/目标静止、
+  Rx 朝目标飞行 ⇒ positive Doppler”。`geometry.compute_doppler` 与
+  `owner_local_physics` 向量拷贝已同步修正并有契约测试。
+- OTFS support：`I_support = 1[0 ≤ τ < 1/Δf ∧ |ν| ≤ 1/(2T_sym)]`，走出无歧义区即使
+  alias 后落到整数 bin 也判定为 0（修复“fractional-only 可能给出 g_dd≈1”）。
+- 时间-能量：一个控制步执行 `n_cpi` 个 OTFS frame，`E_sense = P_sense·T_sense`，
+  与 deflection 中的观测能量同钟。
 
 ---
 
@@ -119,7 +172,9 @@ belief  :  x_q = [x,y,vx,vy]^T                        (4D 平面 CV 状态)
 - 路径增益 `α`（Friis，`α² ∝ λ²·σ_rcs/(R_tx²·R_rx²)`；收发阵列增益 `G_tx·G_rx`
   在 §2.2 的 `d_raw` 中单独计入，不并入 `α` 本身）；
 - 原始 deflection `d_raw`；
-- DD 有效性 `g_dd`（需 `≥ g_min`，否则该链路 `d_eff=0`）；
+- DD 物理增益 `I_support·|A(τ,ν)|²`（走出无歧义支撑即为 0，支撑内按
+  连续 ambiguity 能量损失缩放）；`g_dd=|A|` 与 `g_min` 只保留为 legacy binary
+  结果的兼容诊断量；
 - 上报链路可靠性 `χ_rep`（Rician / Al-Hourani LoS-NLoS，`channel.py`）。
 
 ### 2.2 原始 Deflection
@@ -202,18 +257,22 @@ L_eff = min(L_config, L_exec, L_time) = 1.
 ### 2.3 有效 Deflection 与每瓦增益
 
 ```text
-d_eff(i,j,q) = 1[g_dd,ijq >= g_min] · χ_rep,ijq · d_raw(i,j,q)
+d_eff(i,j,q) = I_support(τ_ijq,ν_ijq) · |A(τ_ijq,ν_ijq)|²
+               · χ_rep,ijq · d_raw(i,j,q)
 ```
 
 因此**每瓦有效增益**（与功率无关，D0.12 修正的可辨识形式）为
 
 ```text
-a_ijq = 1[g_dd,ijq >= g_min] · χ_rep,ijq · α_ijq²
+a_ijq = I_support(τ_ijq,ν_ijq) · |A(τ_ijq,ν_ijq)|² · χ_rep,ijq · α_ijq²
         · c_det · M · N · G_tx · G_rx · L_eff / P_noise
 ```
 
 代码：`per_watt_deflection_tensor_from_observables`（`physical_oracle_audit.py`）。
-Swerling 开启时该重建 fail-closed（单次 RCS 实现不可由 `α/g_dd/χ_rep` 识别）。
+Swerling 开启时该重建 fail-closed（单次 RCS 实现不可由
+`α/I_support/|A|/χ_rep` 识别）。旧公式
+`1[g_dd≥g_min]·χ_rep·d_raw` 仅属于 `dd_gain_mode=binary` 的 pre-G2 重放口径，
+不得用于当前 manifest 或新论文结果。
 
 ### 2.4 检测概率与融合边界
 
@@ -263,12 +322,18 @@ QoS-feasible  ⇔  steady>=0.80 且 weak3>=0.70 且 worst>=0.60
   `comm_rate_bits_per_dim=[0,4]`，历史 4/4 部署为自适应 4–8 bit）。接收方保留
   sender identity 与 target identity 作为包元数据，重建 identity-indexed 团队竞价图。
 - 包大小 `L_k = H + D_active·b_k`（另加结构协议扩展维度与速率头字段），
-  `H=64` bit 包头（`comm_header_bits`）；活跃发送者正交平分 100 kHz 带宽。
+  `H=64` bit 包头（`comm_header_bits`）；活跃发送者正交平分控制带宽。默认配置仍为
+  100 kHz；严格 K16/Q16 配置显式使用 500 kHz，以容纳端点状态、可组合证书和稀疏责任
+  后验，并仍受 5 ms 截止时间约束。该带宽差异必须随结果报告。
 - 链路用自由空间增益 `(λ/(4πd))²`、Shannon 串行化速率与 0.2 ms 处理时延；包只在
   SNR ≥ 阈值且总时延 ≤ deadline（默认 5 ms）时送达；最近送达 Token 保留最多 5 帧，
   带显式 AoI。
 - 通信功率与感知功率满足 §4 的硬预算；结构协议字段（header/epoch/digest/索引/
   价格/反馈）逐 bit 计费（`structure_sequence_transport.py` 等）。
+- 严格配置中，目标的物理感知接收机可在下一控制载波广播其 4D 因果后验。均值量化误差
+  和协方差非对角项被保守吸收到解码协方差，接收端以协方差交集融合相关未知估计；每条
+  后验消息计入包长、AoI、丢包、截止时间和能耗。完整推导与消融见
+  `docs/OWNER_POSTERIOR_TRACKING.md`。
 
 代码：`environment/communication.py`（`InterUAVCommunicationModel`）、
 `coordination/*_transport.py`。
@@ -393,7 +458,7 @@ advice 013"盲测前不继续调参"已执行完毕：frozen 候选 + blind bank
 表现调参。`priced_structure.py` 的逐帧 owner+TX 重分配是离线结构修复 oracle，尚未
 接入 live（L2 headroom <1%，已冻结，见 §6.2 注）。
 
-#### 5.6.3 V3：dual-priced 分布式结构协调（L2 重构，默认 OFF）
+#### 5.6.3 ~~V3：dual-priced 分布式结构协调（L2 重构）~~ —— 已删除机制（历史审计记录）
 
 advice/015 主线：**冻结 L0/L1/L3，重构 L2 为对偶一致的分布式结构协调**——让 L2
 使用与 L1 同一组任务级 shadow price（L1 产生资源稀缺价格 → 各 UAV 本地计算结构
@@ -583,11 +648,17 @@ Stage-B 的 `t*` 恰是"满足门限后的剩余资源"的回收：gauge 在 γ*
 其中 `μ*` 是 counterbalance `λ*` 的量：`λ*` 拉最差目标、`μ*` 保每个目标不低于地板。
 代码：`capability.py::qos_constrained_maxmin_lp`（Stage-B）、`optimal_maxmin_dual_prices`。
 
-### 6.5 局部 active-set 定理（DD 门，C4 / advice 014 P0-3）
+### 6.5 局部支撑保持定理（canonical continuous DD；legacy binary 另记）
 
-`a_ijq = 1[g_dd ≥ g_min]·χ_rep·α²·C` 在 DD 门处支撑不连续。处理**不是把门变平滑**，
-而是局部 active-set 证书：设 `m_ijq = g_dd,ijq − g_min`，`L_g` 为 `g_dd` 关于位置
-位移（**速度保持**，即帧内 trust region）的 Lipschitz 常数：
+当前系数
+`a_ijq=I_support(τ,ν)·|A(τ,ν)|²·χ_rep·α²·C` 只在无歧义支撑边界处
+不连续；支撑内部的 ambiguity 能量增益连续变化。局部候选必须用 delay/Doppler
+到支撑边界的余量，证明整个 trust region 内 `I_support` 不变；无法证明时即
+fail-closed，并在移动后几何上精确重算系数。处理**不是**把支撑边界平滑化。
+
+对 legacy `dd_gain_mode=binary` 重放，旧 active-set 证书仍可写为：设
+`m_ijq=g_dd,ijq-g_min`，`L_g` 为 `g_dd` 关于位置位移（**速度保持**，即帧内
+trust region）的 Lipschitz 常数：
 
 ```text
 L_g = (4/π) · [ M·Δf·2/c + N·T_sym·(fc/c)·(2 v_max + 2 v_t)/R_min ]
@@ -596,9 +667,10 @@ L_g = (4/π) · [ M·Δf·2/c + N·T_sym·(fc/c)·(2 v_max + 2 v_t)/R_min ]
 （延迟项来自 τ=R/c、双基地路径变化 ≤2r；多普勒项来自单位向量旋转
 `|Δν| ≤ (fc/c)·r·(|v_tx|+2|v_t|+|v_rx|)/R_min`；`|sinc'| ≤ 4/π`。）
 
-**定理**：若 `|m_ijq| > L_g·r`，则半径 `r` 的 trust region 内 `1[g_dd ≥ g_min]`
-恒定、`a_ijq(x)` 局部光滑/Lipschitz；否则 **certificate fail-closed**（在移动后
-几何上精确重算，即 L3 候选路径与逐帧重解的实际行为）。跨帧速度模型（v=step/dt）
+若 `|m_ijq| > L_g·r`，则半径 `r` 的 trust region 内 legacy
+`1[g_dd ≥ g_min]` 恒定、其 `a_ijq(x)` 局部光滑/Lipschitz；否则 certificate
+fail-closed。该二值定理只用于历史复现，不能描述 canonical continuous-DD 系统。
+跨帧速度模型（v=step/dt）
 使多普勒对齐逐帧摆动 O(1)，**无跨帧证书**——逐帧精确重解即 fail-closed 语义。
 实现：`coordination/power_staleness.py::dd_gate_position_lipschitz_constant` /
 `dd_gate_active_set_certificate`；数值验证：解析 `L_g` 为真上界、已认证边在 trust
@@ -632,7 +704,7 @@ q_i* = argmax_q (λ_q a_iq − μ_q a^I[i,q]),   p_iq = b_i 若 q = q_i*
 完整分布式协调器（每帧 RMP + 价格广播 + 本地 bid 执行）为下一步实现。实现：
 `coordination/dw_column_generation.py`、`tests/test_dw_column_generation.py`。
 
-### 6.8 V3：dual-priced 对偶一致 L2（advice/015，默认 OFF）
+### 6.8 ~~V3：dual-priced 对偶一致 L2（advice/015）~~ —— 已删除机制（历史审计记录）
 
 L2 重构为与 L1 同一套对偶价格的分布式结构协调（实现：`coordination/
 dual_priced_structure.py`、`dual_priced_auction.py`；配置 `v3_*`，默认 OFF）。
@@ -709,13 +781,17 @@ Student 校准必要但不充分。
 
 **② Decision-preserving Token bit 下界 + 事件触发**：候选 score margin `Δ`、
 量化动态范围 `R`，B-bit 均匀量化误差 `ε_B ≤ R/(2(2^B−1))`，排序保持条件
-`Δ > 2ε_B` 给出
+`Δ > 2ε_B` 给出严格整数条件
 
 ```text
-B ≥ ⌈log₂(1 + R/Δ_eff)⌉,
+B > log₂(1 + R/Δ_eff),
+B_min = floor(log₂(1 + R/Δ_eff)) + 1,
 Δ_eff = Δ − 2(E_stale(h)+E_phys),
 且 Δ > 2(E_stale+E_phys)+2ε_B ⟹ 不发 Token
 ```
+
+不能把第一行替换成普通 `ceil`：当对数恰为整数时，`ceil` 只达到等号，两个量化
+score 仍可能打平。2026-08-29 的边界反例测试覆盖 B=1/2/3/4/8/16。
 
 真实 6/6 数据：844 个 per-target owner 决策 mean 6.6 bit / min 2 / max 13、
 1.2% 可抑制——**margin 大少发、不确定多发**（通信-算法耦合的可推导形式）。
@@ -725,6 +801,13 @@ B ≥ ⌈log₂(1 + R/Δ_eff)⌉,
 目标 bit（协议级 per-value 宽度 = max_b，固定 6-bit 是 max_b=6 特例），保证
 0 翻转。按 advice/016 §21，对偶价格进训练/离线监督、**不强行变在线协议**
 （默认 OFF）。
+
+**在线接线状态（2026-08-29 纠偏）**：上述标量证明只适用于被量化的 score 本身。
+当前 `target_tokens` 是任意神经载荷；没有 decoder Lipschitz 常数及最终动作 margin，
+“距离能力 score 的间隔”不能证明 token 静默或降比特后接收端动作不变，也不能证明
+证书、后验等控制载荷可被省略。因此系统 manifest 将 C6 三个在线开关全部置 OFF，
+`EnvironmentCore` 对 learned-token+C6 组合构造期拒绝。精确比特传输和标量数学原语
+保留供未来显式 score-token 协议使用，但不再计入当前通信收益。
 
 当 `Δ_eff≤0` 时不存在有限 bit 数可以给出排序证书，执行必须发送更丰富的信息、保持
 上一安全决策或 fail-closed；不得把退化情形返回的“1 bit”误写成已认证。
@@ -896,13 +979,16 @@ non-regression + 解析栈兼容性检查（advice 014：不重新调参）。
 > post-G2 当前状态为 `RE-CERTIFICATION REQUIRED`。Wilson 数字统一为 `z=1.96` 的
 > 95% 双侧区间下端点。
 
-> **正式 Gate 断言（`tools/assert_formal_gates.py`，2026-08-16/17 输出）**：
+> **历史 Gate 复核（`tools/assert_formal_gates.py --evidence-epoch historical`，
+> 2026-08-16/17 输出）**：
 > 4/4 冻结部署版、8/8 D0.95、8/8 lex L1、8/8 lex+多候选 L3 全 **PASS**（含 LCB
 > 强制）；D1.9 / D1.10 blind 行在脚本中另列 **LCB 强制 PASS**（QoS 0.950/0.888、
 > 0.940/0.875，见 [`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md) 最新 Gate 表）；**8/8
 > V3-C0 重认证（2026-08-18）LCB 强制 PASS（QoS 0.910 / LCB 0.838）——V3-C0
 > baseline**；6/6 污染项标 **QUARANTINED**（不参与判定），6/6 V3-C0 重认证
-> **LCB 0.492 未过门**（Student 仍为绑定瓶颈）。
+> **LCB 0.492 未过门**（Student 仍为绑定瓶颈）。这些状态全部属于 `pre_g2` epoch；
+> 无参数运行 `tools/assert_formal_gates.py` 只检查 `post_g2` 当前证据，在新的 clean commit
+> blind100 产物注册前必须以退出码 2 fail closed，历史 PASS 不再染绿当前门禁。
 
 > **差距分解（同 20 seed、同 warm-start、同 selection split，实测配对）**：
 > `0.662 → 0.844`（**+0.18，仅切换 `task_constrained_mode: gauge→lexicographic`**，
@@ -1186,9 +1272,10 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
   （2026-08-17，P2：隔离种子替换为同难度干净种子，strict 加载通过）**——历史
   manifest 引用的旧 bank 路径仍指向含隔离种子的原文件，新运行须显式切 v2。
 - **Gate 门槛脚本化**：`tools/assert_gate_thresholds.py`（单结果断言，从
-  paired_eval.csv 重算聚合）与 `tools/assert_formal_gates.py`（批量断言正式结果，
-  受污染项标 QUARANTINED 不参与判定；历史/探索性未过项标 `DISCLOSED_FAIL`，
-  不阻塞当前部署 Gate，但也绝不显示为 PASS）。输入 episode 数组必须等长、有限、
+  paired_eval.csv 重算聚合）与 `tools/assert_formal_gates.py`（默认只断言 post-G2 当前
+  epoch；`--evidence-epoch historical` 才显示历史表）。受污染项标 QUARANTINED 不参与
+  判定；历史/探索性未过项标 `DISCLOSED_FAIL`，且整个 pre-G2 表不能改变当前门禁退出码。
+  输入 episode 数组必须等长、有限、
   概率位于 `[0,1]`，若含 seed 列则必须逐 episode 唯一。4/4 正式结果经脚本复核 PASS
   （0.9132/0.8848/0.7393/0.72）；6/6 重跑三变体经脚本判定 FAIL（四地板不达标）。
 - **协调层主/支路径立界**：`uav_isac/coordination/__init__.py` 导出主路径 API；
@@ -1206,8 +1293,8 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
   `env.reset(seed=...)` 会重绑定 core、动作映射和感知衰落计算器的同一 RNG。环境快照
   现包含 P0 cache、结构选择、V3/拥塞修复计数、错误状态和通信 bit 计数，保证同状态
   反事实不因隐藏控制状态分叉。
-- **工程基线**：`requirements.txt`、
-  `.github/workflows/ci.yml`（Linux 全量 pytest）、`pytest.ini` 排除 scripts/
+- **工程基线**：`requirements.txt`、`constraints-ci.txt`、
+  `.github/workflows/ci.yml`（Linux + Windows 全量 pytest 与严格身份门禁）、`pytest.ini` 排除 scripts/
   （`test_ppo_ratio_fix.py` 曾模块级执行训练被 pytest 误收集）。全量测试基线
   2026-08-20 G2-1A 基础设施在 Windows/MKL 稳定边界下分两进程回归：非 belief
   `1036 passed`、belief `14 passed`，合计 **1050 passed**、无断言失败。单进程仍可能在 MKL
@@ -1281,13 +1368,15 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
 - **advice/016 task-regret 证书（2026-08-17，前两步落地）**：`structure_regret.py`
   实现结构误差 → max-min 能力损失 Lipschitz 界（`|t*(A)−t*(Â)| ≤ Σ_i b_i
   ‖Δa_i‖∞`，真实 6/6 帧零违例）+ QoS 保持条件（ε_struct < m ⟹ floor
-  preserved）+ decision-preserving bit 下界（`B ≥ ⌈log₂(1+R/Δ)⌉`，真实数据
+  preserved）+ decision-preserving bit 下界（`B > log₂(1+R/Δ)`，即
+  `floor(log₂(1+R/Δ))+1`，真实数据
   mean 6.6 / min 2 / max 13 bit）+ 事件触发（margin > 2E_stale+2ε_B ⟹ 不发）
   + dual-weighted 边权（`w_iq=π_q·p_iq`，瓶颈目标 4.2× 集中）。**真实数据
   关键发现**：6/6 失败帧的 teacher 结构本身 t\* 均值 −7.42、0% 过地板——
   Student 校准必要但不充分，瓶颈是 Student 误差 × 弱几何 × 闭环敏感性的
-  三重机制（修正"Student 是唯一瓶颈"的简化判断）。默认 OFF，供未来 Student
-  校准与通信物理化使用。
+  三重机制（修正"Student 是唯一瓶颈"的简化判断）。标量原语保留，但 learned
+  token 在线接线因缺少 payload→action 证书而 fail-closed，供未来显式 score-token
+  协议与 Student 校准使用。
 
 ### C. 理论边界
 

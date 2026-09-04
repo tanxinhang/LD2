@@ -32,6 +32,7 @@ from uav_isac.coordination.factor_graph_coordinator import (
 from uav_isac.physical.feasibility_oracle import (
     solve_maxmin_single_role_pairs,
 )
+from uav_isac.utils.checkpoint_loading import safe_torch_load
 from uav_isac.utils.types import DeflectionEntry
 import torch
 
@@ -105,8 +106,13 @@ class DynamicLocalSearchCoordinator:
     def _load_factor_graph(checkpoint: str | Path | None):
         if checkpoint is None:
             return None
-        payload = torch.load(
-            Path(checkpoint), map_location="cpu", weights_only=False)
+        payload = safe_torch_load(
+            Path(checkpoint),
+            map_location="cpu",
+            description="factor-graph coordinator checkpoint",
+            required_keys=("hidden_dim", "rounds"),
+            state_dict_keys=("state_dict",),
+        )
         model = FiniteRoundFactorGraphCoordinator(
             edge_feature_dim=int(payload.get("edge_feature_dim", 4)),
             hidden_dim=int(payload["hidden_dim"]),

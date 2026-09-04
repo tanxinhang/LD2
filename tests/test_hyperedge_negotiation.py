@@ -18,6 +18,7 @@ from uav_isac.coordination.hyperedge import (
     plan_refined_endpoint_hyperedges,
     plan_reserved_endpoint_hyperedges,
     project_pairwise_safe_movement,
+    is_pairwise_safe_movement,
     plan_sparse_coalition_endpoint_hyperedges,
     refine_role_mask_local_search,
     reconstruct_bistatic_coefficient_from_public_state,
@@ -307,7 +308,7 @@ def test_anchor_beacon_reuses_charged_header_and_survives_restore():
         receiver, sender, target] == 0
 
 
-def test_anchor_beacon_uses_submit_frame_through_physical_transport():
+def test_anchor_beacon_uses_current_transmit_frame_through_physical_transport():
     cfg = load_config(
         'config/exp_800_k12q12_distributed_v2_dynamic_u2u_'
         'robustbelief_anchor_feedback5_pilot.yaml')
@@ -326,6 +327,10 @@ def test_anchor_beacon_uses_submit_frame_through_physical_transport():
         {k: np.full(core.Q, 1.0 / core.Q) for k in range(core.K)},
         token_masks={k: np.ones(core.Q) for k in range(core.K)},
     )
+    # Fresh encoding now occurs after the current action is applied.  Put the
+    # next step on an anchor-broadcast frame and verify that the transported
+    # timestamp is that frame, not the earlier action-submission frame.
+    core.t = 4
     actions = {
         str(k): {'delta_p': np.zeros(2), 'role': 2}
         for k in range(core.K)
@@ -336,6 +341,7 @@ def test_anchor_beacon_uses_submit_frame_through_physical_transport():
         axis=1,
     ), axis=1) / core.Q)
     assert coverage > 0.95
+    assert np.max(core._distributed_movement_anchor_last_seen) == 5
 
 
 def test_movement_anchor_map_uses_recent_source_median():
@@ -531,6 +537,54 @@ def test_pairwise_safety_projection_is_noop_when_motion_is_safe():
         area_size_xy=(100.0, 100.0),
     )
     np.testing.assert_allclose(projected, desired)
+    assert is_pairwise_safe_movement(
+        positions,
+        desired,
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+    )
+
+
+def test_pairwise_safety_noop_certificate_rejects_intervention():
+    positions = np.asarray([[40.0, 50.0], [61.0, 50.0]])
+    desired = np.asarray([[2.5, 0.0], [-2.5, 0.0]])
+    assert not is_pairwise_safe_movement(
+        positions,
+        desired,
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+    )
+    # Jointly safe equal motion is not independently composable: if the
+    # second packet is stale and holds, the first endpoint would get too close.
+    equal_motion = np.asarray([[2.5, 0.0], [2.5, 0.0]])
+    assert is_pairwise_safe_movement(
+        positions,
+        equal_motion,
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+    )
+    assert not is_pairwise_safe_movement(
+        positions,
+        equal_motion,
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+        independently_composable=True,
+    )
+
+    # The projector rescales even an arbitrarily small strict speed excess;
+    # an exact no-op certificate must therefore reject it as well.
+    over_step = np.asarray([[2.5 + 1.0e-12, 0.0], [0.0, 0.0]])
+    assert not is_pairwise_safe_movement(
+        positions,
+        over_step,
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+    )
 
 
 def test_pairwise_safety_projection_reports_intervention_diagnostics():
@@ -607,6 +661,73 @@ def test_pairwise_safety_projection_is_composable_with_stale_peer_hold():
     next_distance = np.linalg.norm(
         positions[0] + assembled[0] - positions[1] - assembled[1])
     assert next_distance >= 20.0 - 1.0e-7
+
+
+def test_composable_linear_qp_reduction_is_exact_and_reported():
+    """Removing redundant speed balls preserves the unique projection."""
+    positions = np.asarray([
+        [30.0, 30.0], [51.0, 30.0], [72.0, 30.0],
+        [30.0, 51.0], [51.0, 51.0], [72.0, 51.0],
+    ])
+    desired = np.asarray([
+        [2.5, 0.0], [-2.5, 0.0], [0.0, -2.5],
+        [1.8, 1.7], [-1.9, -1.6], [0.0, 2.5],
+    ])
+    kwargs = dict(
+        minimum_distance_m=20.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+        independently_composable=True,
+        return_diagnostics=True,
+    )
+    reference, reference_info = project_pairwise_safe_movement(
+        positions, desired, analytic_composable_projection=False, **kwargs)
+    reduced, reduced_info = project_pairwise_safe_movement(
+        positions, desired, analytic_composable_projection=True, **kwargs)
+
+    assert reference_info['projection_solver'] == 'slsqp'
+    assert reduced_info['projection_solver'] == 'reduced_linear_qp'
+    assert not reference_info['fail_closed']
+    assert not reduced_info['fail_closed']
+    np.testing.assert_allclose(reduced, reference, atol=1.0e-9, rtol=1.0e-9)
+
+
+def test_composable_linear_qp_reduction_matches_randomized_full_problem():
+    rng = np.random.default_rng(20260830)
+    base = np.asarray([
+        [30.0, 30.0], [51.0, 30.0], [72.0, 30.0],
+        [30.0, 51.0], [51.0, 51.0], [72.0, 51.0],
+    ])
+    for _ in range(40):
+        positions = base + rng.uniform(-0.35, 0.35, size=base.shape)
+        desired = rng.normal(0.0, 2.5, size=base.shape)
+        kwargs = dict(
+            minimum_distance_m=20.0,
+            maximum_step_m=2.5,
+            area_size_xy=(100.0, 100.0),
+            independently_composable=True,
+        )
+        reference = project_pairwise_safe_movement(
+            positions,
+            desired,
+            analytic_composable_projection=False,
+            **kwargs,
+        )
+        reduced = project_pairwise_safe_movement(
+            positions,
+            desired,
+            analytic_composable_projection=True,
+            **kwargs,
+        )
+        np.testing.assert_allclose(
+            reduced, reference, atol=2.0e-8, rtol=2.0e-8)
+        next_positions = positions + reduced
+        pair_distance = np.linalg.norm(
+            next_positions[:, None, :] - next_positions[None, :, :],
+            axis=-1,
+        )[np.triu_indices(positions.shape[0], k=1)]
+        assert np.min(pair_distance) >= 20.0 - 1.0e-7
+        assert np.max(np.linalg.norm(reduced, axis=1)) <= 2.5 + 1.0e-7
 
 
 def test_inverse_square_endpoint_capability_is_bounded_and_physical():
@@ -870,6 +991,30 @@ def test_reserved_endpoint_consensus_needs_only_two_endpoint_views():
     assert mutual == ((0, 1, 0), (2, 3, 1))
 
 
+def test_reserved_information_greedy_prefers_complementary_geometry():
+    coefficient = np.zeros((4, 4, 1), dtype=np.float64)
+    coefficient[0, 3, 0] = 10.0
+    coefficient[1, 3, 0] = 9.0
+    coefficient[2, 3, 0] = 8.0
+    information = np.zeros((4, 4, 1, 4, 4), dtype=np.float64)
+    # Tx 0 and 1 repeat one strong direction; Tx 2 is slightly weaker in
+    # Deflection but supplies an independent position direction.
+    information[0, 3, 0, 0, 0] = 10.0
+    information[1, 3, 0, 0, 0] = 10.0
+    information[2, 3, 0, 1, 1] = 10.0
+    plan = plan_reserved_endpoint_hyperedges(
+        coefficient,
+        np.ones((4, 1), dtype=bool),
+        np.ones(4),
+        viewer=3,
+        tx_role_mask=np.asarray([True, True, True, False]),
+        target_pair_limit=2,
+        normalized_edge_information=information,
+        information_weight=1.0,
+    )
+    assert set(plan.selected) == {(0, 3, 0), (2, 3, 0)}
+
+
 def test_local_plan_enforces_directed_single_roles_and_target_capacity():
     tx = np.array([
         [0.95, 0.90],
@@ -1124,5 +1269,36 @@ def test_budget_reconstructable_relay_merges_physical_origin_state():
         core._hyperedge_received_offer[1, 2, :, :7],
         np.repeat(relay_state[None, :], cfg.scenario.Q, axis=0),
     )
-    assert np.all(core._hyperedge_received_last_seen[1, 2] == core.t)
+    assert np.all(core._hyperedge_received_last_seen[1, 2] == (
+        core.t - core._comm_message_ttl_frames))
+    env.close()
+
+
+def test_hyperedge_round_robin_beacons_use_deterministic_sender_cohorts():
+    cfg = load_config(
+        'config/exp_800_k12q12_distributed_v2_dynamic_u2u_'
+        'robustbelief_gapcoverage_enveloped_pilot.yaml')
+    cfg.scenario.T = 2
+    env = UAVISACEnv(config=cfg, seed=451)
+    env.reset(seed=451)
+    core = env.core
+    assert core._distributed_replicated_power_process_parallel_enabled
+    assert core._distributed_replicated_power_process_workers == 4
+    assert core._hyperedge_beacon_round_robin_period == 2
+    assert core._hyperedge_protocol_header_bits == 10
+    assert core._hyperedge_state_field_bits == (8, 8, 8, 8, 4, 8, 8)
+    assert core._hyperedge_state_codec_service_envelope_enabled
+    assert core._evidence_packet_layout.header_bits == 10
+    assert core._evidence_packet_layout.timestamp_bits == 0
+    assert core._evidence_service_envelope_layout.header_bits == 64
+
+    core.t = 0
+    core._prepare_hyperedge_submission()
+    assert set(core._pending_hyperedge_protocol) == set(range(0, core.K, 2))
+    assert set(core._pending_hyperedge_protocol_frame.values()) == {0}
+
+    core.t = 1
+    core._prepare_hyperedge_submission()
+    assert set(core._pending_hyperedge_protocol) == set(range(1, core.K, 2))
+    assert set(core._pending_hyperedge_protocol_frame.values()) == {1}
     env.close()

@@ -1,12 +1,22 @@
 """Shared test fixtures for UAV-ISAC tests."""
 
-import pytest
-import numpy as np
 import sys
 import os
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.run_mappo import _import_torch_with_single_windows_openmp
+
+# Test modules import Torch directly during collection and later interleave it
+# with NumPy/SciPy linear algebra.  Reuse the production entry-point bootstrap
+# before collection so the test process also maps exactly one Intel OpenMP
+# runtime instead of relying on the unsafe KMP_DUPLICATE_LIB_OK workaround.
+_TEST_TORCH, _TEST_OPENMP_RUNTIME_HANDLE = (
+    _import_torch_with_single_windows_openmp())
+
+import numpy as np
+import pytest
 
 from config.params import get_default_config, MasterConfig
 

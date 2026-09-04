@@ -1,4 +1,4 @@
-"""Regression tests for the 2026-08-25 deep-audit fixes.
+"""Regression tests for the 2026-08-25/29 deep-audit fixes.
 
 Locked behaviors:
 1. feasibility_oracle K==1 / empty-partition degrade paths return a valid
@@ -12,10 +12,13 @@ Locked behaviors:
    stale constructor stream made same-seed episodes diverge).
 """
 
+import collections
+
 import numpy as np
 import pytest
 
-from config.params import load_config
+from config.params import get_default_config, load_config
+from uav_isac.environment.env_core import EnvironmentCore
 from uav_isac.environment.env_wrapper import UAVISACEnv
 from uav_isac.physical.feasibility_oracle import (
     solve_joint_pair_power_oracle,
@@ -131,3 +134,76 @@ def test_reseed_rebinds_cost_aware_comm_rng():
     assert comm.rng is core.rng  # reseed rebinds the comm stream
     assert np.array_equal(shadow_a, shadow_b)
     assert np.array_equal(burst_a, burst_b)
+
+
+def test_env_snapshot_restores_history_recurrent_probe_and_channel_state():
+    cfg = get_default_config()
+    cfg.scenario.K = 2
+    cfg.scenario.Q = 2
+    cfg.marl.tracking_enabled = True
+    cfg.marl.obs_history_frames = 2
+    core = EnvironmentCore(cfg)
+    core.reset()
+    core._prev_obs = {0: np.asarray([1.0, 2.0])}
+    core._prev_obs_deque = {
+        0: collections.deque([np.asarray([3.0, 4.0])], maxlen=1)}
+    core._gru_hidden = {0: np.asarray([5.0, 6.0])}
+    core._probe_miss_count[:] = [7, 8]
+    core._active_comm_deadline_s = 0.003
+    core._active_comm_snr_threshold_db = 9.0
+    core._pending_decision_sufficient_bits = {0: 4}
+    snapshot = core.get_state()
+
+    core._prev_obs.clear()
+    core._prev_obs_deque.clear()
+    core._gru_hidden.clear()
+    core._probe_miss_count.fill(0)
+    core._active_comm_deadline_s = 1.0
+    core._active_comm_snr_threshold_db = -99.0
+    core._pending_decision_sufficient_bits.clear()
+    core.set_state(snapshot)
+
+    np.testing.assert_array_equal(core._prev_obs[0], [1.0, 2.0])
+    np.testing.assert_array_equal(core._prev_obs_deque[0][0], [3.0, 4.0])
+    np.testing.assert_array_equal(core._gru_hidden[0], [5.0, 6.0])
+    np.testing.assert_array_equal(core._probe_miss_count, [7, 8])
+    assert core._active_comm_deadline_s == pytest.approx(0.003)
+    assert core._active_comm_snr_threshold_db == pytest.approx(9.0)
+    assert core._pending_decision_sufficient_bits == {0: 4}
+
+
+def test_federated_region_configs_are_standalone_and_inherit_base():
+    region_a = load_config("config/fed_region_A.yaml")
+    region_b = load_config("config/fed_region_B.yaml")
+    region_c = load_config("config/fed_region_C.yaml")
+
+    assert (region_a.scenario.K, region_a.scenario.Q) == (8, 8)
+    assert region_a.target.speed_range == (0, 5)
+    assert region_b.target.speed_range == (2, 10)
+    assert region_c.target.speed_range == (0, 5)
+    assert region_a.channel.los_a == pytest.approx(4.88)
+    assert region_b.channel.los_b == pytest.approx(0.43)
+    assert region_c.channel.los_a == pytest.approx(7.0)
+    assert region_c.channel.los_b == pytest.approx(0.30)
+
+
+def test_enabled_lex_audit_fails_closed_when_record_cannot_be_written(
+    tmp_path, monkeypatch,
+):
+    # Opening a directory as an append-only file fails on every supported OS.
+    monkeypatch.setenv("DSH_LEX_AUDIT", str(tmp_path))
+    cfg = get_default_config()
+    cfg.scenario.K = 2
+    cfg.scenario.Q = 2
+    cfg.scenario.T = 1
+    env = UAVISACEnv(cfg, seed=5)
+    observations, _ = env.reset(seed=5)
+    actions = {
+        agent: {"delta_p": np.zeros(2), "role": 2}
+        for agent in observations
+    }
+    try:
+        with pytest.raises(RuntimeError, match="lex audit record"):
+            env.step(actions)
+    finally:
+        env.close()

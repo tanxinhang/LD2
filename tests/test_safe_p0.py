@@ -107,9 +107,12 @@ class TestSafeP0Fallback:
             fusion_confidence=confidence,
             fusion_confidence_min=0.3,
         )
-        # Should produce a valid solution
+        # Should produce a valid solution: a non-degenerate subset of the
+        # provided entries (never fabricates an entry that was not supplied).
         assert sol.D_q_star is not None
-        assert len(sol.selected_set) >= 0
+        assert 0 < len(sol.selected_set) <= len(entries)
+        entry_ids = {(e.i, e.j, e.q) for e in entries}
+        assert set(sol.selected_set) <= entry_ids
 
     def test_empty_entries_with_confidence(self, solver):
         """Confidence with no valid entries should return empty solution."""

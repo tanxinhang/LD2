@@ -45,7 +45,9 @@ def test_local_gradient_matches_oracle():
     assert out is not None
     _, power, prices = out
 
-    oracle = capability_geometry_gradient(gain, owner, uav, target, power, prices)
+    height = 20.0
+    oracle = capability_geometry_gradient(
+        gain, owner, uav, target, power, prices, height_m=height)
 
     # Build the delivered "support" records for each target (ideal communication).
     rtx = np.linalg.norm(uav[:, None, :] - target[None, :, :], axis=2)
@@ -60,7 +62,8 @@ def test_local_gradient_matches_oracle():
         own_gain = gain[k]  # UAV k's own fixed-owner gain row (local).
         own_power = power[k]
         local[k] = local_capability_gradient_k(
-            k, owner, prices, own_power, own_gain, uav[k], target, support)
+            k, owner, prices, own_power, own_gain, uav[k], target, support,
+            height_m=height)
 
     err = np.linalg.norm(local - oracle) / (np.linalg.norm(oracle) + 1e-12)
     assert err < 1e-6, f"local vs oracle gradient error {err}"

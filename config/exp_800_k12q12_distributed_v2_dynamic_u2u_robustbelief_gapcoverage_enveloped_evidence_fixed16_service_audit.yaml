@@ -1,0 +1,5 @@
+# Fixed-schema evidence compression under the legacy service envelope.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_evidence_fixed16_audit.yaml
+
+marl:
+  evidence_legacy_service_envelope_enabled: true

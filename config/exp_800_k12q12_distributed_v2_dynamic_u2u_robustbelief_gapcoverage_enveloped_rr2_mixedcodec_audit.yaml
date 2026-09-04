@@ -1,0 +1,6 @@
+# RR2 coordination with a fixed field-aware codec:
+# x/y=7 bit, vx/vy=4 bit, target code=4 bit, residual x/y=7 bit.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_rr2_audit.yaml
+
+marl:
+  hyperedge_state_field_bits: [7, 7, 4, 4, 4, 7, 7]

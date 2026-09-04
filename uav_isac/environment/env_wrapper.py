@@ -1,6 +1,7 @@
 """Gymnasium Environment wrapper for the UAV-ISAC simulation."""
 
 import numpy as np
+from numbers import Integral
 from typing import Any, Dict, Optional, Tuple, Union
 import gymnasium
 from gymnasium import spaces
@@ -125,18 +126,50 @@ class UAVISACEnv(gymnasium.Env):
         Returns:
             (observations, rewards, terminated, truncated, info)
         """
-        # Convert string keys to int and parse actions
+        if not isinstance(actions, dict):
+            raise ValueError("actions must be a mapping for every UAV")
+
+        # Convert string keys to int and parse actions.  Validate the complete
+        # batch before mutating simulator state: NaN/Inf otherwise bypass the
+        # movement clamp and can make a corrupted episode look successful.
         actions_int = {}
-        for k_str, a in actions.items():
-            k = int(k_str)
+        for raw_key, a in actions.items():
+            if isinstance(raw_key, bool):
+                raise ValueError("boolean UAV action keys are invalid")
+            try:
+                k = int(raw_key)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid UAV action key: {raw_key!r}") from exc
+            if k in actions_int:
+                raise ValueError(f"Duplicate UAV action key after parsing: {k}")
             if isinstance(a, dict):
-                delta_p = np.asarray(a['delta_p'], dtype=np.float64)
-                role = int(a['role'])
+                if set(a) != {"delta_p", "role"}:
+                    raise ValueError(
+                        f"Action for UAV {k} must contain exactly delta_p and role")
+                try:
+                    delta_p = np.asarray(a["delta_p"], dtype=np.float64)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"delta_p for UAV {k} must be numeric") from exc
+                raw_role = a["role"]
+                if isinstance(raw_role, bool) or not isinstance(
+                    raw_role, Integral
+                ):
+                    raise ValueError(f"role for UAV {k} must be an integer")
+                role = int(raw_role)
                 actions_int[k] = Action(delta_p=delta_p, role=role)
             elif isinstance(a, Action):
                 actions_int[k] = a
             else:
                 raise ValueError(f"Invalid action type: {type(a)}")
+
+        expected_agents = set(range(self.K))
+        if set(actions_int) != expected_agents:
+            missing = sorted(expected_agents.difference(actions_int))
+            extra = sorted(set(actions_int).difference(expected_agents))
+            raise ValueError(
+                f"actions must cover every UAV exactly once; "
+                f"missing={missing}, extra={extra}")
 
         # Step the core
         next_obs, rewards, dones, step_info = self.core.step(actions_int)
@@ -258,4 +291,4 @@ class UAVISACEnv(gymnasium.Env):
 
     def close(self):
         """Cleanup resources."""
-        pass
+        self.core.close()

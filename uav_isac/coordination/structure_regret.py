@@ -33,7 +33,11 @@ of advice/016 §13-14: for two candidate scores ``s1 > s2`` with margin
 quantization carries per-score error ``eps_B <= R / (2(2^B - 1))``, so the
 decision (order) is preserved iff ``delta > 2 eps_B``, i.e.
 
-    B >= ceil( log2( 1 + R / delta ) ).
+    B > log2(1 + R / delta).
+
+Because the order condition is strict, the minimum integer is
+``floor(log2(1 + R / delta)) + 1``.  A plain ceiling is unsafe when the
+logarithm is already an integer: it permits a quantized tie.
 
 An event trigger then suppresses transmission while the stale-score drift
 bound ``E_stale(h)`` keeps ``delta > 2 E_stale(h) + 2 eps_B`` -- the minimal
@@ -116,7 +120,7 @@ def decision_preserving_bits(
     ``eps_B <= R / (2(2^B - 1))``; the order survives iff
     ``margin > 2 eps_B``, giving
 
-        B >= ceil( log2( 1 + R / margin ) ).
+        B > log2( 1 + R / margin ).
 
     Returns ``0`` when the margin is so large that even 1 bit would suffice is
     NOT used (we keep >= 1 for a non-trivial quantizer); the caller decides
@@ -124,12 +128,28 @@ def decision_preserving_bits(
     """
     margin = float(margin)
     dynamic_range = float(dynamic_range)
-    if margin <= 0.0 or dynamic_range <= 0.0:
+    if (
+        not np.isfinite(margin)
+        or not np.isfinite(dynamic_range)
+        or margin <= 0.0
+        or dynamic_range <= 0.0
+    ):
         return 1  # degenerate: cannot certify order preservation
     ratio = dynamic_range / margin
-    if ratio <= 1.0:
-        return 1
-    return int(np.ceil(np.log2(1.0 + ratio)))
+    if not np.isfinite(ratio):
+        raise OverflowError("finite precision cannot certify this margin")
+    bits = max(1, int(np.floor(np.log2(1.0 + ratio))) + 1)
+    # Verify the defining strict inequality directly.  This also protects the
+    # exact power-of-two boundary against floating-point log rounding.
+    while not margin > 2.0 * quantization_error_bound(bits, dynamic_range):
+        bits += 1
+    while (
+        bits > 1
+        and margin > 2.0 * quantization_error_bound(
+            bits - 1, dynamic_range)
+    ):
+        bits -= 1
+    return bits
 
 
 def certified_decision_preserving_bits(
@@ -144,6 +164,14 @@ def certified_decision_preserving_bits(
     quantizer can certify the decision, so the caller must transmit a richer
     message, hold the previous safe decision, or fail closed.
     """
+    values = np.asarray([
+        margin,
+        dynamic_range,
+        stale_drift_bound,
+        physical_error_bound,
+    ], dtype=np.float64)
+    if np.any(~np.isfinite(values)):
+        return None
     effective = float(margin) - 2.0 * (
         max(float(stale_drift_bound), 0.0)
         + max(float(physical_error_bound), 0.0))
@@ -185,9 +213,95 @@ def preserved_without_transmission(
     stale_drift_bound: float,
     dynamic_range: float,
     bits: int,
+    physical_error_bound: float = 0.0,
 ) -> bool:
     """Whether the decision stays certified if we suppress the Token."""
-    return not should_transmit(margin, stale_drift_bound, dynamic_range, bits)
+    return not should_transmit(
+        margin,
+        stale_drift_bound,
+        dynamic_range,
+        bits,
+        physical_error_bound=physical_error_bound,
+    )
+
+
+# ---------------------------------------------------------------------------
+# decision-sufficient local plan (advice/001 §12-13 / C6 closure)
+# ---------------------------------------------------------------------------
+
+
+def local_decision_margin(
+    scores: np.ndarray,
+    top_k: int = 2,
+) -> float:
+    """Local decision margin ``Δ = s_(1) - s_(2)`` from one viewer's candidates.
+
+    ``scores`` is a per-candidate score vector (e.g. a UAV's per-target
+    local-belief capability or its top-k owner bids).  The margin is the gap
+    between the best and second-best candidate --- the slack that compression
+    or staleness may eat without flipping the argmax (advice/001 §12).
+
+    Returns ``0.0`` when fewer than two finite candidates exist (cannot
+    certify an order), matching the fail-closed convention of the
+    decision-preserving primitives.
+    """
+    values = np.asarray(scores, dtype=np.float64).reshape(-1)
+    finite = values[np.isfinite(values)]
+    if finite.size < 2:
+        return 0.0
+    ordered = -np.sort(-finite)
+    return float(max(ordered[0] - ordered[1], 0.0))
+
+
+def decision_sufficient_plan(
+    scores: np.ndarray,
+    dynamic_range: float,
+    stale_drift_bound: float = 0.0,
+    physical_error_bound: float = 0.0,
+    max_bits: int = 32,
+    reference_bits: int | None = None,
+) -> tuple[bool, int]:
+    """One decision-sufficient token plan for a viewer's local candidates.
+
+    Returns ``(transmit: bool, bits: int)``:
+
+      - ``transmit=False`` when the local top-1/top-2 margin ``Δ`` satisfies
+        ``Δ > 2(E_stale + E_phys) + 2 eps_B`` at the precision of the token
+        receivers actually retain, so the decision is CERTAIN to persist and
+        the token may be suppressed (event-triggered silence, no airtime).
+      - otherwise ``transmit=True`` with ``bits`` = the minimum uniform-quant
+        precision that preserves the order under the same error budget, capped
+        at ``max_bits``.
+
+    Uses only locally computable inputs; nothing here reads simulator truth.
+    For the strict distributed identity this is the C6 hook that turns the
+    per-frame full-state broadcast into a decision-preserving minimal token.
+    """
+    margin = local_decision_margin(scores)
+    dynamic_range = float(max(dynamic_range, 1e-12))
+    max_bits = max(1, int(max_bits))
+    held_bits = max_bits if reference_bits is None else int(reference_bits)
+    if held_bits < 1:
+        # No common receiver-side reference exists.  Silence cannot preserve a
+        # decision that peers have never received, so bootstrap at max width.
+        return True, max_bits
+    held_bits = min(held_bits, max_bits)
+    if preserved_without_transmission(
+        margin,
+        stale_drift_bound,
+        dynamic_range,
+        held_bits,
+        physical_error_bound=physical_error_bound,
+    ):
+        return False, 0
+    needed = certified_decision_preserving_bits(
+        margin, dynamic_range,
+        stale_drift_bound=stale_drift_bound,
+        physical_error_bound=physical_error_bound,
+    )
+    if needed is None:
+        return True, max_bits  # cannot certify -> send richest available
+    return True, min(max_bits, needed)
 
 
 # ---------------------------------------------------------------------------

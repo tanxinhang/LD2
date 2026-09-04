@@ -27,6 +27,7 @@ from uav_isac.agents.trainer import (
 )
 from uav_isac.environment.action import ActionSpace
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 from uav_isac.utils.seeding import set_seed
 
 
@@ -319,8 +320,15 @@ def main():
     eval_env = UAVISACEnv(cfg, seed=0)
     agent = build_agent(cfg, eval_env, device)
     eval_env.close()
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = safe_torch_load(
+        args.checkpoint,
+        map_location=device,
+        description="QoS commitment pretraining source checkpoint",
+        optional_state_dict_keys=("actor",),
+    )
     actor_state = checkpoint.get('actor', checkpoint)
+    validate_state_dict(
+        actor_state, description="QoS commitment pretraining actor state_dict")
     agent.load_actor_state_dict_compatible(actor_state)
     actor = agent.actor
     if not hasattr(actor, 'movement_commitment_head'):

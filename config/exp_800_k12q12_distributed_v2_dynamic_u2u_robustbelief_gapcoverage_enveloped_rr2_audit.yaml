@@ -1,0 +1,6 @@
+# Deterministic 2-cohort state-beacon candidate. Each sender broadcasts every
+# other frame; H=2 fits the 3-frame TTL and movement public-age cap.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  hyperedge_beacon_round_robin_period: 2

@@ -48,6 +48,33 @@ from uav_isac.evaluation.physical_oracle_audit import (
 )
 
 
+def stable_ppo_ratio_and_approx_kl(
+        new_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        log_ratio_bound: float = 20.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return a numerically bounded PPO ratio and Schulman KL estimate.
+
+    For ``x = log(pi_new / pi_old)``, ``exp(x) - 1 - x`` is non-negative
+    and is the standard low-variance approximate KL used by PPO. Clamping at
+    |x|=20 does not make a rejected update acceptable (the estimate is already
+    orders of magnitude above any configured trust-region bound), but prevents
+    ``exp`` overflow while the fail-closed guard runs. Non-finite inputs map to
+    an infinite KL so callers must reject the update.
+    """
+    log_ratio = new_log_probs - old_log_probs
+    finite = torch.isfinite(log_ratio).all()
+    safe_log_ratio = torch.nan_to_num(
+        log_ratio, nan=0.0,
+        posinf=log_ratio_bound, neginf=-log_ratio_bound,
+    ).clamp(-log_ratio_bound, log_ratio_bound)
+    ratio = torch.exp(safe_log_ratio)
+    approx_kl = (torch.expm1(safe_log_ratio) - safe_log_ratio).mean()
+    if not bool(finite):
+        approx_kl = torch.full_like(approx_kl, float('inf'))
+    return ratio, approx_kl
+
+
 def linear_sum_assignment_numpy(cost_matrix: np.ndarray):
     """Exact rectangular Hungarian assignment without a SciPy runtime.
 
@@ -2645,6 +2672,7 @@ class MAPPTrainer:
         if 'total_frames' in state:
             self.total_frames = max(0, int(state['total_frames']))
 
+    @torch.inference_mode()
     def collect_rollout(self) -> bool:
         """Collect a full rollout with parallel environments for GPU batching.
 
@@ -2937,14 +2965,14 @@ class MAPPTrainer:
                 else:
                     base = self._obs_gpu[:N*K]                          # IPPO: local obs
                 gs_with_id = torch.cat([base, agent_oh, comm_agg_rep], dim=-1)
-                if self._headwise_credit_enabled:
-                    values_t, credit_values_t = (
-                        self.agents[0].critic.forward_with_credit(gs_with_id))
-                else:
-                    values_t = self.agents[0].critic(gs_with_id)
-                    credit_values_t = None
-                # S3b: per-target values (diagnostic)
-                _, target_values_t = self.agents[0].critic.forward_with_targets(gs_with_id)
+                # Scalar, credit and per-target heads share one deterministic
+                # critic encoding.  A single pass is mathematically identical
+                # to the historical duplicate calls.
+                values_t, credit_values_t, target_values_t = (
+                    self.agents[0].critic.forward_with_auxiliaries(
+                        gs_with_id,
+                        include_credit=self._headwise_credit_enabled,
+                    ))
                 target_v_np = target_values_t.detach().cpu().numpy() if target_values_t is not None else None
 
             # Copy results back to CPU (single transfer per rollout step)
@@ -3582,17 +3610,16 @@ class MAPPTrainer:
             gs_with_id = torch.cat([base, agent_oh, final_comm_agg], dim=-1)
 
             # Scalar and per-target next values
-            if self._headwise_credit_enabled:
-                next_values_t, next_credit_values_t = (
-                    self.agents[0].critic.forward_with_credit(gs_with_id))
-                next_values = next_values_t.detach().cpu().numpy()
-                next_credit_values = (
-                    next_credit_values_t.detach().cpu().numpy())
-            else:
-                next_values = (
-                    self.agents[0].critic(gs_with_id).detach().cpu().numpy())
-                next_credit_values = None
-            _, next_target_values_t = self.agents[0].critic.forward_with_targets(gs_with_id)
+            (next_values_t, next_credit_values_t,
+             next_target_values_t) = (
+                self.agents[0].critic.forward_with_auxiliaries(
+                    gs_with_id,
+                    include_credit=self._headwise_credit_enabled,
+                ))
+            next_values = next_values_t.detach().cpu().numpy()
+            next_credit_values = (
+                next_credit_values_t.detach().cpu().numpy()
+                if next_credit_values_t is not None else None)
             next_pt_values = (next_target_values_t.detach().cpu().numpy()
                               if next_target_values_t is not None else None)
 
@@ -3833,6 +3860,26 @@ class MAPPTrainer:
 
         agent = self.agents[0]  # shared networks
 
+        # Treat the complete actor update (PPO plus allocation/rate auxiliary
+        # steps) as a transaction. A final full-rollout KL check below either
+        # accepts it or restores both parameters and optimizer moments.
+        actor_update_snapshot = None
+        actor_optimizer_snapshots = []
+        if (not self._risk_critic_only_training
+                and self.target_kl is not None
+                and float(self.target_kl) > 0.0):
+            actor_update_snapshot = deepcopy(agent.actor.state_dict())
+            seen_optimizers = set()
+            for optimizer in (
+                    agent.actor_optimizer,
+                    self._target_allocation_aux_optimizer,
+                    self._comm_rate_aux_optimizer):
+                if optimizer is None or id(optimizer) in seen_optimizers:
+                    continue
+                seen_optimizers.add(id(optimizer))
+                actor_optimizer_snapshots.append(
+                    (optimizer, deepcopy(optimizer.state_dict())))
+
         qos_rate_aux_active = False
         qos_target_rate_index = 0
         exploration_target_rate_index = 0
@@ -3957,6 +4004,7 @@ class MAPPTrainer:
                 print(f'[PPO RATIO OK] old_log_prob matches recomputed: max|diff|={max_diff:.6f} < 1e-4')
 
         kl_stop = False
+        rejected_minibatch_kl = 0.0
         for epoch in range(self.ppo_epochs):
             if kl_stop:
                 break
@@ -4062,10 +4110,23 @@ class MAPPTrainer:
                     new_head_log_probs = None
                     credit_value_predictions = None
 
-                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                ratio, approx_kl_mb_tensor = (
+                    stable_ppo_ratio_and_approx_kl(
+                        new_log_probs, mb_old_log_probs))
+                approx_kl_mb = float(approx_kl_mb_tensor.item())
+                kl_limit = 1.5 * float(self.target_kl)
+                if (not np.isfinite(approx_kl_mb)
+                        or (float(self.target_kl) > 0.0
+                            and approx_kl_mb > kl_limit)):
+                    # PPO clipping bounds the surrogate objective, not the
+                    # actual parameter step or resulting policy divergence.
+                    # Reject this minibatch before any gradient update.
+                    kl_stop = True
+                    rejected_minibatch_kl = approx_kl_mb
+                    break
                 if self._headwise_credit_enabled:
-                    head_ratios = torch.exp(
-                        new_head_log_probs - mb_old_head_log_probs)
+                    head_ratios, _ = stable_ppo_ratio_and_approx_kl(
+                        new_head_log_probs, mb_old_head_log_probs)
                     head_losses = []
                     for head_idx in range(len(self.buffer.credit_head_names)):
                         ratio_h = head_ratios[:, head_idx]
@@ -4311,7 +4372,7 @@ class MAPPTrainer:
                 metrics['risk_critic_empirical_violation_rate'] += float(
                     risk_empirical_violation_rate.item())
                 metrics['entropy'] += entropy.item()
-                metrics['approx_kl'] += ((ratio - 1.0) - torch.log(ratio)).mean().item()
+                metrics['approx_kl'] += approx_kl_mb
                 metrics['clip_fraction'] += ((ratio < 1.0 - self.ppo_clip) | (ratio > 1.0 + self.ppo_clip)).float().mean().item()
                 if self._headwise_credit_enabled:
                     for head_idx, head_name in enumerate(
@@ -4333,14 +4394,6 @@ class MAPPTrainer:
                         rate_exploration_aux_loss.item())
                 metrics['_n_minibatches'] += 1
 
-                # KL early-stop DISABLED: too aggressive for MARL dynamics.
-                # PPO-clip (ε=0.1) already prevents destructive updates.
-                # with torch.no_grad():
-                #     approx_kl_mb = ((ratio - 1.0) - torch.log(ratio)).mean().item()
-                # if np.isnan(approx_kl_mb) or approx_kl_mb > 1.5 * self.target_kl:
-                #     kl_stop = True
-                #     break
-
         # Average metrics (use ACTUAL minibatch count, not expected)
         n_actual = max(metrics.pop('_n_minibatches', 1), 1)
         for k in metrics:
@@ -4349,12 +4402,15 @@ class MAPPTrainer:
             metrics['risk_advantage_tail_fraction'] = (
                 self._risk_tail_fraction)
         metrics.update(causal_ccp_metrics)
+        metrics['kl_early_stop'] = float(kl_stop)
+        metrics['kl_rejected_minibatch'] = float(rejected_minibatch_kl)
 
         # One full-team auxiliary step preserves the (transition, UAV) grouping
         # that random PPO minibatches destroy. Centralized state is used only to
         # construct training labels; execution still uses each local actor and
         # whatever messages were actually delivered over the physical U2U link.
         if (not self._risk_critic_only_training
+                and not kl_stop
                 and (self._target_allocation_enabled
              or self._target_allocation_teacher_enabled)
                 and hasattr(agent.actor, 'last_target_assignment')):
@@ -4764,6 +4820,89 @@ class MAPPTrainer:
                         metrics['target_allocation_collision_rate'] = float(
                             (assignment_load > 1).any(dim=-1).float().mean().item())
 
+        # Validate the final actor, including auxiliary steps, against the
+        # rollout policy. Minibatch early stopping cannot prevent a single
+        # large last step; transactional rollback closes that gap.
+        post_update_kl = 0.0
+        actor_update_rejected = False
+        if actor_update_snapshot is not None:
+            try:
+                recomputed_log_probs = []
+                validation_batch_size = max(1, self.minibatch_size)
+                with torch.no_grad():
+                    for start in range(0, total_size, validation_batch_size):
+                        end = min(start + validation_batch_size, total_size)
+                        batch_idx = np.arange(start, end)
+                        validation_obs = obs[batch_idx]
+                        validation_h = None
+                        if 'h_prev' in data:
+                            validation_h_full = data['h_prev'][batch_idx].to(
+                                self.device)
+                            validation_h = validation_h_full.reshape(
+                                1, -1, validation_h_full.shape[-1])
+                        validation_window = None
+                        validation_window_mask = None
+                        if 'obs_window' in data:
+                            validation_window = data['obs_window'][
+                                batch_idx].to(self.device)
+                        if 'window_mask' in data:
+                            validation_window_mask = data['window_mask'][
+                                batch_idx].to(self.device)
+                        validation_agent_identity = torch.as_tensor(
+                            batch_idx % self.K, dtype=torch.long,
+                            device=self.device)
+                        (dp_mean, dp_log_std, role_logits, comm_mean,
+                         _, _) = agent.actor(
+                            (validation_window
+                             if validation_window is not None
+                             else validation_obs),
+                            validation_h,
+                            window_mask=validation_window_mask,
+                            comm_round_phase=comm_round_phases[batch_idx],
+                            agent_identity=validation_agent_identity,
+                        )
+                        if not all(bool(torch.isfinite(value).all()) for value in (
+                                dp_mean, dp_log_std, role_logits, comm_mean)):
+                            raise FloatingPointError(
+                                'non-finite actor output during KL validation')
+                        batch_log_probs, _ = (
+                            agent._movement_message_resource_log_probs(
+                                dp_mean, dp_log_std, role_logits, comm_mean,
+                                actions_dp[batch_idx],
+                                actions_role[batch_idx],
+                                movement_action_masks[batch_idx],
+                                (actions_comm[batch_idx]
+                                 if actions_comm is not None else None),
+                                (actions_comm_rate[batch_idx]
+                                 if actions_comm_rate is not None else None),
+                                (actions_isac_power_raw[batch_idx]
+                                 if actions_isac_power_raw is not None
+                                 else None),
+                                (actions_sensing_raw[batch_idx]
+                                 if actions_sensing_raw is not None else None),
+                            ))
+                        recomputed_log_probs.append(batch_log_probs)
+                _, post_kl_tensor = stable_ppo_ratio_and_approx_kl(
+                    torch.cat(recomputed_log_probs), old_log_probs)
+                post_update_kl = float(post_kl_tensor.item())
+            except FloatingPointError:
+                # Convert a numerical actor failure into rollback, not a
+                # poisoned checkpoint. Structural/runtime errors remain loud.
+                post_update_kl = float('inf')
+
+            kl_limit = 1.5 * float(self.target_kl)
+            if (not np.isfinite(post_update_kl)
+                    or post_update_kl > kl_limit):
+                agent.actor.load_state_dict(actor_update_snapshot)
+                for optimizer, optimizer_state in actor_optimizer_snapshots:
+                    optimizer.load_state_dict(optimizer_state)
+                actor_update_rejected = True
+
+        metrics['post_update_attempted_approx_kl'] = float(post_update_kl)
+        metrics['post_update_approx_kl'] = float(
+            0.0 if actor_update_rejected else post_update_kl)
+        metrics['actor_update_rejected'] = float(actor_update_rejected)
+
         # ── Lagrangian update from full rollout statistics ──
         if self._rollout_constraint_costs:
             mean_violation = float(np.mean(self._rollout_constraint_costs))
@@ -5125,6 +5264,10 @@ class MAPPTrainer:
         eval_replicated_local_coverage = []
         eval_replicated_solve_time = []
         eval_replicated_per_node_solve_time = []
+        eval_replicated_parallel_used = []
+        eval_replicated_parallel_batch_wall = []
+        eval_replicated_history_reserve_used = []
+        eval_replicated_worker_warmup = []
         eval_hyperedge_visible_peers = []
         eval_hyperedge_mutual_edges = []
         eval_hyperedge_active_edges = []
@@ -5174,9 +5317,23 @@ class MAPPTrainer:
         eval_movement_safety_solve_time_s = []
         eval_movement_safety_solve_time_s_per_node = []
         eval_movement_safety_projection_calls = []
+        eval_movement_safety_reduced_linear_qp_calls = []
+        eval_movement_safety_reduced_linear_qp_rate = []
         eval_movement_public_view_stale_fail_closed_rate = []
         eval_movement_public_view_mean_max_age = []
         eval_movement_public_view_max_age = []
+        eval_movement_envelope_gap_selected_rate = []
+        eval_movement_envelope_single_projection_rate = []
+        eval_movement_envelope_selection_disagreement_rate = []
+        eval_movement_primal_dual_candidate_enabled = []
+        eval_movement_primal_dual_certificate_available_rate = []
+        eval_movement_primal_dual_selected_rate = []
+        eval_movement_primal_dual_strong_dominance_rate = []
+        eval_movement_primal_dual_lower_improvement = []
+        eval_movement_primal_dual_certificate_width = []
+        eval_movement_primal_dual_incumbent_lower = []
+        eval_movement_primal_dual_candidate_lower = []
+        eval_movement_primal_dual_selection_disagreement_rate = []
         # Unified MAC slot accounting (audit priority #5): serialized
         # coordination + evidence/belief latency against the frame deadline.
         eval_protocol_total_latency = []
@@ -5269,7 +5426,12 @@ class MAPPTrainer:
             if independent:
                 # D1.10-A: fresh env per episode seed.
                 eval_env = self._build_eval_env(seed=int(ep_seed))
-            obs, _ = eval_env.reset(seed=int(ep_seed))
+            obs, reset_info = eval_env.reset(seed=int(ep_seed))
+            if independent or not eval_replicated_worker_warmup:
+                eval_replicated_worker_warmup.append(float(reset_info.get(
+                    'distributed_replicated_power_worker_warmup_time_s',
+                    0.0,
+                )))
             pd_hist = []   # list of mean P_D_q per frame
             pd_per_target = []  # list of (Q,) per frame
             nearest_target_distance = []  # list of (Q,) per frame
@@ -6175,6 +6337,12 @@ class MAPPTrainer:
                             'movement_safety_solve_time_s_per_node', 0.0)))
                     eval_movement_safety_projection_calls.append(float(
                         info.get('movement_safety_projection_calls', 0.0)))
+                    eval_movement_safety_reduced_linear_qp_calls.append(float(
+                        info.get(
+                            'movement_safety_reduced_linear_qp_calls', 0.0)))
+                    eval_movement_safety_reduced_linear_qp_rate.append(float(
+                        info.get(
+                            'movement_safety_reduced_linear_qp_rate', 0.0)))
                     eval_movement_public_view_stale_fail_closed_rate.append(
                         float(info.get(
                             'movement_public_view_stale_fail_closed_rate',
@@ -6184,6 +6352,53 @@ class MAPPTrainer:
                             'movement_public_view_mean_max_age_frames', 0.0)))
                     eval_movement_public_view_max_age.append(float(info.get(
                         'movement_public_view_max_age_frames', 0.0)))
+                    eval_movement_envelope_gap_selected_rate.append(float(
+                        info.get(
+                            'movement_gap_baseline_envelope_gap_selected_rate',
+                            0.0)))
+                    eval_movement_envelope_single_projection_rate.append(float(
+                        info.get(
+                            'movement_gap_baseline_envelope_single_projection_rate',
+                            0.0)))
+                    eval_movement_envelope_selection_disagreement_rate.append(
+                        float(info.get(
+                            'movement_gap_baseline_envelope_selection_disagreement_rate',
+                            0.0)))
+                    eval_movement_primal_dual_candidate_enabled.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_candidate_enabled',
+                            0.0)))
+                    eval_movement_primal_dual_certificate_available_rate.append(
+                        float(info.get(
+                            'movement_gap_primal_dual_certificate_available_rate',
+                            0.0)))
+                    eval_movement_primal_dual_selected_rate.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_selected_rate', 0.0)))
+                    eval_movement_primal_dual_strong_dominance_rate.append(
+                        float(info.get(
+                            'movement_gap_primal_dual_strong_dominance_rate',
+                            0.0)))
+                    eval_movement_primal_dual_lower_improvement.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_lower_improvement_mean',
+                            0.0)))
+                    eval_movement_primal_dual_certificate_width.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_certificate_width_mean',
+                            0.0)))
+                    eval_movement_primal_dual_incumbent_lower.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_incumbent_lower_mean',
+                            0.0)))
+                    eval_movement_primal_dual_candidate_lower.append(float(
+                        info.get(
+                            'movement_gap_primal_dual_candidate_lower_mean',
+                            0.0)))
+                    eval_movement_primal_dual_selection_disagreement_rate.append(
+                        float(info.get(
+                            'movement_gap_primal_dual_selection_disagreement_rate',
+                            0.0)))
                     eval_movement_assignment_target_coverage.append(float(
                         info.get(
                             'movement_executed_assignment_target_coverage',
@@ -6810,6 +7025,17 @@ class MAPPTrainer:
                                 info.get(
                                     'distributed_replicated_power_per_node_solve_time_s',
                                     0.0)))
+                            eval_replicated_parallel_used.append(float(info.get(
+                                'distributed_replicated_power_process_parallel_used',
+                                0.0)))
+                            eval_replicated_parallel_batch_wall.append(float(
+                                info.get(
+                                    'distributed_replicated_power_parallel_batch_wall_s',
+                                    0.0)))
+                            eval_replicated_history_reserve_used.append(float(
+                                info.get(
+                                    'distributed_replicated_power_history_reserve_used_fraction',
+                                    0.0)))
                     if float(info.get('hyperedge_enabled', 0.0)) > 0.0:
                         eval_hyperedge_visible_peers.append(float(info.get(
                             'hyperedge_visible_peers_per_uav', 0.0)))
@@ -7331,6 +7557,10 @@ class MAPPTrainer:
                 eval_movement_safety_solve_time_s_per_node or [0.0])),
             'eval_movement_safety_mean_projection_calls_per_frame': float(
                 np.mean(eval_movement_safety_projection_calls or [0.0])),
+            'eval_movement_safety_reduced_linear_qp_calls': float(np.sum(
+                eval_movement_safety_reduced_linear_qp_calls or [0.0])),
+            'eval_movement_safety_reduced_linear_qp_rate': float(np.mean(
+                eval_movement_safety_reduced_linear_qp_rate or [0.0])),
             'eval_movement_public_view_stale_fail_closed_rate': float(
                 np.mean(
                     eval_movement_public_view_stale_fail_closed_rate
@@ -7339,6 +7569,43 @@ class MAPPTrainer:
                 eval_movement_public_view_mean_max_age or [0.0])),
             'eval_movement_public_view_max_age_frames': float(max(
                 eval_movement_public_view_max_age or [0.0])),
+            'eval_movement_gap_baseline_envelope_gap_selected_rate': float(
+                np.mean(eval_movement_envelope_gap_selected_rate or [0.0])),
+            'eval_movement_gap_baseline_envelope_single_projection_rate': float(
+                np.mean(
+                    eval_movement_envelope_single_projection_rate or [0.0])),
+            'eval_movement_gap_baseline_envelope_selection_disagreement_rate': (
+                float(np.mean(
+                    eval_movement_envelope_selection_disagreement_rate
+                    or [0.0]))),
+            'eval_movement_gap_primal_dual_candidate_enabled': float(np.mean(
+                eval_movement_primal_dual_candidate_enabled or [0.0])),
+            'eval_movement_gap_primal_dual_certificate_available_rate': float(
+                np.mean(
+                    eval_movement_primal_dual_certificate_available_rate
+                    or [0.0])),
+            'eval_movement_gap_primal_dual_selected_rate': float(np.mean(
+                eval_movement_primal_dual_selected_rate or [0.0])),
+            'eval_movement_gap_primal_dual_strong_dominance_rate': float(
+                np.mean(
+                    eval_movement_primal_dual_strong_dominance_rate
+                    or [0.0])),
+            'eval_movement_gap_primal_dual_lower_improvement_mean': float(
+                np.mean(eval_movement_primal_dual_lower_improvement
+                        or [0.0])),
+            'eval_movement_gap_primal_dual_certificate_width_mean': float(
+                np.mean(eval_movement_primal_dual_certificate_width
+                        or [0.0])),
+            'eval_movement_gap_primal_dual_incumbent_lower_mean': float(
+                np.mean(eval_movement_primal_dual_incumbent_lower
+                        or [0.0])),
+            'eval_movement_gap_primal_dual_candidate_lower_mean': float(
+                np.mean(eval_movement_primal_dual_candidate_lower
+                        or [0.0])),
+            'eval_movement_gap_primal_dual_selection_disagreement_rate': float(
+                np.mean(
+                    eval_movement_primal_dual_selection_disagreement_rate
+                    or [0.0])),
             'eval_movement_assignment_target_coverage': float(np.mean(
                 eval_movement_assignment_target_coverage or [0.0])),
             'eval_movement_assignment_duplicate_rate': float(np.mean(
@@ -7607,6 +7874,16 @@ class MAPPTrainer:
             'eval_distributed_replicated_per_node_solve_time_s_per_frame': (
                 float(np.mean(
                     eval_replicated_per_node_solve_time or [0.0]))),
+            'eval_distributed_replicated_process_parallel_use_rate': float(
+                np.mean(eval_replicated_parallel_used or [0.0])),
+            'eval_distributed_replicated_parallel_batch_wall_s_per_frame': (
+                float(np.mean(
+                    eval_replicated_parallel_batch_wall or [0.0]))),
+            'eval_distributed_replicated_worker_warmup_time_s': float(
+                np.sum(eval_replicated_worker_warmup or [0.0])),
+            'eval_distributed_replicated_history_reserve_used_fraction': (
+                float(np.mean(
+                    eval_replicated_history_reserve_used or [0.0]))),
             'eval_hyperedge_visible_peers_per_uav': float(np.mean(
                 eval_hyperedge_visible_peers or [0.0])),
             'eval_hyperedge_mutual_edges_per_frame': float(np.mean(

@@ -34,6 +34,7 @@ from uav_isac.agents.trainer import (
     load_training_seed_pool,
 )
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 from uav_isac.utils.seeding import set_seed
 
 
@@ -469,8 +470,15 @@ def main():
     env = UAVISACEnv(cfg, seed=0)
     agent = build_agent(cfg, env, device)
     env.close()
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = safe_torch_load(
+        args.checkpoint,
+        map_location=device,
+        description="QoS commitment DAgger source checkpoint",
+        optional_state_dict_keys=("actor",),
+    )
     actor_state = checkpoint.get('actor', checkpoint)
+    validate_state_dict(
+        actor_state, description="QoS commitment DAgger actor state_dict")
     missing, unexpected = agent.load_actor_state_dict_compatible(actor_state)
     print(
         f'checkpoint loaded missing={len(missing)} '

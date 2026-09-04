@@ -2,7 +2,7 @@
 """Rebuild the 980_k6q6 TEST split with quarantined seeds excluded (2026-08-16).
 
 The original test split's first five seeds are the quarantined set
-{795, 747, 105, 860, 2} (docs/KNOWN_ISSUES.md).  This writes a v2 bank that
+{795, 747, 105, 860, 2} (docs/EXPERIMENT_LOG.md).  This writes a v2 bank that
 keeps selection/confirmation/stress UNCHANGED (so historical run manifests
 stay valid) and replaces the test split with 100 clean, tier-balanced seeds
 drawn from the bank's own seed_metadata (the original sampled geometries),

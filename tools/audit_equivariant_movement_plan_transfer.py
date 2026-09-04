@@ -10,7 +10,6 @@ from pathlib import Path
 import sys
 
 import numpy as np
-import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,6 +25,7 @@ from tools.train_equivariant_movement_plan import (  # noqa: E402
 from uav_isac.agents.equivariant_movement_plan import (  # noqa: E402
     FrozenEquivariantMovementPlanner,
 )
+from uav_isac.utils.checkpoint_loading import safe_torch_load  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -57,11 +57,14 @@ def audit(
     frames = np.asarray(data["frame"], dtype=np.int64)
     seed_order = _ordered_unique(seeds)
 
-    try:
-        payload = torch.load(
-            checkpoint_path, map_location="cpu", weights_only=True)
-    except TypeError:
-        payload = torch.load(checkpoint_path, map_location="cpu")
+    payload = safe_torch_load(
+        checkpoint_path,
+        map_location="cpu",
+        description="equivariant movement-plan audit checkpoint",
+        required_keys=("hidden_dim",),
+        mapping_keys=("metadata",),
+        state_dict_keys=("model_state_dict",),
+    )
     metadata = payload["metadata"]
     domain_key = f"k{num_uavs}q{num_targets}"
     development_keys = set(

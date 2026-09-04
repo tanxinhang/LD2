@@ -28,8 +28,9 @@ def test_every_target_gets_one_tx_and_one_rx():
     K, Q = 12, 12
     nodes, targets = _random_geometry(7, K, Q)
     roles = np.arange(K) % 2 == 0
-    tx, rx, _cost = role_capacity_bottleneck_assignment(
+    tx, rx, _cost, feasible = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=2)
+    assert feasible
     np.testing.assert_array_equal(tx.sum(axis=0), np.ones(Q, dtype=np.int8))
     np.testing.assert_array_equal(rx.sum(axis=0), np.ones(Q, dtype=np.int8))
 
@@ -38,8 +39,9 @@ def test_per_node_capacity_is_respected():
     K, Q = 12, 12
     nodes, targets = _random_geometry(11, K, Q)
     roles = np.arange(K) % 2 == 0
-    tx, rx, _cost = role_capacity_bottleneck_assignment(
+    tx, rx, _cost, feasible = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=2)
+    assert feasible
     assert int(tx.sum(axis=1).max()) <= 2
     assert int(rx.sum(axis=1).max()) <= 2
     # With K == Q and a 6/6 role split every node serves exactly two targets.
@@ -53,8 +55,9 @@ def test_role_exclusivity():
     K, Q = 12, 12
     nodes, targets = _random_geometry(3, K, Q)
     roles = np.arange(K) % 2 == 0
-    tx, rx, _cost = role_capacity_bottleneck_assignment(
+    tx, rx, _cost, feasible = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=2)
+    assert feasible
     assert not tx[~roles].any()
     assert not rx[roles].any()
 
@@ -63,10 +66,11 @@ def test_deterministic_reconstruction():
     K, Q = 12, 12
     nodes, targets = _random_geometry(42, K, Q)
     roles = np.arange(K) % 2 == 0
-    tx_a, rx_a, cost_a = role_capacity_bottleneck_assignment(
+    tx_a, rx_a, cost_a, feasible_a = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=2)
-    tx_b, rx_b, cost_b = role_capacity_bottleneck_assignment(
+    tx_b, rx_b, cost_b, feasible_b = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=2)
+    assert feasible_a and feasible_b
     assert np.array_equal(tx_a, tx_b)
     assert np.array_equal(rx_a, rx_b)
     assert cost_a == cost_b
@@ -76,12 +80,26 @@ def test_asymmetric_roles_capacity_tuple():
     K, Q = 10, 12
     nodes, targets = _random_geometry(5, K, Q)
     roles = np.arange(K) % 2 == 0  # 5 Tx / 5 Rx, capacity 3 each
-    tx, rx, _cost = role_capacity_bottleneck_assignment(
+    tx, rx, _cost, feasible = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=20.0, capacity=(3, 3))
+    assert feasible
     np.testing.assert_array_equal(tx.sum(axis=0), np.ones(Q, dtype=np.int8))
     np.testing.assert_array_equal(rx.sum(axis=0), np.ones(Q, dtype=np.int8))
     assert int(tx.sum(axis=1).max()) <= 3
     assert int(rx.sum(axis=1).max()) <= 3
+
+
+def test_insufficient_role_capacity_returns_explicit_infeasible_result():
+    nodes, targets = _random_geometry(17, 4, 5, area=400.0)
+    roles = np.asarray([True, True, False, False])
+
+    tx, rx, cost, feasible = role_capacity_bottleneck_assignment(
+        nodes, targets, roles, height_m=20.0, capacity=2)
+
+    assert feasible is False
+    assert np.isinf(cost)
+    assert not tx.any()
+    assert not rx.any()
 
 
 def test_bottleneck_optimality_small_case():
@@ -93,8 +111,9 @@ def test_bottleneck_optimality_small_case():
     """
     nodes, targets = _random_geometry(99, 4, 4, area=400.0)
     roles = np.array([True, False, True, False])
-    tx, rx, cost = role_capacity_bottleneck_assignment(
+    tx, rx, cost, feasible = role_capacity_bottleneck_assignment(
         nodes, targets, roles, height_m=10.0, capacity=2)
+    assert feasible
     height = 10.0
     range_sq = height * height + np.sum(
         (nodes[:, None, :] - targets[None, :, :]) ** 2, axis=-1)

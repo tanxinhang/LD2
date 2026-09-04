@@ -6,5 +6,3 @@
 # only with a substantial improvement (churn guard), else No-op -- so
 # already-good frames are untouched (no-regression by construction).
 extends: exp_800_k8q8_analytical_l0l1_movement_lex_candidates_blind_lookahead40_indep.yaml
-
-marl:

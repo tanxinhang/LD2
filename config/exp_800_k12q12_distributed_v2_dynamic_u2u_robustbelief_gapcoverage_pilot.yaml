@@ -1,10 +1,12 @@
 # Gap-coverage movement pilot (three-phase policy, Phase A + B safety net).
 #
-# Coverage invariant C1: every target must have a Tx and an Rx endpoint
-# within the critical radius (320 m ~ P_D>=0.6 operational radius).  The
+# Geometric objective: every target should have a Tx and an Rx endpoint
+# within the 320 m geometric design radius.  This radius is not itself a P_D
+# guarantee: power, DD support, fusion and both endpoint ranges still enter
+# the detector.  The
 # deterministic gap-coverage assignment gives every uncovered target a Tx/Rx
-# responsibility, re-evaluated every frame so a target leaving the critical
-# radius is re-covered immediately (fixes the missed-target root cause found
+# responsibility, re-evaluated every frame so recovery pursuit starts
+# immediately when a target leaves the radius (fixes the missed-target root cause found
 # by the deep audit).  Each node pursues the responsibility with the largest
 # remaining gap at full speed (fast far-field convergence); standoff clamps
 # the approach (safety invariant S1).

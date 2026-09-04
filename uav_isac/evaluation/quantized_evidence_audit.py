@@ -13,6 +13,7 @@ from uav_isac.physical.evidence import (
 )
 from uav_isac.environment.communication import InterUAVCommunicationModel
 from uav_isac.utils.math_utils import compute_PD
+from uav_isac.utils.sentinels import OWNER_INDEX_NONE
 
 
 def _apply_content_control(
@@ -59,7 +60,7 @@ def evidence_inclusion(
     owner = np.asarray(fusion_owner, dtype=np.int64)
     if owner.shape != (frames, targets):
         raise ValueError("fusion_owner must have shape (F, Q)")
-    if np.any((owner < -1) | (owner >= agents)):
+    if np.any((owner < OWNER_INDEX_NONE) | (owner >= agents)):
         raise ValueError("fusion_owner contains an invalid receiver index")
     owned = owner >= 0
     owner_mask = np.zeros(

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import itertools
+import threading
 from typing import Optional, Tuple
 
 
@@ -63,12 +64,148 @@ def exact_permutation_assignment(
     return hard_assignment + soft_assignment - soft_assignment.detach()
 
 
+def _solve_capacity_duals_bisection(
+    scaled: torch.Tensor,
+    row_capacity: float,
+    column_capacity: float,
+    iterations: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Solve the bounded transport dual with the canonical fixed iteration."""
+    row_dual = torch.zeros_like(scaled[:, :, :1])
+    column_dual = torch.zeros_like(scaled[:, :1, :])
+
+    def solve_dual(
+        fixed: torch.Tensor,
+        target: float,
+        reduce_dim: int,
+        template: torch.Tensor,
+    ) -> torch.Tensor:
+        # Monotone bisection is deliberately used instead of an unconstrained
+        # Newton update: sparse top-k claims can saturate sigmoid derivatives
+        # and make a Newton step jump to the wrong boundary.
+        lower = torch.full_like(template, -60.0)
+        upper = torch.full_like(template, 60.0)
+        for _ in range(16):
+            midpoint = 0.5 * (lower + upper)
+            load = torch.sigmoid(fixed + midpoint).sum(
+                dim=reduce_dim, keepdim=True)
+            below = load < target
+            lower = torch.where(below, midpoint, lower)
+            upper = torch.where(below, upper, midpoint)
+        return 0.5 * (lower + upper)
+
+    for _ in range(max(int(iterations), 1)):
+        row_dual = solve_dual(
+            scaled + column_dual,
+            row_capacity,
+            -1,
+            row_dual,
+        )
+        column_dual = solve_dual(
+            scaled + row_dual,
+            column_capacity,
+            -2,
+            column_dual,
+        )
+    return row_dual, column_dual
+
+
+class _CapacityDualCudaGraph:
+    """Static-buffer CUDA graph for one small dual-projection shape."""
+
+    def __init__(
+        self,
+        example: torch.Tensor,
+        row_capacity: float,
+        column_capacity: float,
+        iterations: int,
+    ) -> None:
+        self._input = torch.empty_like(example)
+        self._graph = torch.cuda.CUDAGraph()
+        self._lock = threading.Lock()
+        warm_stream = torch.cuda.Stream(device=example.device)
+        current_stream = torch.cuda.current_stream(example.device)
+        warm_stream.wait_stream(current_stream)
+        with torch.cuda.stream(warm_stream):
+            for _ in range(2):
+                _solve_capacity_duals_bisection(
+                    self._input,
+                    row_capacity,
+                    column_capacity,
+                    iterations,
+                )
+        current_stream.wait_stream(warm_stream)
+        with torch.cuda.graph(self._graph):
+            self._row_dual, self._column_dual = (
+                _solve_capacity_duals_bisection(
+                    self._input,
+                    row_capacity,
+                    column_capacity,
+                    iterations,
+                )
+            )
+
+    def solve(
+        self,
+        scaled: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Clone before returning so a later replay cannot overwrite constants
+        # saved by autograd for the current forward pass. Commands for a given
+        # stream are enqueued under one lock and therefore retain this order.
+        with self._lock:
+            self._input.copy_(scaled)
+            self._graph.replay()
+            return self._row_dual.clone(), self._column_dual.clone()
+
+
+_CAPACITY_DUAL_GRAPH_CACHE: dict[tuple, _CapacityDualCudaGraph | None] = {}
+_CAPACITY_DUAL_GRAPH_CACHE_LOCK = threading.Lock()
+_CAPACITY_DUAL_GRAPH_CACHE_LIMIT = 16
+
+
+def _cuda_graph_capacity_duals(
+    scaled: torch.Tensor,
+    row_capacity: float,
+    column_capacity: float,
+    iterations: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Return graph-replayed duals, or ``None`` for a fail-safe fallback."""
+    stream = torch.cuda.current_stream(scaled.device)
+    key = (
+        int(scaled.device.index or 0),
+        str(scaled.dtype),
+        tuple(int(value) for value in scaled.shape),
+        float(row_capacity),
+        float(column_capacity),
+        int(iterations),
+        int(stream.cuda_stream),
+    )
+    with _CAPACITY_DUAL_GRAPH_CACHE_LOCK:
+        if key not in _CAPACITY_DUAL_GRAPH_CACHE:
+            if len(_CAPACITY_DUAL_GRAPH_CACHE) >= _CAPACITY_DUAL_GRAPH_CACHE_LIMIT:
+                return None
+            try:
+                _CAPACITY_DUAL_GRAPH_CACHE[key] = _CapacityDualCudaGraph(
+                    scaled,
+                    row_capacity,
+                    column_capacity,
+                    iterations,
+                )
+            except RuntimeError:
+                # CUDA graph support depends on the surrounding execution
+                # context. Remember failure and preserve the original path.
+                _CAPACITY_DUAL_GRAPH_CACHE[key] = None
+        graph = _CAPACITY_DUAL_GRAPH_CACHE[key]
+    return None if graph is None else graph.solve(scaled)
+
+
 def capacity_sinkhorn_normalize(
     logits: torch.Tensor,
     row_capacity: float,
     column_capacity: float,
     iterations: int = 32,
     temperature: float = 0.35,
+    use_cuda_graph: Optional[bool] = None,
 ) -> torch.Tensor:
     """Project team bids onto a soft capacitated bipartite matching.
 
@@ -99,48 +236,37 @@ def capacity_sinkhorn_normalize(
     # (0, 1).
     scaled = torch.clamp(
         logits / max(float(temperature), 1e-4), -30.0, 30.0)
-    row_dual = torch.zeros_like(scaled[:, :, :1])
-    column_dual = torch.zeros_like(scaled[:, :1, :])
-
-    def solve_dual(
-        fixed: torch.Tensor,
-        target: float,
-        reduce_dim: int,
-        template: torch.Tensor,
-    ) -> torch.Tensor:
-        # Monotone bisection is deliberately used instead of an unconstrained
-        # Newton update: sparse top-k claims can saturate sigmoid derivatives
-        # and make a Newton step jump to the wrong boundary.
-        lower = torch.full_like(template, -60.0)
-        upper = torch.full_like(template, 60.0)
-        for _ in range(16):
-            midpoint = 0.5 * (lower + upper)
-            load = torch.sigmoid(fixed + midpoint).sum(
-                dim=reduce_dim, keepdim=True)
-            below = load < target
-            lower = torch.where(below, midpoint, lower)
-            upper = torch.where(below, upper, midpoint)
-        return 0.5 * (lower + upper)
-
     # The dual variables only enforce feasibility; treating their numerical
     # solve as a stop-gradient operation avoids backpropagating through hundreds
     # of bisection kernels.  The final logistic edge probabilities still carry
     # direct gradients to every bid logit (a straight-through dual projection).
     with torch.no_grad():
         detached_scaled = scaled.detach()
-        for _ in range(max(int(iterations), 1)):
-            row_dual = solve_dual(
-                detached_scaled + column_dual,
+        graph_allowed = bool(
+            scaled.is_cuda
+            and scaled.dtype == torch.float32
+            and scaled.numel() <= 4096
+            and not torch.cuda.is_current_stream_capturing()
+            and use_cuda_graph is not False
+        )
+        graph_duals = (
+            _cuda_graph_capacity_duals(
+                detached_scaled,
                 row_capacity,
-                -1,
-                row_dual,
-            )
-            column_dual = solve_dual(
-                detached_scaled + row_dual,
                 column_capacity,
-                -2,
-                column_dual,
+                iterations,
             )
+            if graph_allowed else None
+        )
+        if graph_duals is None:
+            row_dual, column_dual = _solve_capacity_duals_bisection(
+                detached_scaled,
+                row_capacity,
+                column_capacity,
+                iterations,
+            )
+        else:
+            row_dual, column_dual = graph_duals
     return torch.sigmoid(scaled + row_dual + column_dual)
 
 
@@ -2595,6 +2721,42 @@ class CriticNetwork(nn.Module):
         ], dim=-1)
         return scalar_v, credit_v
 
+    def forward_with_auxiliaries(
+        self,
+        state: torch.Tensor,
+        *,
+        include_credit: bool = False,
+    ):
+        """Return scalar, optional credit, and target values from one encoding.
+
+        All value heads are deterministic readouts of the same critic feature.
+        Evaluating that feature once is therefore algebraically identical to
+        calling ``forward``/``forward_with_credit`` and
+        ``forward_with_targets`` separately, while removing a duplicate shared
+        trunk pass from every rollout step.
+        """
+        if self.equivariant_value_critic_enabled:
+            feature, target_feature = (
+                self._forward_equivariant_value_features(state))
+            target_value = self.target_value_head(
+                target_feature).squeeze(-1)
+        else:
+            feature = self.shared(state)
+            target_value = None
+            if self.target_heads is not None:
+                target_value = torch.stack([
+                    head(feature).squeeze(-1)
+                    for head in self.target_heads
+                ], dim=-1)
+        scalar_value = self.value_head(feature).squeeze(-1)
+        credit_value = None
+        if include_credit:
+            credit_value = torch.stack([
+                head(feature).squeeze(-1)
+                for head in self.credit_heads
+            ], dim=-1)
+        return scalar_value, credit_value, target_value
+
     def forward_risk(self, state: torch.Tensor):
         """Return per-target next-P_D quantiles and QoS-violation logits.
 
@@ -2670,5 +2832,3 @@ class CriticNetwork(nn.Module):
             1, int(np.ceil(self.risk_cvar_alpha * self.risk_num_quantiles)))
         ordered = torch.sort(quantiles, dim=-1).values
         return ordered[..., :tail_count].mean(dim=-1)
-
-

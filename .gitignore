@@ -25,3 +25,21 @@ results/full_eh/
 # Generated checkpoints, logs, and experiment outputs.
 # Reproducible configurations and result summaries live in config/ and docs/.
 results/
+
+# Agent/tooling local scratch (not project source). Added 2026-09-04 to stop a
+# blind `git add -A` from staging 1.4+ GB of artifact data under these dirs.
+.arts/
+.codegraph/
+.workbuddy/
+.agents/
+.claude/
+.codeartsdoer/
+
+# Root-level audit/probe scratch scripts and logs (see DEEP_AUDIT 2026-09-04 N2).
+/_*.log
+/_*.py
+
+# Editor temp/backup files (e.g. tools/assert_gate_thresholds.py~RF54ad2463.TMP).
+*.TMP
+*~
+

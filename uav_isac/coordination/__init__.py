@@ -13,6 +13,7 @@ docs/ARCHITECTURE_V2_RESULTS.md and docs/CURRENT_SYSTEM_MODEL.md.
 # Deployment-path power allocation (L1): fixed-structure max-min sensing-power
 # LP used by env_core.step().
 from uav_isac.coordination.maxmin_power import (
+    NonUniqueFixedOwnerStructureError,
     solve_fixed_structure_maxmin_power_lp,
 )
 
@@ -40,6 +41,7 @@ from uav_isac.coordination.local_exchange_oracle import (
 )
 
 __all__ = [
+    "NonUniqueFixedOwnerStructureError",
     "solve_fixed_structure_maxmin_power_lp",
     "plan_local_hyperedges",
     "update_virtual_queue",

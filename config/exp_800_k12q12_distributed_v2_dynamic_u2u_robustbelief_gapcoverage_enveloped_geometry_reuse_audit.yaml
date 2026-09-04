@@ -1,0 +1,6 @@
+# Exact fixed-geometry deflection reuse candidate. Valid only when report-link
+# and Swerling draws are disabled; runtime falls back otherwise.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  analytical_power_geometry_reuse_enabled: true

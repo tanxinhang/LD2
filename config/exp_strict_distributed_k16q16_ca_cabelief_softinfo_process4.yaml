@@ -1,0 +1,8 @@
+# Development-only physical-closure candidate.  It keeps the v5 CA6 control,
+# communication and power policy unchanged, but couples realized P_D to the
+# tracker through expected Fisher information R_eff=R/P_D.
+extends: exp_strict_distributed_k16q16_ca_cabelief_process4.yaml
+
+marl:
+  belief_expected_detection_information_enabled: true
+  belief_expected_detection_information_floor: 0.001

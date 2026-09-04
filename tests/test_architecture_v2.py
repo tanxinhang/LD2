@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
+from uav_isac.agents.neighbor_attention import MultiHeadNeighborAttention
 from uav_isac.agents.networks import CriticNetwork, StructuredActorNetwork
 from uav_isac.environment.observation_slices import ObservationSlices
+
+
+@pytest.mark.parametrize(
+    ("dimension", "heads"),
+    [(0, 1), (8, 0), (10, 4), (True, 1), (8, False)],
+)
+def test_neighbor_attention_rejects_invalid_head_geometry(dimension, heads):
+    with pytest.raises(ValueError, match="positive integers"):
+        MultiHeadNeighborAttention(D=dimension, num_heads=heads)
 
 
 def _actor(

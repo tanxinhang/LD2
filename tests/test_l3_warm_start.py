@@ -82,6 +82,66 @@ def test_warm_start_preserves_feasibility_and_budget():
     env.close()
 
 
+def test_warm_start_physics_failure_is_not_silently_disabled(monkeypatch):
+    env = _env(503)
+    env.reset()
+
+    def fail_compute(*args, **kwargs):
+        raise FloatingPointError("synthetic physical kernel failure")
+
+    monkeypatch.setattr(env.core.deflection_computer, "compute", fail_compute)
+    with pytest.raises(
+        RuntimeError,
+        match="failed to construct the frame-0 analytical state",
+    ) as captured:
+        env.core._initial_analytical_state()
+    assert isinstance(captured.value.__cause__, FloatingPointError)
+    env.close()
+
+
+def test_analytical_movement_rejects_corrupt_fixed_owner_state(monkeypatch):
+    env = _env(503)
+    env.reset()
+    env.core._initial_analytical_state()
+
+    def fail_owner_matrix(*args, **kwargs):
+        raise ValueError("synthetic non-finite coefficient")
+
+    monkeypatch.setattr(
+        "uav_isac.environment.env_core.fixed_owner_gain_matrix",
+        fail_owner_matrix,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="invalid fixed-owner state for analytical movement",
+    ) as captured:
+        env.core._analytical_movement_delta()
+    assert isinstance(captured.value.__cause__, ValueError)
+    env.close()
+
+
+def test_analytical_movement_does_not_hide_invalid_maxmin_trigger(monkeypatch):
+    env = _env(503)
+    env.reset()
+    env.core._initial_analytical_state()
+
+    def fail_solver(*args, **kwargs):
+        raise ValueError("synthetic invalid LP input")
+
+    monkeypatch.setattr(
+        "uav_isac.coordination.maxmin_power."
+        "solve_fixed_structure_maxmin_power_lp",
+        fail_solver,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="invalid max-min trigger inputs for analytical movement",
+    ) as captured:
+        env.core._analytical_movement_delta()
+    assert isinstance(captured.value.__cause__, ValueError)
+    env.close()
+
+
 def test_warm_start_speeds_up_early_convergence():
     # With the warm start, frame 1's worst should be no worse than the old
     # frame-0-wasted trajectory's frame 1 (i.e. the warm start never hurts).

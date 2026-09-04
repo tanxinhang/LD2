@@ -1,0 +1,14 @@
+# Pre-CRC10 protocol control retained after the audited codec is promoted.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  hyperedge_protocol_header_bits: 16
+  hyperedge_state_field_bits: []
+  hyperedge_state_codec_service_envelope_enabled: false
+  hyperedge_state_codec_service_reference_header_bits: 0
+  evidence_fixed_schema_header_bits: 0
+  evidence_timestamp_bits: 16
+  evidence_legacy_service_envelope_enabled: false
+  evidence_legacy_service_aoi_bits: 8
+  u2u_belief_feedback_aoi_bits: 8
+  comm_undetected_error_probability_max: 1.0e-7

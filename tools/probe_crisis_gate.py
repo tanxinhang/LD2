@@ -6,14 +6,25 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 import torch
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from uav_isac.utils.checkpoint_loading import safe_torch_load  # noqa: E402
+
 
 def load_decoder(checkpoint_path: str):
-    checkpoint = torch.load(
-        checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = safe_torch_load(
+        checkpoint_path,
+        map_location="cpu",
+        description="crisis-gate semantic decoder checkpoint",
+        state_dict_keys=("actor",),
+    )
     state = checkpoint["actor"]
     decoder = torch.nn.Sequential(
         torch.nn.Linear(15, 32), torch.nn.ReLU(),

@@ -1,0 +1,10 @@
+# Historical C6 isolation probe (2026-08-26, round 6).  The canonical pilot now
+# also keeps the uncertified learned-token C6 chain OFF, so this file is retained
+# only to reproduce the old isolation setup and no longer defines a distinct
+# current-system case.
+extends: exp_strict_distributed_no_truth_pilot.yaml
+
+marl:
+  distributed_decision_sufficient_comm_enabled: false
+  distributed_decision_sufficient_event_trigger_enabled: false
+  distributed_decision_sufficient_adaptive_bits_enabled: false

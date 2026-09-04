@@ -92,18 +92,28 @@ def minimum_blocklength_normal_approximation(
     achievable_information_bits(snr_linear, 1, target_bler)
     if float(snr_linear) <= 0.0:
         return None
+    # The achievable-bit formula is ``n*C - sqrt(n*V)*Qinv``.  For a fixed SNR
+    # the capacity C, dispersion V and inverse-Q term Qinv are constants, so
+    # precompute them once and evaluate only the n-dependent part inside the
+    # doubling + binary search (avoids re-running log2 / ndtri every step).
+    capacity = awgn_capacity_bits_per_use(snr_linear)
+    dispersion = awgn_dispersion_bits2_per_use(snr_linear)
+    q_inverse = float(-ndtri(float(target_bler)))
+
+    def achievable_bits(n: int) -> float:
+        return max(
+            0.0,
+            float(n) * capacity - math.sqrt(float(n) * dispersion) * q_inverse)
+
     high = 1
-    while high < maximum and achievable_information_bits(
-            snr_linear, high, target_bler) + 1.0e-12 < bits:
+    while high < maximum and achievable_bits(high) + 1.0e-12 < bits:
         high = min(maximum, 2 * high)
-    if achievable_information_bits(
-            snr_linear, high, target_bler) + 1.0e-12 < bits:
+    if achievable_bits(high) + 1.0e-12 < bits:
         return None
     low = 1
     while low < high:
         middle = (low + high) // 2
-        if achievable_information_bits(
-                snr_linear, middle, target_bler) + 1.0e-12 >= bits:
+        if achievable_bits(middle) + 1.0e-12 >= bits:
             high = middle
         else:
             low = middle + 1

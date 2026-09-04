@@ -1,0 +1,11 @@
+# Development-only paired candidate: the fixed discrete sensing structure is
+# unchanged, while every node's private power LP uses its own covariance-set
+# lower gain rather than its point reconstruction.  The 3-sigma set and all
+# posterior/control payloads are inherited and physically billed.
+extends: exp_strict_distributed_k16q16_ca_cabelief_process4.yaml
+
+marl:
+  # Development screening value.  rho=1 (full 3-sigma robust control) failed
+  # the 7/19/43 gate; rho=0.25 tests a softer coherent-risk preference while
+  # the reported composable certificate remains the full 3-sigma lower bound.
+  distributed_replicated_power_robust_gain_mix: 0.25

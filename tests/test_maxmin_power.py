@@ -2,11 +2,13 @@ import numpy as np
 import pytest
 
 from uav_isac.coordination.maxmin_power import (
+    NonUniqueFixedOwnerStructureError,
     blend_row_feasible_power_with_inertia,
     distributed_column_generation_maxmin_power,
     distributed_dual_maxmin_power,
     fixed_owner_gain_matrix,
     local_transmitter_range_minimax_share,
+    optimal_maxmin_dual_prices,
     relaxed_same_geometry_target_ceiling,
     replicated_local_row_maxmin_power,
     solve_fixed_structure_maxmin_power_lp,
@@ -62,12 +64,148 @@ def test_exact_lp_recovers_analytic_single_transmitter_split():
     np.testing.assert_allclose(result.deflection, [2.0 / 3.0, 2.0 / 3.0], atol=1e-8)
 
 
+@pytest.mark.parametrize("scale", [1.0e-12, 1.0, 1.0e12])
+def test_exact_lp_is_invariant_to_global_physical_gain_scale(scale):
+    gain = float(scale) * np.asarray([[1.0, 1000.0]])
+
+    result = solve_fixed_structure_maxmin_power_lp(
+        gain, np.asarray([1.0]))
+
+    expected = np.asarray([[1000.0 / 1001.0, 1.0 / 1001.0]])
+    np.testing.assert_allclose(result.power_w, expected, rtol=1.0e-10)
+    np.testing.assert_allclose(
+        result.deflection,
+        np.full(2, float(scale) * 1000.0 / 1001.0),
+        rtol=1.0e-10,
+        atol=float(scale) * 1.0e-12,
+    )
+    np.testing.assert_allclose(
+        result.prices, expected[0], rtol=1.0e-10)
+    assert result.dual_upper_bound == pytest.approx(
+        result.worst_deflection, rel=1.0e-10,
+        abs=float(scale) * 1.0e-12)
+
+
+@pytest.mark.parametrize("strong_gain", [1.0e7, 1.0e9])
+def test_exact_lp_preserves_weak_target_across_extreme_gain_range(strong_gain):
+    gain = np.asarray([[strong_gain, 1.0]])
+    budget = np.asarray([1.0])
+
+    result = solve_fixed_structure_maxmin_power_lp(gain, budget)
+    prices, dual_value = optimal_maxmin_dual_prices(gain, budget)
+
+    expected_worst = strong_gain / (strong_gain + 1.0)
+    expected_power = np.asarray([
+        [1.0 / (strong_gain + 1.0), expected_worst]
+    ])
+    np.testing.assert_allclose(result.power_w, expected_power, rtol=1.0e-10)
+    np.testing.assert_allclose(
+        result.deflection, np.full(2, expected_worst), rtol=1.0e-10)
+    assert result.worst_deflection == pytest.approx(
+        expected_worst, rel=1.0e-10)
+    np.testing.assert_allclose(prices, expected_power[0], rtol=1.0e-10)
+    assert dual_value == pytest.approx(expected_worst, rel=1.0e-10)
+
+
+def test_exact_lp_handles_extreme_multitransmitter_range_without_budget_error():
+    gain = np.asarray([
+        [751595.6985, 80519.9587],
+        [3.21e-9, 1.94e-7],
+    ])
+    budget = np.asarray([0.218, 0.240])
+
+    result = solve_fixed_structure_maxmin_power_lp(gain, budget)
+
+    row_two_target_two = budget[1] * gain[1, 1]
+    expected_first_power = (
+        gain[0, 1] * budget[0] + row_two_target_two
+    ) / (gain[0, 0] + gain[0, 1])
+    expected_worst = gain[0, 0] * expected_first_power
+    assert np.all(result.power_w >= 0.0)
+    np.testing.assert_allclose(
+        np.sum(result.power_w, axis=1), budget, atol=1.0e-12)
+    assert result.worst_deflection == pytest.approx(
+        expected_worst, rel=1.0e-10)
+    assert result.dual_upper_bound == pytest.approx(
+        expected_worst, rel=1.0e-10)
+
+
+def test_exact_lp_uses_finite_reachable_scale_not_cross_product_overflow():
+    # max(gain) * sum(budget) overflows, but every physically reachable
+    # gain*own-budget product and target ceiling is finite (11 per target).
+    gain = np.asarray([
+        [1.0e308, 1.0e308],
+        [1.0, 1.0],
+    ])
+    budget = np.asarray([1.0e-308, 10.0])
+
+    result = solve_fixed_structure_maxmin_power_lp(gain, budget)
+
+    assert np.all(np.isfinite(result.deflection))
+    np.testing.assert_allclose(result.deflection, [5.5, 5.5], rtol=1.0e-10)
+    assert result.worst_deflection == pytest.approx(5.5, rel=1.0e-10)
+    assert result.dual_upper_bound == pytest.approx(5.5, rel=1.0e-10)
+    np.testing.assert_allclose(
+        np.sum(result.power_w, axis=1), budget, rtol=1.0e-10)
+
+
+def test_optimal_dual_solver_failure_is_not_reported_as_zero(monkeypatch):
+    class FailedSolve:
+        success = False
+        x = None
+        message = "synthetic numerical failure"
+
+    monkeypatch.setattr(
+        "uav_isac.coordination.maxmin_power.linprog",
+        lambda *args, **kwargs: FailedSolve(),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic numerical failure"):
+        optimal_maxmin_dual_prices(
+            np.asarray([[2.0, 1.0]]), np.asarray([1.0]))
+
+
+@pytest.mark.parametrize("scale", [1.0e-12, 1.0, 1.0e12])
+def test_exact_lp_scales_reserve_constraints_with_physical_gain(scale):
+    gain = float(scale) * np.asarray([
+        [2.0, 0.4],
+        [0.3, 1.5],
+    ])
+    budget = np.asarray([0.8, 0.7])
+    reserve = float(scale) * np.asarray([0.25, 0.35])
+
+    result = solve_fixed_structure_maxmin_power_lp(
+        gain, budget, minimum_deflection=reserve)
+
+    assert result.reserve_feasible
+    assert np.all(result.deflection >= reserve - float(scale) * 1.0e-9)
+    np.testing.assert_allclose(
+        np.sum(result.power_w, axis=1), budget, atol=1.0e-10)
+
+
 def test_exact_lp_preserves_every_uav_power_equality():
     gain = np.asarray([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
     budget = np.asarray([0.7, 0.8, 0.9])
     result = solve_fixed_structure_maxmin_power_lp(gain, budget)
     np.testing.assert_allclose(np.sum(result.power_w, axis=1), budget, atol=1e-10)
     assert result.worst_deflection == pytest.approx(0.7)
+
+
+def test_exact_lp_returns_simplex_prices_that_certify_full_dual_value():
+    gain = np.asarray([
+        [2.0, 0.4, 0.2],
+        [0.3, 1.5, 0.8],
+        [0.2, 0.5, 1.8],
+    ])
+    budget = np.asarray([0.8, 0.7, 0.9])
+    result = solve_fixed_structure_maxmin_power_lp(gain, budget)
+
+    np.testing.assert_allclose(np.sum(result.prices), 1.0, atol=1.0e-10)
+    assert np.all(result.prices >= 0.0)
+    lifted_upper = float(np.sum(
+        budget * np.max(result.prices[None, :] * gain, axis=1)))
+    assert lifted_upper == pytest.approx(
+        result.worst_deflection, rel=1.0e-8, abs=1.0e-10)
 
 
 def test_replicated_local_rows_equal_exact_lp_under_common_view():
@@ -83,6 +221,7 @@ def test_replicated_local_rows_equal_exact_lp_under_common_view():
     result = replicated_local_row_maxmin_power(views, budget)
 
     assert result.common_view
+    assert result.unique_local_problem_count == 1
     assert np.all(result.local_full_coverage)
     np.testing.assert_allclose(result.power_w, exact.power_w, atol=1.0e-10)
     np.testing.assert_allclose(
@@ -90,6 +229,51 @@ def test_replicated_local_rows_equal_exact_lp_under_common_view():
         np.full(3, exact.worst_deflection),
         atol=1.0e-10,
     )
+
+
+def test_history_reserve_has_feasible_witness_and_preserves_local_worst():
+    old_gain = np.asarray([
+        [2.0, 0.4, 0.2],
+        [0.3, 1.5, 0.8],
+        [0.2, 0.5, 1.8],
+    ])
+    new_gain = np.asarray([
+        [1.8, 0.6, 0.25],
+        [0.45, 1.3, 0.9],
+        [0.3, 0.55, 1.6],
+    ])
+    budget = np.asarray([0.8, 0.7, 0.9])
+    old_views = np.repeat(old_gain[None, :, :], 3, axis=0)
+    new_views = np.repeat(new_gain[None, :, :], 3, axis=0)
+    initial = replicated_local_row_maxmin_power(old_views, budget)
+
+    result = replicated_local_row_maxmin_power(
+        new_views,
+        budget,
+        previous_local_power_w=initial.local_full_power_w,
+        previous_local_prices=initial.local_prices,
+        previous_local_cache_valid=initial.local_cache_valid,
+        history_reserve_deflection_cap=0.8,
+    )
+
+    assert result.history_reserve_used_fraction == 1.0
+    for viewer in range(3):
+        held = initial.local_full_power_w[viewer]
+        held_deflection = np.sum(new_gain * held, axis=0)
+        reserve = np.minimum(held_deflection, 0.8)
+        achieved = np.sum(
+            new_gain * result.local_full_power_w[viewer], axis=0)
+        np.testing.assert_array_less(reserve - 1.0e-10, achieved)
+        assert np.min(achieved) + 1.0e-10 >= np.min(held_deflection)
+
+
+def test_history_reserve_rejects_non_positive_cap():
+    with pytest.raises(ValueError, match="finite and positive"):
+        replicated_local_row_maxmin_power(
+            np.ones((1, 1, 2)),
+            np.ones(1),
+            history_reserve_deflection_cap=0.0,
+        )
 
 
 def test_replicated_local_rows_remain_budget_feasible_with_cache_loss():
@@ -108,9 +292,65 @@ def test_replicated_local_rows_remain_budget_feasible_with_cache_loss():
         views, public_budget, executed_budget)
 
     assert not result.common_view
+    assert result.unique_local_problem_count == 3
     assert np.all(result.power_w >= 0.0)
     np.testing.assert_allclose(
         np.sum(result.power_w, axis=1), executed_budget, atol=1.0e-12)
+
+
+def test_replicated_local_power_reuses_only_each_valid_private_certificate():
+    gain = np.asarray([
+        [2.0, 0.4],
+        [0.3, 1.5],
+    ])
+    budget = np.asarray([0.8, 0.7])
+    initial_views = np.repeat(gain[None, :, :], 2, axis=0)
+    initial = replicated_local_row_maxmin_power(initial_views, budget)
+    assert np.all(initial.local_resolved)
+    assert np.all(initial.local_cache_valid)
+
+    changed_views = initial_views.copy()
+    changed_views[1] = np.asarray([
+        [0.05, 4.0],
+        [3.5, 0.05],
+    ])
+    updated = replicated_local_row_maxmin_power(
+        changed_views,
+        budget,
+        previous_local_power_w=initial.local_full_power_w,
+        previous_local_prices=initial.local_prices,
+        previous_local_cache_valid=initial.local_cache_valid,
+        reuse_relative_tolerance=0.01,
+    )
+
+    assert updated.local_resolved.tolist() == [False, True]
+    assert updated.local_relative_gap[0] <= 0.01
+    np.testing.assert_allclose(
+        np.sum(updated.power_w, axis=1), budget, atol=1.0e-12)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_replicated_private_reuse_respects_relative_optimality_certificate(seed):
+    rng = np.random.default_rng(seed)
+    K, Q = 3, 3
+    old_views = rng.uniform(0.1, 2.0, size=(K, K, Q))
+    new_views = old_views * rng.uniform(0.97, 1.03, size=(K, K, Q))
+    budget = rng.uniform(0.4, 1.0, size=K)
+    initial = replicated_local_row_maxmin_power(old_views, budget)
+    updated = replicated_local_row_maxmin_power(
+        new_views,
+        budget,
+        previous_local_power_w=initial.local_full_power_w,
+        previous_local_prices=initial.local_prices,
+        previous_local_cache_valid=initial.local_cache_valid,
+        reuse_relative_tolerance=0.05,
+    )
+
+    for viewer in range(K):
+        exact = solve_fixed_structure_maxmin_power_lp(
+            new_views[viewer], budget)
+        assert updated.local_worst_deflection[viewer] + 1.0e-10 >= (
+            0.95 * exact.worst_deflection)
 
 
 def test_replicated_local_rows_use_uniform_cold_start_not_argmax():
@@ -406,7 +646,9 @@ def test_column_generation_rejects_undefined_feedback_codec():
 
 def test_fixed_owner_gain_rejects_multiple_receivers():
     coefficient = np.ones((3, 3, 1), dtype=np.float64)
-    with pytest.raises(ValueError, match="one receiver"):
+    with pytest.raises(
+        NonUniqueFixedOwnerStructureError, match="one receiver"
+    ):
         fixed_owner_gain_matrix(
             coefficient, [(0, 1, 0), (2, 0, 0)])
 

@@ -26,7 +26,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from itertools import combinations, product
 
 from uav_isac.utils.types import DeflectionEntry, P0Solution
-from uav_isac.utils.math_utils import marginal_utility_gain
+from uav_isac.utils.math_utils import (
+    marginal_utility_gain,
+    marginal_utility_gain_batch,
+)
 
 
 class InnerSolver:
@@ -155,16 +158,32 @@ class InnerSolver:
 
         # Build candidate index for fast lookup
         candidates = list(valid)
+        candidate_targets = np.fromiter(
+            (int(e.q) for e in candidates),
+            dtype=np.int64,
+            count=len(candidates),
+        )
+        candidate_deflections = np.fromiter(
+            (float(e.d_eff) for e in candidates),
+            dtype=np.float64,
+            count=len(candidates),
+        )
+        target_candidate_indices = [
+            np.flatnonzero(candidate_targets == q) for q in range(Q)
+        ]
 
         # ── DU-P0: compute per-target ambiguity A_q ──
         du_ambiguity = np.zeros(Q, dtype=np.float64)
         if du_enabled and belief_cov_diag is not None and len(candidates) > 0:
             for q in range(Q):
-                q_gains = []
-                for e in candidates:
-                    if e.q == q:
-                        gain = marginal_utility_gain(0.0, e.d_eff, self.P_FA)
-                        q_gains.append((gain, e.d_eff, e))
+                indices = target_candidate_indices[q]
+                gains = marginal_utility_gain_batch(
+                    0.0, candidate_deflections[indices], self.P_FA,
+                )
+                q_gains = [
+                    (float(gain), candidates[index].d_eff, candidates[index])
+                    for index, gain in zip(indices, gains)
+                ]
                 q_gains.sort(key=lambda x: -x[0])
                 if len(q_gains) >= 2:
                     delta_mu = abs(q_gains[0][0] - q_gains[1][0])
@@ -173,11 +192,48 @@ class InnerSolver:
                     sigma_u = sigma_pos * (q_gains[0][0] / (q_gains[0][1] + 1e-6))
                     du_ambiguity[q] = sigma_u / (delta_mu + 1e-8)
 
+        # Only the selected edge's target changes D_q at each iteration.
+        # Cache every candidate score and refresh just that target after an
+        # addition.  This preserves the original candidate order, feasibility
+        # checks, strict-greater tie rule, and objective exactly while replacing
+        # O(|S||E|) scalar special-function calls with target-local batches.
+        candidate_scores = np.full(len(candidates), -np.inf, dtype=np.float64)
+
+        def refresh_target_scores(q: int) -> None:
+            indices = target_candidate_indices[q]
+            if indices.size == 0:
+                return
+            gains = marginal_utility_gain_batch(
+                D_q[q], candidate_deflections[indices], self.P_FA,
+            )
+            scores = omega[q] * gains
+
+            apply_b3 = True
+            if fusion_confidence is not None:
+                apply_b3 = (
+                    float(fusion_confidence[q]) >= fusion_confidence_min)
+            if apply_b3:
+                if beta_uncertainty > 0 and belief_cov_diag is not None:
+                    cov_mean = float(np.mean(np.abs(belief_cov_diag[q])))
+                    uncertainty = np.sqrt(max(cov_mean, 1e-8)) / 100.0
+                    scores -= beta_uncertainty * uncertainty
+                if eta_aoi > 0 and belief_aoi is not None:
+                    scores += eta_aoi * float(belief_aoi[q])
+            if du_enabled and du_ambiguity[q] > du_ambiguity_threshold:
+                scores += (
+                    du_ambiguity_bonus * du_ambiguity[q]
+                    * candidate_deflections[indices]
+                )
+            candidate_scores[indices] = scores
+
+        for q in range(Q):
+            refresh_target_scores(q)
+
         while True:
             best_gain = -1.0
             best_entry = None
 
-            for e in candidates:
+            for candidate_index, e in enumerate(candidates):
                 key = (e.i, e.j, e.q)
                 if key in selected:
                     continue
@@ -204,33 +260,7 @@ class InnerSolver:
                         if latency_contribution > remaining_latency.get(e.j, 0):
                             continue
 
-                # Compute marginal gain
-                gain = marginal_utility_gain(D_q[e.q], e.d_eff, self.P_FA)
-                weighted_gain = omega[e.q] * gain
-
-                # B3: Uncertainty-aware scoring.
-                # Covariance is in raw units (m² for position, (m/s)² for velocity).
-                # Normalize by scenario scale so β works across different area sizes.
-                # ── Layer 3: Safe P0 — only apply B3 when fusion is trusted ──
-                apply_b3 = True
-                if fusion_confidence is not None:
-                    apply_b3 = float(fusion_confidence[e.q]) >= fusion_confidence_min
-
-                if apply_b3:
-                    if beta_uncertainty > 0 and belief_cov_diag is not None:
-                        cov_mean = float(np.mean(np.abs(belief_cov_diag[e.q])))
-                        # Use sqrt(cov_mean) normalized by a reference scale (~100m)
-                        uncertainty = np.sqrt(max(cov_mean, 1e-8)) / 100.0
-                        weighted_gain -= beta_uncertainty * uncertainty
-
-                    if eta_aoi > 0 and belief_aoi is not None:
-                        # Reward freshness proportional to AoI (higher AoI = more urgent)
-                        aoi_val = float(belief_aoi[e.q])
-                        weighted_gain += eta_aoi * aoi_val
-
-                # ── DU-P0: ambiguity bonus for uncertain targets ──
-                if du_enabled and du_ambiguity[e.q] > du_ambiguity_threshold:
-                    weighted_gain += du_ambiguity_bonus * du_ambiguity[e.q] * e.d_eff
+                weighted_gain = float(candidate_scores[candidate_index])
 
                 if weighted_gain > best_gain:
                     best_gain = weighted_gain
@@ -254,6 +284,7 @@ class InnerSolver:
                 if R_j > 0:
                     remaining_latency[e.j] -= self.B_q / R_j
             target_counts[e.q] += 1
+            refresh_target_scores(e.q)
 
         # Build output
         z_selected = np.zeros((K, K, Q), dtype=np.int32)

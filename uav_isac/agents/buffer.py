@@ -268,6 +268,12 @@ class RolloutBuffer:
         self.returns = np.zeros((actual_size, self.num_agents), dtype=np.float64)
 
         # Detect multi-env layout
+        if self.num_agents < 1 or len(next_values) < self.num_agents:
+            raise ValueError(
+                "next_values must contain at least one value per agent")
+        if len(next_values) % self.num_agents != 0:
+            raise ValueError(
+                "next_values length must be a multiple of num_agents")
         num_envs = len(next_values) // self.num_agents
 
         if num_envs == 1:
@@ -290,16 +296,16 @@ class RolloutBuffer:
                     self.returns[t, k] = gae + self.values[t, k]
         else:
             # ── Multi-env interleaved GAE ──
-            T = actual_size // num_envs
             for k in range(self.num_agents):
                 for n in range(num_envs):
                     gae = 0.0
-                    for s in reversed(range(T)):
-                        t = n + s * num_envs
-                        if s == T - 1:
+                    indices = list(range(n, actual_size, num_envs))
+                    for position in reversed(range(len(indices))):
+                        t = indices[position]
+                        if position == len(indices) - 1:
                             next_v = next_values[n * self.num_agents + k]
                         else:
-                            next_t = n + (s + 1) * num_envs
+                            next_t = indices[position + 1]
                             next_v = self.values[next_t, k]
 
                         delta = (
@@ -339,19 +345,19 @@ class RolloutBuffer:
                             self.credit_returns[t, k, h] = (
                                 gae + self.credit_values[t, k, h])
             else:
-                T = actual_size // num_envs
                 for k in range(self.num_agents):
                     for h in range(self.num_credit_heads):
                         for n in range(num_envs):
                             gae = 0.0
-                            for s in reversed(range(T)):
-                                t = n + s * num_envs
+                            indices = list(range(n, actual_size, num_envs))
+                            for position in reversed(range(len(indices))):
+                                t = indices[position]
                                 next_v = (
                                     next_credit_values[
                                         n * self.num_agents + k, h]
-                                    if s == T - 1
+                                    if position == len(indices) - 1
                                     else self.credit_values[
-                                        n + (s + 1) * num_envs, k, h])
+                                        indices[position + 1], k, h])
                                 delta = (
                                     self.credit_rewards[t, k, h]
                                     + self.gamma * next_v * self.masks[t, k]
@@ -394,20 +400,20 @@ class RolloutBuffer:
                         self.per_target_advantages[t, k, q] = gae
                         self.per_target_returns[t, k, q] = gae + self.per_target_values[t, k, q]
         else:
-            T = actual_size // num_envs
             for k in range(self.num_agents):
                 for q in range(self.num_targets):
                     for n in range(num_envs):
                         gae = 0.0
-                        for s in reversed(range(T)):
-                            t = n + s * num_envs
-                            if s == T - 1:
+                        indices = list(range(n, actual_size, num_envs))
+                        for position in reversed(range(len(indices))):
+                            t = indices[position]
+                            if position == len(indices) - 1:
                                 if _have_pt_next:
                                     next_v_pt = next_per_target_values[n * self.num_agents + k, q]
                                 else:
                                     next_v_pt = 0.0
                             else:
-                                next_t = n + (s + 1) * num_envs
+                                next_t = indices[position + 1]
                                 next_v_pt = self.per_target_values[next_t, k, q]
 
                             delta_pt = (

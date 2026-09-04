@@ -1,0 +1,9 @@
+extends: exp_800_k8q8.yaml
+
+# Federated client B: faster target population.
+target:
+  speed_range: [2, 10]
+
+channel:
+  los_a: 4.88
+  los_b: 0.43

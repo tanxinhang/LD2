@@ -12,6 +12,7 @@ from uav_isac.physical.evidence import (
     scheduled_fusion_owner,
 )
 from uav_isac.utils.math_utils import compute_PD
+from uav_isac.utils.sentinels import OWNER_INDEX_NONE
 
 
 def lossless_quality_topk_pd(
@@ -45,7 +46,7 @@ def lossless_quality_topk_pd(
     owner = np.asarray(fusion_owner, dtype=np.int64).reshape(-1)
     if owner.shape != (Q,):
         raise ValueError("fusion_owner must have shape (Q,)")
-    if np.any((owner < -1) | (owner >= K)):
+    if np.any((owner < OWNER_INDEX_NONE) | (owner >= K)):
         raise ValueError("fusion_owner contains an invalid receiver index")
     owned = owner >= 0
     fused_d = np.zeros(Q, dtype=np.float64)

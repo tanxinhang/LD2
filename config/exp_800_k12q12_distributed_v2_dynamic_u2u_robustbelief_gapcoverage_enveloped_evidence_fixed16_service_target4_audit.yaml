@@ -1,0 +1,8 @@
+# Add a lossless categorical target-code codec to the evidence service
+# envelope candidate. For Q=12, 4 bits have 15 intervals and therefore
+# Q/(2*(2^4-1))=0.4<0.5: round(Q*q_4(code/Q)) recovers every code 0..12.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_evidence_fixed16_service_audit.yaml
+
+marl:
+  hyperedge_state_field_bits: [8, 8, 8, 8, 4, 8, 8]
+  hyperedge_state_codec_service_envelope_enabled: true

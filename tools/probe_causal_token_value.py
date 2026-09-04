@@ -33,6 +33,7 @@ from tools.pretrain_qos_commitment import build_agent
 from tools.probe_token_semantics import quantize_target_tokens
 from uav_isac.agents.trainer import load_stratified_seed_split
 from uav_isac.environment.env_wrapper import UAVISACEnv
+from uav_isac.utils.checkpoint_loading import safe_torch_load, validate_state_dict
 from uav_isac.utils.seeding import set_seed
 
 
@@ -108,6 +109,8 @@ class FrozenPolicyRunner:
         self.env_template = UAVISACEnv(config=cfg, seed=0)
         self.agent = build_agent(cfg, self.env_template, device)
         actor_state = checkpoint.get("actor", checkpoint)
+        validate_state_dict(
+            actor_state, description="causal token-value actor state_dict")
         missing, unexpected = self.agent.load_actor_state_dict_compatible(actor_state)
         if unexpected:
             raise RuntimeError(
@@ -798,8 +801,13 @@ def main() -> None:
         raise ValueError("causal token probe requires target_tokens payload")
     if str(cfg.marl.learned_comm_mode).lower() != "cost_aware":
         raise ValueError("causal token probe requires cost-aware communication")
-    checkpoint = torch.load(
-        args.checkpoint, map_location="cpu", weights_only=False)
+    checkpoint = safe_torch_load(
+        args.checkpoint,
+        map_location="cpu",
+        description="causal token-value probe checkpoint",
+        optional_mapping_keys=("runtime",),
+        optional_state_dict_keys=("actor",),
+    )
     train_seeds = load_stratified_seed_split(
         args.seed_bank, args.train_split)[:max(1, args.train_episodes)]
     test_seeds = load_stratified_seed_split(

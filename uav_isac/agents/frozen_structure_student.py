@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from uav_isac.environment.observation_slices import ObservationSlices
+from uav_isac.utils.checkpoint_loading import safe_torch_load
 
 
 class FactorizedStructureStudent(torch.nn.Module):
@@ -409,8 +410,18 @@ class FrozenStructureStudent:
     cardinality_equivariant = True
 
     def __init__(self, checkpoint: str | Path, device: str = "cpu"):
-        payload = torch.load(
-            checkpoint, map_location=device, weights_only=False)
+        payload = safe_torch_load(
+            checkpoint,
+            map_location=device,
+            description="frozen structure-student checkpoint",
+            allow_legacy_numpy_float32=True,
+            required_keys=(
+                "schema_version", "feature_mean", "feature_scale",
+                "num_uavs", "num_targets", "rate_scale",
+            ),
+            mapping_keys=("model",),
+            state_dict_keys=("state_dict",),
+        )
         self.schema_version = int(payload.get("schema_version", -1))
         if self.schema_version not in {1, 2}:
             raise ValueError("unsupported structure-student schema")

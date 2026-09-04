@@ -75,6 +75,14 @@ class ObservationBuilder:
         self.Q = Q
         self.area_w, self.area_h = area_size
         self.height = height
+        self._position_scale = np.asarray(
+            [self.area_w, self.area_h, self.height], dtype=np.float64)
+        self._belief_mean_scale = np.asarray(
+            [self.area_w, self.area_h, 25.0, 25.0], dtype=np.float64)
+        self._belief_covariance_scale = np.asarray([
+            self.area_w ** 2, self.area_h ** 2, 625.0, 625.0,
+        ], dtype=np.float64)
+        self._area_diagonal = float(np.hypot(self.area_w, self.area_h))
         self.use_relative_features = use_relative_features
         self.expose_neighbor_state = bool(expose_neighbor_state)
         self.use_comm_tokens = bool(use_comm_tokens)
@@ -154,6 +162,9 @@ class ObservationBuilder:
         own_token_mask: Optional[np.ndarray] = None,
         own_target_claims: Optional[np.ndarray] = None,
         channel_feedback: Optional[np.ndarray] = None,
+        belief_mean: Optional[np.ndarray] = None,
+        belief_cov_diag: Optional[np.ndarray] = None,
+        belief_aoi: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Build local observation for one agent.
 
@@ -173,69 +184,87 @@ class ObservationBuilder:
         # --- Self state ---
         self_state = uav_states[agent_id]
         # Normalize position to [0, 1]
-        obs_parts.append(self_state.pos / np.array([self.area_w, self.area_h, self.height]))
+        obs_parts.append(self_state.pos / self._position_scale)
         obs_parts.append(self_state.vel / 25.0)  # normalize by v_max
         obs_parts.append([self_state.battery / 50000.0])  # normalize by B_max
         obs_parts.append([float(self_state.role)])  # already in {0,1,2}
 
         # --- Beliefs (per target) or oracle ---
         use_oracle = oracle_targets is not None
-        for q in range(self.Q):
-            if use_oracle:
-                # Oracle: true target state, zero covariance, zero AoI
-                tgt = oracle_targets[q]  # [px, py, vx, vy]
-                oracle_mean = np.array([tgt[0], tgt[1], tgt[2], tgt[3]])
-                obs_parts.append(oracle_mean / np.array([self.area_w, self.area_h, 25.0, 25.0]))
-                obs_parts.append(np.zeros(4))  # zero covariance
-                obs_parts.append([0.0])  # zero AoI
-            else:
-                b = beliefs[agent_id][q]
-                obs_parts.append(b.mean / np.array([self.area_w, self.area_h, 25.0, 25.0]))
-                obs_parts.append(b.cov_diag / np.array([self.area_w**2, self.area_h**2, 625.0, 625.0]))
-                obs_parts.append([float(b.aoi) / 100.0])  # normalize AoI
+        belief_block = np.zeros((self.Q, self.belief_dim), dtype=np.float64)
+        if use_oracle:
+            target_mean = np.asarray(
+                oracle_targets[:, :4], dtype=np.float64)
+        elif belief_mean is not None:
+            all_mean = np.asarray(belief_mean, dtype=np.float64)
+            all_cov_diag = np.asarray(belief_cov_diag, dtype=np.float64)
+            all_aoi = np.asarray(belief_aoi, dtype=np.float64)
+            if (
+                all_mean.shape != (self.K, self.Q, 4)
+                or all_cov_diag.shape != (self.K, self.Q, 4)
+                or all_aoi.shape != (self.K, self.Q)
+            ):
+                raise ValueError(
+                    "belief arrays must have shapes (K,Q,4), (K,Q,4), "
+                    "and (K,Q)")
+            target_mean = all_mean[agent_id]
+            belief_block[:, 4:8] = (
+                all_cov_diag[agent_id]
+                / self._belief_covariance_scale)
+            belief_block[:, 8] = all_aoi[agent_id] / 100.0
+        else:
+            if beliefs is None:
+                raise ValueError(
+                    "beliefs or dense belief arrays are required")
+            local_beliefs = beliefs[agent_id]
+            target_mean = np.asarray(
+                [belief.mean[:4] for belief in local_beliefs],
+                dtype=np.float64,
+            )
+            belief_block[:, 4:8] = np.asarray(
+                [belief.cov_diag[:4] for belief in local_beliefs],
+                dtype=np.float64,
+            ) / self._belief_covariance_scale
+            belief_block[:, 8] = np.asarray(
+                [belief.aoi for belief in local_beliefs],
+                dtype=np.float64,
+            ) / 100.0
+        belief_block[:, :4] = target_mean / self._belief_mean_scale
+        obs_parts.append(belief_block.reshape(-1))
 
         # --- Explicit relative geometry (per target) ---
         if self.use_relative_features:
             my_pos = self_state.pos[:2]  # (2,) UAV x,y
-            diag = np.sqrt(self.area_w**2 + self.area_h**2)
-            for q in range(self.Q):
-                if use_oracle:
-                    tgt_pos = oracle_targets[q, :2]
-                else:
-                    tgt_pos = beliefs[agent_id][q].mean[:2]
-                dx = (tgt_pos[0] - my_pos[0]) / self.area_w
-                dy = (tgt_pos[1] - my_pos[1]) / self.area_h
-                dist_raw = np.linalg.norm(tgt_pos - my_pos)
-                dist = dist_raw / diag
-                # Positional encoding: bearing as (sin, cos) pair (not single [-1,1])
-                angle = np.arctan2(dy * self.area_h, dx * self.area_w)
-                sin_b = np.sin(angle)
-                cos_b = np.cos(angle)
-                # Multi-scale distance: exp(-d / scale) at 3 scales
-                d_s1 = np.exp(-dist_raw / 50.0)
-                d_s2 = np.exp(-dist_raw / 150.0)
-                d_s3 = np.exp(-dist_raw / 400.0)
-                obs_parts.append([dx, dy, dist, sin_b, cos_b, d_s1, d_s2, d_s3])
+            diag = self._area_diagonal
+            target_xy = target_mean[:, :2]
+            target_delta = target_xy - my_pos[None, :]
+            target_distance = np.linalg.norm(target_delta, axis=1)
+            target_angle = np.arctan2(
+                target_delta[:, 1], target_delta[:, 0])
+            relative_block = np.column_stack([
+                target_delta[:, 0] / self.area_w,
+                target_delta[:, 1] / self.area_h,
+                target_distance / diag,
+                np.sin(target_angle),
+                np.cos(target_angle),
+                np.exp(-target_distance / 50.0),
+                np.exp(-target_distance / 150.0),
+                np.exp(-target_distance / 400.0),
+            ])
+            obs_parts.append(relative_block.reshape(-1))
 
         # --- Explicit physical features: nearest-target distance + bearing ---
         # Gives Actor direct knowledge of the dominant physical relationship
         # (distance-to-target is the #1 determinant of P_D per R^{-4} radar eq.)
         my_pos = self_state.pos[:2]
-        nearest_q = 0
-        nearest_d = float('inf')
-        for q in range(self.Q):
-            if use_oracle:
-                tgt_p = oracle_targets[q, :2]
-            else:
-                tgt_p = beliefs[agent_id][q].mean[:2]
-            d_q = float(np.linalg.norm(tgt_p - my_pos))
-            if d_q < nearest_d:
-                nearest_d = d_q
-                nearest_q = q
-        if use_oracle:
-            nearest_pos = oracle_targets[nearest_q, :2]
-        else:
-            nearest_pos = beliefs[agent_id][nearest_q].mean[:2]
+        if not self.use_relative_features:
+            target_xy = target_mean[:, :2]
+            target_distance = np.linalg.norm(
+                target_xy - my_pos[None, :], axis=1)
+            diag = self._area_diagonal
+        nearest_q = int(np.argmin(target_distance))
+        nearest_d = float(target_distance[nearest_q])
+        nearest_pos = target_xy[nearest_q]
         d_nearest_norm = nearest_d / diag  # normalized distance
         bearing = np.arctan2(nearest_pos[1] - my_pos[1], nearest_pos[0] - my_pos[0])
         # Nearest target features: 3 dims (dist, sin_bearing, cos_bearing)
@@ -244,27 +273,40 @@ class ObservationBuilder:
         # --- Rich neighbor intent features ---
         # Pre-compute each neighbor's nearest target (intent proxy)
         neighbor_target_dirs = {}  # k -> (dx,dy) normalized toward nearest target
-        for k in range(self.K):
-            if k == agent_id: continue
-            n_pos = uav_states[k].pos[:2]
-            # Find nearest target to this neighbor (from belief or oracle)
-            best_d, best_dir = float('inf'), np.zeros(2)
-            for q in range(self.Q):
-                if use_oracle:
-                    tgt_p = oracle_targets[q, :2]
-                else:
-                    tgt_p = beliefs[k][q].mean[:2]
-                d = np.linalg.norm(n_pos - tgt_p)
-                if d < best_d:
-                    best_d = d
-                    best_dir = (tgt_p - n_pos) / max(d, 1e-6)
-            neighbor_target_dirs[k] = best_dir
-        # P0 pairs: which UAVs are in active pairs this frame
+        if self.expose_neighbor_state:
+            for k in range(self.K):
+                if k == agent_id:
+                    continue
+                n_pos = uav_states[k].pos[:2]
+                # Find nearest target to this neighbor (from belief or oracle)
+                best_d, best_dir = float('inf'), np.zeros(2)
+                for q in range(self.Q):
+                    if use_oracle:
+                        tgt_p = oracle_targets[q, :2]
+                    else:
+                        tgt_p = (
+                            np.asarray(belief_mean)[k, q, :2]
+                            if belief_mean is not None
+                            else beliefs[k][q].mean[:2])
+                    d = np.linalg.norm(n_pos - tgt_p)
+                    if d < best_d:
+                        best_d = d
+                        best_dir = (tgt_p - n_pos) / max(d, 1e-6)
+                neighbor_target_dirs[k] = best_dir
+
+        # P0 summary work is skipped when its observation block is disabled.
+        # Strict U2U mode deliberately emits zero neighbor-state blocks, so
+        # computing hidden neighbor intent or global pairing summaries would be
+        # dead work and must not be billed to online inference.
         paired_uavs = set()
-        for (i, j, q) in selected_set:
-            paired_uavs.add(i); paired_uavs.add(j)
-        n_pairs = len(selected_set)
-        n_targets_sensed = len(set(q for (_, _, q) in selected_set))
+        n_pairs = 0
+        n_targets_sensed = 0
+        if self.use_p0_global_info:
+            for (i, j, q) in selected_set:
+                paired_uavs.add(i)
+                paired_uavs.add(j)
+            n_pairs = len(selected_set)
+            n_targets_sensed = len(set(q for (_, _, q) in selected_set))
 
         # --- SINR-gated P0 info: only available when comm link is good ---
         # If SINR < threshold, P0 features are zeroed (forced to rely on physics)
@@ -308,26 +350,39 @@ class ObservationBuilder:
                     neighbor_idx += 1
             obs_parts.append(pairing_with)                                              # K-1 dims
 
-        for k in range(self.K):
-            if k == agent_id: continue
-            if not self.expose_neighbor_state:
-                # Keep the historical feature layout stable, but close the
-                # zero-cost inter-agent side channel. Coordination information
-                # must arrive through the learned communication inbox below.
-                obs_parts.append(np.zeros(self.neighbor_dim, dtype=np.float64))
-                continue
-            n_state = uav_states[k]
-            rel_pos = (n_state.pos[:2] - self_state.pos[:2]) / np.array([self.area_w, self.area_h])
-            rel_vel = (n_state.vel[:2] - self_state.vel[:2]) / 25.0
-            obs_parts.append(rel_pos)                          # 2
-            obs_parts.append(rel_vel)                          # 2
-            obs_parts.append([float(n_state.role)])            # 1
-            obs_parts.append(neighbor_target_dirs.get(k, np.zeros(2)))  # 2: heading intent
-            if self.use_p0_global_info:
-                in_pair_val = 1.0 if (k in paired_uavs and comm_available) else 0.0
-                obs_parts.append([in_pair_val])   # 1: actively sensing (SINR-gated)
-            n_tgt_d = min(np.linalg.norm(n_state.pos[:2] - (beliefs[k][q].mean[:2] if not use_oracle else oracle_targets[q,:2])) for q in range(self.Q))
-            obs_parts.append([n_tgt_d / np.sqrt(self.area_w**2+self.area_h**2)])  # 1: dist to nearest target
+        if not self.expose_neighbor_state:
+            # Keep the historical feature layout stable, but close the
+            # zero-cost inter-agent side channel. Coordination information
+            # must arrive through the learned communication inbox below.
+            obs_parts.append(np.zeros(
+                (self.K - 1) * self.neighbor_dim, dtype=np.float64))
+        else:
+            for k in range(self.K):
+                if k == agent_id:
+                    continue
+                n_state = uav_states[k]
+                rel_pos = (
+                    n_state.pos[:2] - self_state.pos[:2]
+                ) / np.array([self.area_w, self.area_h])
+                rel_vel = (
+                    n_state.vel[:2] - self_state.vel[:2]) / 25.0
+                obs_parts.append(rel_pos)
+                obs_parts.append(rel_vel)
+                obs_parts.append([float(n_state.role)])
+                obs_parts.append(neighbor_target_dirs.get(k, np.zeros(2)))
+                if self.use_p0_global_info:
+                    in_pair_val = 1.0 if (
+                        k in paired_uavs and comm_available) else 0.0
+                    obs_parts.append([in_pair_val])
+                n_tgt_d = min(np.linalg.norm(
+                    n_state.pos[:2]
+                    - (
+                        (np.asarray(belief_mean)[k, q, :2]
+                         if belief_mean is not None
+                         else beliefs[k][q].mean[:2])
+                        if not use_oracle else oracle_targets[q, :2]
+                    )) for q in range(self.Q))
+                obs_parts.append([n_tgt_d / self._area_diagonal])
 
         # Global coordination summary (P0, SINR-gated)
         if self.use_p0_global_info:
@@ -436,21 +491,31 @@ class ObservationBuilder:
                             raise ValueError(
                                 f'expected {(self.Q,)} token mask from UAV '
                                 f'{sender}, got {delivered_token_mask.shape}')
-                        for q in range(self.Q):
-                            if delivered_token_mask[q] <= 0.5:
-                                token_rows.append(np.zeros(
-                                    self.comm_token_dim, dtype=np.float64))
-                                token_mask.append(0.0)
-                                continue
-                            target_norm = q / max(self.Q - 1, 1)
-                            token_rows.append(np.concatenate([
-                                target_tokens[q],
-                                np.array([
-                                    sender_norm, target_norm, rate_norm,
-                                    latency_norm, snr_norm, aoi_norm,
-                                ], dtype=np.float64),
-                            ]))
-                            token_mask.append(1.0)
+                        valid_targets = delivered_token_mask > 0.5
+                        sender_rows = np.zeros(
+                            (self.Q, self.comm_token_dim),
+                            dtype=np.float64,
+                        )
+                        sender_rows[valid_targets, :
+                                    self.comm_target_token_dim] = (
+                            target_tokens[valid_targets])
+                        metadata_start = self.comm_target_token_dim
+                        sender_rows[valid_targets, metadata_start] = (
+                            sender_norm)
+                        sender_rows[valid_targets, metadata_start + 1] = (
+                            np.arange(self.Q, dtype=np.float64)[valid_targets]
+                            / max(self.Q - 1, 1))
+                        sender_rows[valid_targets, metadata_start + 2] = (
+                            rate_norm)
+                        sender_rows[valid_targets, metadata_start + 3] = (
+                            latency_norm)
+                        sender_rows[valid_targets, metadata_start + 4] = (
+                            snr_norm)
+                        sender_rows[valid_targets, metadata_start + 5] = (
+                            aoi_norm)
+                        token_rows.append(sender_rows.reshape(-1))
+                        token_mask.extend(
+                            valid_targets.astype(np.float64).tolist())
                         continue
                     token = np.concatenate([
                         msg,
@@ -459,10 +524,11 @@ class ObservationBuilder:
                     ])
                     token_mask.append(1.0)
                 else:
-                    for _ in range(self.comm_tokens_per_sender):
-                        token_rows.append(np.zeros(
-                            self.comm_token_dim, dtype=np.float64))
-                        token_mask.append(0.0)
+                    token_rows.append(np.zeros(
+                        self.comm_tokens_per_sender * self.comm_token_dim,
+                        dtype=np.float64))
+                    token_mask.extend(
+                        [0.0] * self.comm_tokens_per_sender)
                     continue
                 token_rows.append(token)
             obs_parts.append(np.concatenate(token_rows) if token_rows else np.zeros(0))

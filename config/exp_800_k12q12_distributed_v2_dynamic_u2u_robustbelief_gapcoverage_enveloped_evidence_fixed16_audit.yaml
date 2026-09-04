@@ -1,0 +1,8 @@
+# Synchronous fixed-schema evidence packet candidate.  The sensing sub-slot
+# identifies the current observation frame; source and target indices remain
+# explicitly charged, and the 16-bit CRC remains inside the FBL codeword.
+extends: exp_800_k12q12_distributed_v2_dynamic_u2u_robustbelief_gapcoverage_enveloped_pilot.yaml
+
+marl:
+  evidence_fixed_schema_header_bits: 16
+  evidence_timestamp_bits: 0

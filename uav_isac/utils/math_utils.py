@@ -5,8 +5,32 @@ and safe numerical operations.
 """
 
 import numpy as np
+from functools import lru_cache
 from scipy.special import erfc, erfinv
 from typing import Optional
+
+
+def symmetric_2x2_max_eigenvalue(matrix: np.ndarray) -> np.ndarray:
+    """Largest eigenvalue of batched real symmetric 2x2 matrices.
+
+    For ``[[a, b], [b, d]]`` the eigenvalues are
+
+    ``(a + d +/- hypot(a - d, 2*b)) / 2``.
+
+    The closed form is algebraically exact and avoids dispatching thousands of
+    tiny matrices through a general eigensolver.  Leading batch dimensions are
+    preserved.  Inputs are symmetrized in the same way as the covariance
+    caller, so harmless round-off asymmetry cannot change the result.
+    """
+    value = np.asarray(matrix, dtype=np.float64)
+    if value.ndim < 2 or value.shape[-2:] != (2, 2):
+        raise ValueError("matrix must have trailing shape (2,2)")
+    if np.any(~np.isfinite(value)):
+        raise ValueError("matrix must be finite")
+    a = value[..., 0, 0]
+    d = value[..., 1, 1]
+    b = 0.5 * (value[..., 0, 1] + value[..., 1, 0])
+    return 0.5 * (a + d + np.hypot(a - d, 2.0 * b))
 
 
 def Q_function(x: np.ndarray) -> np.ndarray:
@@ -18,12 +42,29 @@ def Q_function(x: np.ndarray) -> np.ndarray:
     return 0.5 * erfc(x / np.sqrt(2.0))
 
 
+# O7 (roadmap 2026-08-29): P_FA-class inversions are hot-path scalar calls
+# (33 call sites, ~32 of them size==1; e.g. inner_solver marginal-gain loops).
+# The scalar path is memoized; the vectorized path (detection.py:121 requested
+# array) keeps the exact same formula.  Bit-for-bit identical to recomputation
+# on the same platform/library because erfinv(1-2p) is deterministic.
+@lru_cache(maxsize=64)
+def _q_inverse_scalar(p: float) -> float:
+    # Clamp to avoid numerical issues at boundaries (same as vector path)
+    p_clamped = float(np.clip(p, 1e-15, 1.0 - 1e-15))
+    return float(np.sqrt(2.0) * erfinv(1.0 - 2.0 * p_clamped))
+
+
 def Q_inverse(p: np.ndarray) -> np.ndarray:
     """Inverse Q-function: Q^{-1}(p) = sqrt(2) * erfinv(1 - 2p).
 
     Numerically stable for p in (0, 1). Clamps extreme values.
+    Scalar (size==1) inputs hit the memoized scalar path; array inputs use
+    the fully vectorized formula.  Output shape matches the input.
     """
     p = np.asarray(p, dtype=np.float64)
+    flat = p.reshape(-1)
+    if flat.size == 1:
+        return np.full_like(p, _q_inverse_scalar(float(flat[0])))
     # Clamp to avoid numerical issues at boundaries
     p = np.clip(p, 1e-15, 1.0 - 1e-15)
     return np.sqrt(2.0) * erfinv(1.0 - 2.0 * p)
@@ -87,3 +128,22 @@ def marginal_utility_gain(D_q_current: float, d_eff_new: float, P_FA: float) -> 
     U_before = utility_from_D(D_before, P_FA)
     U_after = utility_from_D(D_after, P_FA)
     return float(U_after[0] - U_before[0])
+
+
+def marginal_utility_gain_batch(
+    D_q_current: float,
+    d_eff_new: np.ndarray,
+    P_FA: float,
+) -> np.ndarray:
+    """Vectorized marginal utility for candidates of one target.
+
+    All candidates share the same current cumulative deflection, so the
+    baseline utility is evaluated once.  The formula and numerical clamps are
+    otherwise identical to :func:`marginal_utility_gain`.
+    """
+    increments = np.asarray(d_eff_new, dtype=np.float64)
+    baseline = utility_from_D(
+        np.asarray([D_q_current], dtype=np.float64), P_FA,
+    )[0]
+    updated = utility_from_D(D_q_current + increments, P_FA)
+    return np.asarray(updated - baseline, dtype=np.float64)

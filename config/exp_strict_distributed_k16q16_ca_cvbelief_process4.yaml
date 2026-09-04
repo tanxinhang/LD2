@@ -1,0 +1,9 @@
+# Development-only maneuver-mismatch pair: constant-acceleration plant with
+# the deployed CV belief model.
+extends: exp_strict_distributed_k16q16_process4.yaml
+
+target:
+  motion_model: CA
+
+marl:
+  belief_motion_model: CV

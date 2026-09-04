@@ -1,4 +1,4 @@
-﻿# Phase 1: Minimum System (No Federation, C=1)
+# Phase 1: Minimum System (No Federation, C=1)
 # All simulation parameters 鈥?single source of truth
 
 scenario:
@@ -9,6 +9,14 @@ scenario:
   T: 150                       # frames per episode (targets are fixed in the default tracking-free study)
   dt: 0.1                      # frame duration (seconds)
   C: 1                         # number of regions (Phase 1: no federation)
+  # Post-G2 time-energy closure (audit advice/001 C1, 2026-08-26): one control
+  # step executes n_cpi OTFS frames, so the canonical sensing clock is the CPI
+  # duration T_sense = n_cpi*N*T_sym (~1.024 ms), NOT the 100 ms dt slot.
+  #   dt_frame (legacy, reproducible pre-G2): battery charged P_sense*dt.
+  #   cpi_frame (canonical post-G2 manifest): battery charged P_sense*T_sense.
+  # The manifest (config/system_manifest.yaml) pins cpi_frame; this file keeps
+  # dt_frame so historical certified runs stay reproducible.
+  sensing_energy_mode: dt_frame
 
 uav:
   v_max: 25                    # m/s max flight speed
@@ -53,7 +61,13 @@ channel:
 detection:
   P_FA: 0.001                  # false alarm probability
   c_det: 1.0                   # real Gaussian shift convention D=c_det*Es/En
-  g_min: 0.5                   # DD effectiveness threshold
+  g_min: 0.5                   # DD effectiveness threshold (legacy binary gate)
+  # Post-G2 DD model (audit advice/001 C1, 2026-08-26): the canonical physics
+  # uses the continuous gain I_support * |A(tau,nu)|^2 on deflection
+  # (out-of-support targets contribute exactly 0), not the binary
+  # 1[g_dd >= g_min] gate.  The manifest pins dd_gain_mode: continuous; this
+  # file keeps binary so pre-G2 certified runs stay reproducible.
+  dd_gain_mode: binary
   K_q_max: 3                   # max reporting sources per target
   B_q: 64                      # soft info bits per report
   P_D_min: 0.2                 # fairness floor (D4); 0.8 was unreachable -> Lagrangian blowup.
@@ -65,6 +79,17 @@ p0_solver:
 
 marl:
   hidden_layers: [256, 256]    # actor/critic MLP architecture
+  # Simulator-only private-LP process parallelism. It does not enable
+  # simultaneous radio transmission and remains off for historical replay.
+  distributed_replicated_power_process_parallel_enabled: false
+  distributed_replicated_power_history_reserve_pd: 0.0
+  distributed_replicated_power_process_workers: 4
+  distributed_replicated_power_process_timeout_s: 0.1
+  distributed_replicated_power_parallel_fallback_to_serial: true
+  distributed_replicated_power_parallel_failure_mode: serial
+  distributed_replicated_power_deadline_incumbent_relative_tolerance: 0.05
+  distributed_replicated_power_max_consecutive_process_failures: 3
+  distributed_replicated_power_certificate_shadow_global_lp_enabled: false
   movement_decision_interval: 1 # hold only movement; communication/resources still update each frame
   distributed_id_movement_enabled: false
   distributed_id_movement_standoff_m: 0.0
@@ -72,6 +97,19 @@ marl:
   distributed_greedy_matching_hold_frames: 150
   distributed_bottleneck_matching_movement_enabled: false
   distributed_coordination_use_local_belief_targets: false
+  # Post-G2 strict no-truth fail-closed gate (audit advice/001 P0).  When true,
+  # distributed decision paths never read simulator ground truth; the canonical
+  # post-G2 manifest pins true together with local-belief + tracking on.  The
+  # legacy default (false) preserves every pre-G2 certified run.
+  distributed_no_truth_fail_closed: false
+  # Experimental scalar score-order communication.  OFF is mandatory for the
+  # current learned aggregate/target-token payloads because no decoder/action
+  # certificate connects their quantization error to the final decision.
+  distributed_decision_sufficient_comm_enabled: false
+  distributed_decision_sufficient_event_trigger_enabled: false
+  distributed_decision_sufficient_adaptive_bits_enabled: false
+  distributed_decision_sufficient_dynamic_range: 1.0
+  distributed_decision_sufficient_max_bits: 32
   distributed_movement_safety_margin_per_age_m: 0.0
   distributed_movement_local_assignment_cache_enabled: false
   distributed_movement_public_max_age_frames: 5
@@ -138,6 +176,8 @@ marl:
   hyperedge_state_bits_per_dim: 0
   hyperedge_tx_coalition_max: 2
   hyperedge_robust_quantization_enabled: false
+  hyperedge_bistatic_information_ranking_enabled: false
+  hyperedge_bistatic_information_weight: 1.0
   hyperedge_reserved_tx_nodes: []
   hyperedge_consensus_rounds: 2
   hyperedge_assignment_hold_frames: 1
@@ -157,6 +197,16 @@ marl:
   p0_maxmin_event_qos_enabled: true
   p0_topology_min_change_repair_enabled: false
   tracking_enabled: false      # fixed mission-known sensing targets; no Kalman tracking loop
+  belief_expected_detection_information_enabled: false
+  belief_expected_detection_information_floor: 0.001
+  belief_measurement_model: cartesian
+  belief_bistatic_crlb_efficiency: 4.0
+  belief_bistatic_min_effective_deflection: 0.001
+  distributed_owner_posterior_enabled: false
+  distributed_owner_posterior_mean_bits: 12
+  distributed_owner_posterior_cov_bits: 8
+  distributed_owner_posterior_aoi_bits: 8
+  distributed_owner_posterior_max_age_frames: 5
   detection_fusion_mode: local_only # legacy_global | central_oracle | local_only | u2u_distributed
   passive_multireceiver_evidence_enabled: false
   passive_multireceiver_belief_update_enabled: false
@@ -166,6 +216,7 @@ marl:
   u2u_belief_feedback_aoi_bits: 8
   u2u_belief_feedback_max_age_frames: 5
   distributed_target_position_uncertainty_sigma: 0.0
+  distributed_replicated_power_robust_gain_mix: 0.0
   evidence_packet_topk: 1
   evidence_packet_ambiguity_top2_enabled: false
   evidence_packet_ambiguity_ratio: 0.5

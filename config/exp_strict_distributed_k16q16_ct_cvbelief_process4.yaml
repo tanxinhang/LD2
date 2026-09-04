@@ -1,0 +1,9 @@
+# Development-only maneuver-mismatch pair: coordinated-turn plant tracked by
+# the deployed CV belief model. All communication/power settings are inherited.
+extends: exp_strict_distributed_k16q16_process4.yaml
+
+target:
+  motion_model: CT
+
+marl:
+  belief_motion_model: CV

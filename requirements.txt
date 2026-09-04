@@ -9,16 +9,22 @@
 #
 # Install:
 #   pip install -r requirements.txt
+# Reproduce the CI/reference-compatible versions:
+#   pip install -r requirements.txt -c constraints-ci.txt
 # For PyTorch with a specific CUDA build, install torch first from the
 # official index (https://pytorch.org/get-started/locally/) and then the rest.
 
 # --- Core simulation / learning ---
 numpy>=1.24
 scipy>=1.10
-torch>=2.1          # install the CUDA build matching your driver first
+threadpoolctl>=3.1  # explicit native-thread cap in isolated LP workers
+# 2.10 fixes CVE-2026-24747 in the weights-only checkpoint unpickler.
+torch>=2.10         # install the CUDA build matching your driver first
 pyyaml>=6.0
 gymnasium>=0.29
-psutil>=5.9
+networkx>=3.0      # uav_isac/coordination/interaction_width.py
+# (removed 2026-09-04: psutil was declared but never imported anywhere in
+# first-party code — see DEEP_AUDIT_SYSTEM_2026-09-04 dependency dimension.)
 
 # --- Evaluation / statistics / testing ---
 scikit-learn>=1.2   # tests/test_crisis_gate_probe.py (balanced_accuracy_score)

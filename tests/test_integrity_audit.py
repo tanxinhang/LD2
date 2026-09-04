@@ -18,7 +18,10 @@ from uav_isac.environment.belief import BeliefManager
 from uav_isac.environment.reward import RewardComputer
 from uav_isac.agents.buffer import RolloutBuffer
 from uav_isac.agents.mappo_agent import MAPPOAgent
-from uav_isac.agents.trainer import MAPPTrainer
+from uav_isac.agents.trainer import (
+    MAPPTrainer,
+    stable_ppo_ratio_and_approx_kl,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +253,20 @@ class TestRewardAndGAE:
             row = flat_idx // K
             assert np.allclose(gs[row], gs_rows[row])
 
+    def test_multi_env_gae_computes_partial_interleaved_tail(self):
+        buf = RolloutBuffer(
+            buffer_size=4, num_agents=2, obs_dim=1, global_state_dim=1,
+            gamma=0.99, gae_lambda=0.95, num_targets=1,
+        )
+        buf.ptr = 3
+        buf.rewards[:3] = 1.0
+        buf.values[:3] = 0.0
+        buf.masks[:3] = 1.0
+        # Four bootstrap values means two interleaved environments.  With
+        # three stored rows env-0 owns rows [0,2] and env-1 owns row [1].
+        buf.compute_gae(np.zeros(4, dtype=np.float64))
+        assert np.all(buf.advantages[2] > 0.0)
+
 
 # ---------------------------------------------------------------------------
 # 4. Belief / observation semantics
@@ -289,7 +306,7 @@ class TestBeliefSemantics:
         assert bm.aoi[0, 0] == 0
         assert np.trace(bm.cov[0, 0]) < np.trace(bm.cov[0, 0]) + 1  # cov shrunk
 
-    def test_belief_reset_ignores_constructor_std(self, seeded_rng):
+    def test_belief_reset_preserves_constructor_std(self, seeded_rng):
         bm = BeliefManager(
             K=1, Q=1,
             initial_positions=np.array([[200.0, 200.0, 0.0]]),
@@ -303,8 +320,8 @@ class TestBeliefSemantics:
             np.array([[250.0, 250.0, 0.0]]),
             np.array([[2.0, 0.0, 0.0]]),
         )
-        # reset() hardcodes 50m -> var 2500
-        assert bm.cov[0, 0, 0, 0] == pytest.approx(2500.0)
+        assert bm.cov[0, 0, 0, 0] == pytest.approx(100.0)
+        assert bm.cov[0, 0, 2, 2] == pytest.approx(4.0)
 
     def test_aoi_can_exceed_normalization_divisor(self, default_config):
         env = UAVISACEnv(config=default_config, seed=42)
@@ -318,9 +335,13 @@ class TestBeliefSemantics:
             obs, _, term, _, _ = env.step(actions)
             if term["__all__"]:
                 break
-        # AoI now resets on detection; with P0 roles, detections happen often
+        # AoI now resets on detection; with P0 roles, detections happen often.
+        # Tracking-liveness invariants: AoI stays finite and non-negative (a NaN
+        # would fail min()>=0) and is strictly positive, not a dead zero.
         bm = env.core.belief_mgr
-        assert bm.aoi.max() >= 0  # AoI tracking works
+        assert bm.aoi.min() >= 0
+        assert bm.aoi.max() < float("inf")
+        assert bm.aoi.max() > 0
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +372,24 @@ class TestTrainerMechanics:
             for ln in assign_lines
         ), "train() should not dead-code its eval_interval argument"
 
-    def test_kl_early_stop_uses_single_minibatch(self):
+    def test_kl_early_stop_is_executable_and_precedes_backward(self):
         src = inspect.getsource(MAPPTrainer.update)
-        assert "approx_kl_mb" in src
-        assert "kl_stop = True" in src
+        guard = src.index("approx_kl_mb > kl_limit")
+        backward = src.index("loss.backward()")
+        assert guard < backward
+        assert "actor_update_rejected" in src
+
+    def test_stable_ppo_kl_is_nonnegative_and_fail_closed(self):
+        old = torch.zeros(4)
+        new = torch.tensor([0.0, 0.1, -0.1, 1.0])
+        ratio, approx_kl = stable_ppo_ratio_and_approx_kl(new, old)
+        assert torch.isfinite(ratio).all()
+        assert approx_kl.item() >= 0.0
+
+        ratio_bad, kl_bad = stable_ppo_ratio_and_approx_kl(
+            torch.tensor([float('nan'), float('inf')]), torch.zeros(2))
+        assert torch.isfinite(ratio_bad).all()
+        assert torch.isinf(kl_bad)
 
     def test_metrics_divisor_uses_actual_minibatch_count(self):
         src = inspect.getsource(MAPPTrainer.update)

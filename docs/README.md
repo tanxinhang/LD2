@@ -1,8 +1,13 @@
 # 多 UAV 分布式 ISAC：当前系统总文档
 
-> 状态日期：2026-08-21。本文同时给出当前模型、部署算法、最新数据、证据边界和下一步，
+> 状态日期：2026-09-01。本文同时给出当前模型、部署算法、最新数据、证据边界和下一步，
 > 是项目的首要阅读入口。公式与代码级细节见 `CURRENT_SYSTEM_MODEL.md`；算法为什么演进
 > 到当前形态见 `ALGORITHM_EVOLUTION.md`；所有历史数据和失败实验见 `EXPERIMENT_LOG.md`。
+
+> **2026-09-01 身份门禁收口**：`config/system_manifest.yaml` 是 post-G2 基础契约，
+> 不是可单独用于正式运行的完整场景；当前 executable profile 为
+> `config/exp_strict_distributed_k16q16.yaml`，并绑定 K16/Q16
+> reset-distribution/v2 blind bank。CI 与正式运行均对该 profile 做 strict 双向指纹校验。
 
 > **G2-0 科学口径变更（2026-08-20）**：当前代码已把 raw deflection 从“能量除以
 > 噪声功率”的量纲不闭合写法，修正为无量纲能量比 `E_signal/E_noise`。因此下表全部
@@ -292,7 +297,10 @@ fail-closed 触发率。两项完成前，不把解析 Shannon/DD 几何结果�
 常用验证：
 
 ```powershell
+# 当前 post-G2 门；在新的 clean/blind100 产物注册前应 fail closed（exit 2）
 python tools/assert_formal_gates.py
+# 只复核 pre-G2 历史表，不代表当前系统认证通过
+python tools/assert_formal_gates.py --evidence-epoch historical
 pytest tests/test_config_validation.py tests/test_run_provenance.py `
   tests/test_assert_gate_thresholds.py tests/test_assert_formal_gates.py -q
 ```

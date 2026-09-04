@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from uav_isac.utils.sentinels import AGE_NO_CACHE
 
 from uav_isac.environment.observation_slices import ObservationSlices
 from uav_isac.physical.geometry import C_LIGHT
@@ -302,7 +303,7 @@ def owner_local_dd_effectiveness(
             target_velocity,
             u_rx[None, :, :, :] - u_tx,
         )
-        + np.einsum("jd,jqd->jq", velocity, u_rx)[None, :, :]
+        - np.einsum("jd,jqd->jq", velocity, u_rx)[None, :, :]
     )
     delay_fraction = delay * M * delta_f
     doppler_fraction = doppler * N * symbol_period
@@ -469,7 +470,11 @@ def owner_local_dd_effectiveness_bounds(
     rx_range = np.maximum(rx_norm, 1.0e-9)
     tau = (tx_range + rx_range[None, :, :]) / C_LIGHT
 
-    # Preserve compute_doppler's 1e-10 denominator convention exactly.
+    # Audit 2026-08-26 (P0, advice/001 section 4): the receiver term must be
+    # ``-v_j^T u_qj`` under the "shrinking bistatic range = positive Doppler"
+    # convention, matching the fixed ``compute_doppler``.  The einsum copy kept
+    # the old sign, so it could diverge from the scalar geometry function once
+    # signed Doppler is consumed (Phase C direction control).
     u_tx = tx_vector / (tx_norm[:, :, :, None] + 1.0e-10)
     u_rx = rx_vector / (rx_norm[:, :, None] + 1.0e-10)
     doppler_tx = np.einsum("id,ijqd->ijq", velocity, u_tx)
@@ -478,7 +483,7 @@ def owner_local_dd_effectiveness_bounds(
         target_velocity,
         u_rx[None, :, :, :] - u_tx,
     )
-    doppler_rx = np.einsum("jd,jqd->jq", velocity, u_rx)[None, :, :]
+    doppler_rx = -np.einsum("jd,jqd->jq", velocity, u_rx)[None, :, :]
     nu = fc / C_LIGHT * (doppler_tx + doppler_target + doppler_rx)
 
     delay_fraction = tau * M * delta_f
@@ -965,7 +970,7 @@ def predict_coefficients_from_lagged_feedback(
             previous, observed_positive, previous_state)
     )
     target_invariant = fresh_target_invariant.copy()
-    target_age = np.full(Q, -1, dtype=np.int64)
+    target_age = np.full(Q, AGE_NO_CACHE, dtype=np.int64)
     target_version = np.zeros(Q, dtype=np.int64)
     cached_target = np.zeros(Q, dtype=bool)
     if target_invariant_cache is not None:

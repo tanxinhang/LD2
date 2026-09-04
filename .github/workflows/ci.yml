@@ -1,12 +1,11 @@
 name: CI
 
 # Audit remediation 2026-08-16: the project previously had no CI.  This
-# workflow runs the full pytest suite on Linux (the reference Windows env is
-# affected by a known MKL numpy.linalg.eigvalsh native abort when belief and
-# non-belief suites share one process -- docs/KNOWN_ISSUES.md; Linux runners
-# are not affected).  results/ is git-ignored, so the formal-gate assertion
-# (tools/assert_formal_gates.py) is intentionally NOT run here: it needs the
-# experiment tree present.
+# workflow runs the full pytest suite on Linux and on the reference Windows
+# spawn/OpenMP family.  The Windows leg is required because persistent private
+# LP workers and Torch/MKL runtime loading are platform-specific.  results/ is
+# git-ignored, so historical artifact checks self-skip in CI; synthetic formal
+# gate tests still exercise the current evidence contract.
 
 on:
   push:
@@ -14,19 +13,38 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            # NumPy 2.5 / SciPy 1.18 require Python >=3.12.
+            python: "3.12"
+          - os: windows-latest
+            python: "3.14"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt -c constraints-ci.txt
+          python -m pip check
 
       - name: Run full test suite
         run: python -m pytest tests/ -q
+
+      - name: Verify frozen system identity
+        run: >-
+          python tools/check_system_identity.py
+          --manifest config/exp_strict_distributed_k16q16.yaml
+          --strict --commit "${{ github.sha }}"
+
+      - name: Verify detector normalization gate
+        run: python tools/audit_detector_normalization.py --assert-ready

@@ -2,7 +2,7 @@
 """B8 audit: how close is the P0 greedy to the exhaustive optimum?
 
 The current detection utility U(D) = -log(1-P_D(D)) is NOT concave in D
-(see docs/KNOWN_ISSUES.md B8), so the greedy P0 has no (1-1/e) submodular
+(see docs/CURRENT_SYSTEM_MODEL.md section 5.2), so the greedy P0 has no (1-1/e) submodular
 guarantee. This script empirically measures the greedy optimality gap by
 comparing inner_solver.solve (greedy) against inner_solver.solve_exhaustive
 (brute force) on real per-frame deflection candidate sets.
