@@ -68,7 +68,10 @@ def _check_packaging():
 
 
 def _check_data_catalog():
-    source = REPOSITORY_ROOT / "artifacts/legacy/catalog.post_cleanup.sha256.jsonl"
+    source = (
+        REPOSITORY_ROOT
+        / "artifacts/legacy/catalog.post_classified_cleanup.sha256.jsonl"
+    )
     rows = [json.loads(line) for line in source.read_text("utf-8").splitlines()]
     assert rows and all(row["hash_status"] == "verified" for row in rows)
     assert all(len(row["sha256"]) == 64 for row in rows)
