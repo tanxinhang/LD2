@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "development_candidate",
+  "formal_eligible": false,
+  "calibration_seeds": [11114, 10069, 11149, 10749],
+  "primary_environment": "L4",
+  "resource_invariance": {
+    "bits_per_frame_baseline": 2581.76,
+    "bits_per_frame_candidate": 2581.76,
+    "delivery_rate_baseline": 1.0,
+    "delivery_rate_candidate": 1.0,
+    "power_budget_changed": false
+  },
+  "selected_candidate": {
+    "name": "short_assignment_commitment_h5",
+    "profile": "config/exp_research_l4_adaptive_assignment_h5.yaml",
+    "managed_run": "pilot-c1f3b45804c06b6d84eb",
+    "change": {
+      "distributed_greedy_matching_hold_frames": {"baseline": 20, "candidate": 5}
+    },
+    "l4": {
+      "baseline": {"steady": 0.9000074492464804, "weak3": 0.8286524337882096, "worst": 0.8051103581818632, "worst_min": 0.6249989137162576, "qos_rate": 0.75},
+      "candidate": {"steady": 0.9161662008523134, "weak3": 0.86199212612317, "worst": 0.8521279140905327, "worst_min": 0.6283442733323126, "qos_rate": 0.75},
+      "delta": {"steady": 0.016158751605833, "weak3": 0.0333396923349604, "worst": 0.0470175559086695, "worst_min": 0.003345359616055}
+    },
+    "l0_regression_guard": {
+      "profile": "config/exp_research_l0_adaptive_assignment_h5.yaml",
+      "managed_run": "pilot-a31fc332a6f90bb6cad6",
+      "baseline_worst": 0.9700300015501118,
+      "candidate_worst": 0.9400599525329261,
+      "delta_worst": -0.0299700490171857,
+      "baseline_qos_rate": 1.0,
+      "candidate_qos_rate": 1.0
+    }
+  },
+  "rejected_screens": [
+    {"name": "fixed_h10", "reason": "smaller L4 gain and clean-regime worst regression"},
+    {"name": "fixed_h15", "reason": "L4 hard-seed worst regressed"},
+    {"name": "speed_or_local_pd_adaptive_hold", "reason": "local signals did not reproduce the h5 gain and harmed the hardest seed"},
+    {"name": "geometry_improvement_event_trigger", "reason": "four-seed L4 worst improved only 0.0066 and one seed regressed by about 0.03"},
+    {"name": "gain_scheduled_movement", "reason": "hard-seed mean improved but worst minimum fell from 0.6250 to 0.5909"}
+  ],
+  "decision": "Retain h5 as an L4-specific development comparator, not a universal replacement. Require a new sealed paired bank before confirmation."
+}

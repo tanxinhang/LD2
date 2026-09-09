@@ -1,0 +1,5 @@
+# L4 algorithm candidate: short distributed assignment commitment.
+extends: exp_research_interference_l4_noise_loaded.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 5

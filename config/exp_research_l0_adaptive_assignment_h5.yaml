@@ -1,0 +1,5 @@
+# Clean-regime regression guard for the L4 short-commitment candidate.
+extends: exp_strict_distributed_k16q16.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 5

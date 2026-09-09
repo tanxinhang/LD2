@@ -2,6 +2,15 @@
 # not promoted into this registry merely because their scripts still exist.
 schema_version: 1
 programs:
+  - name: l4_short_assignment_commitment
+    question: Does a shorter distributed assignment commitment improve worst-target detection under the L4 disturbance protocol at unchanged resources?
+    state: candidate
+    implementation: uav_isac/legacy/environment_core.py
+    profile: config/exp_research_l4_adaptive_assignment_h5.yaml
+    evidence: artifacts/research/l4_assignment_optimization_v1.json
+    formal_eligible: false
+    next_gate: Evaluate paired against the 20-frame L4 baseline on a newly sealed seed bank and report confidence intervals plus the L0 regression guard.
+
   - name: k16q16_disturbance_ladder
     question: Can a candidate improve worst-target detection under simple sensing, synchronization, maneuver and receiver-load stress without degrading the clean control?
     state: candidate
