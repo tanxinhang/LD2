@@ -1,0 +1,8 @@
+# Research-only difficulty calibration. Adds target-model mismatch to L2.
+extends: exp_research_interference_l2_fixed_sync.yaml
+
+target:
+  # The controller retains its CV belief model while true acceleration and
+  # speed increase. This is an explicit process-disturbance stressor.
+  speed_range: [2.0, 10.0]
+  sigma_a: 1.5

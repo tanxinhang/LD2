@@ -1,0 +1,8 @@
+# Research-only difficulty calibration. Adds a simple deterministic receiver
+# synchronization mismatch to the Swerling layer.
+extends: exp_research_interference_l1_swerling.yaml
+
+channel:
+  # Signed fractional-bin offsets in the receiver's OTFS matched filter.
+  sync_delay_error_bins: 0.35
+  sync_doppler_error_bins: 0.35

@@ -79,6 +79,26 @@ class TestRawDeflection:
 
 
 class TestDeflectionComputer:
+    def test_fixed_sync_error_is_expressed_in_fractional_bins(
+        self, default_config, seeded_rng,
+    ):
+        cfg = default_config
+        computer = DeflectionComputer(
+            fc=cfg.otfs.fc, delta_f=cfg.otfs.delta_f,
+            T_sym=cfg.otfs.T_sym, M=cfg.otfs.M, N=cfg.otfs.N,
+            kT=cfg.channel.kT, B=cfg.otfs.B, NF_dB=cfg.channel.NF,
+            P_sense=cfg.uav.P_sense, P_report=cfg.uav.P_report,
+            ric_K=cfg.channel.ric_K, rcs=cfg.target.rcs,
+            g_min=cfg.detection.g_min, rng=seeded_rng,
+            sync_delay_error_bins=0.35,
+            sync_doppler_error_bins=-0.25,
+        )
+
+        tau_sync, nu_sync = computer._synchronized_coordinates(0.0, 0.0)
+
+        assert tau_sync * cfg.otfs.M * cfg.otfs.delta_f == pytest.approx(0.35)
+        assert nu_sync * cfg.otfs.N * cfg.otfs.T_sym == pytest.approx(-0.25)
+
     def test_produces_entries(self, default_config, seeded_rng,
                                sample_uav_positions, sample_uav_velocities,
                                sample_target_positions, sample_target_velocities,

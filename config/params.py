@@ -129,6 +129,10 @@ class ChannelParams:
     eta_nlos_dB: float = 21.0
     # Swerling-II RCS fading on the sensing return (default OFF).
     use_swerling: bool = False
+    # Research-only receiver synchronization mismatch, expressed as signed
+    # fractional OTFS bins. Zero preserves the frozen baseline exactly.
+    sync_delay_error_bins: float = 0.0
+    sync_doppler_error_bins: float = 0.0
 
 
 @dataclass
@@ -1681,6 +1685,11 @@ class MasterConfig:
         for name in (
                 "ric_K", "los_a", "los_b", "eta_los_dB", "eta_nlos_dB"):
             _require_nonnegative(f"config.channel.{name}", getattr(channel, name))
+        for name in ("sync_delay_error_bins", "sync_doppler_error_bins"):
+            value = float(getattr(channel, name))
+            if not math.isfinite(value) or abs(value) > 0.5:
+                raise ValueError(
+                    f"config.channel.{name} must be finite and lie in [-0.5, 0.5]")
 
         detection = self.detection
         _require_probability("config.detection.P_FA", detection.P_FA, strict=True)

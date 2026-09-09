@@ -2,6 +2,15 @@
 # not promoted into this registry merely because their scripts still exist.
 schema_version: 1
 programs:
+  - name: k16q16_disturbance_ladder
+    question: Can a candidate improve worst-target detection under simple sensing, synchronization, maneuver and receiver-load stress without degrading the clean control?
+    state: candidate
+    implementation: tools/run_strict_distributed_pilot.py
+    profile: config/exp_research_interference_l4_noise_loaded.yaml
+    evidence: artifacts/research/interference_ladder_calibration_v1.json
+    formal_eligible: false
+    next_gate: Compare candidates on paired non-test development seeds across L0--L4, then seal an independent confirmation bank.
+
   - name: strict_k16q16_baseline
     question: Can the frozen distributed controller satisfy the preregistered K16/Q16 blind protocol?
     state: frozen_baseline

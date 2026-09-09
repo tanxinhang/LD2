@@ -214,6 +214,8 @@ class DeflectionComputer:
         use_swerling: bool = False,
         use_report_link: bool = True,
         dd_gain_mode: str = "binary",
+        sync_delay_error_bins: float = 0.0,
+        sync_doppler_error_bins: float = 0.0,
     ):
         self.fc = fc
         self.delta_f = delta_f
@@ -259,6 +261,22 @@ class DeflectionComputer:
         self.eta_los_dB, self.eta_nlos_dB = eta_los_dB, eta_nlos_dB
         self.use_swerling = use_swerling
         self.use_report_link = bool(use_report_link)
+        self.sync_delay_error_bins = float(sync_delay_error_bins)
+        self.sync_doppler_error_bins = float(sync_doppler_error_bins)
+        for name, value in (
+            ("sync_delay_error_bins", self.sync_delay_error_bins),
+            ("sync_doppler_error_bins", self.sync_doppler_error_bins),
+        ):
+            if not np.isfinite(value) or abs(value) > 0.5:
+                raise ValueError(f"{name} must be finite and lie in [-0.5, 0.5]")
+
+    def _synchronized_coordinates(
+        self, tau: np.ndarray | float, nu: np.ndarray | float,
+    ) -> tuple[np.ndarray | float, np.ndarray | float]:
+        """Return receiver-side coordinates after a fixed fractional-bin error."""
+        tau_error_s = self.sync_delay_error_bins / (self.M * self.delta_f)
+        nu_error_hz = self.sync_doppler_error_bins / (self.N * self.T_sym)
+        return tau + tau_error_s, nu + nu_error_hz
 
     def compute_dense(
         self,
@@ -309,8 +327,9 @@ class DeflectionComputer:
         finite_nu = np.isfinite(nu)
         tau_eval = np.where(finite_tau, tau, 0.0)
         nu_eval = np.where(finite_nu, nu, 0.0)
-        delay_fraction = tau_eval * self.M * self.delta_f
-        doppler_fraction = nu_eval * self.N * self.T_sym
+        tau_sync, nu_sync = self._synchronized_coordinates(tau_eval, nu_eval)
+        delay_fraction = tau_sync * self.M * self.delta_f
+        doppler_fraction = nu_sync * self.N * self.T_sym
         delay_offset = delay_fraction - np.round(delay_fraction)
         doppler_offset = doppler_fraction - np.round(doppler_fraction)
         g_dd = np.abs(np.sinc(delay_offset) * np.sinc(doppler_offset))
@@ -318,9 +337,9 @@ class DeflectionComputer:
             support = (
                 finite_tau
                 & finite_nu
-                & (tau_eval >= 0.0)
-                & (tau_eval < 1.0 / self.delta_f)
-                & (np.abs(nu_eval) <= 1.0 / (2.0 * self.T_sym))
+                & (tau_sync >= 0.0)
+                & (tau_sync < 1.0 / self.delta_f)
+                & (np.abs(nu_sync) <= 1.0 / (2.0 * self.T_sym))
             )
             d_eff = d_raw * support.astype(np.float64) * g_dd ** 2
         else:
@@ -476,8 +495,10 @@ class DeflectionComputer:
             finite_nu = np.isfinite(nu)
             tau_safe = np.where(finite_tau, tau, 0.0)
             nu_safe = np.where(finite_nu, nu, 0.0)
+            tau_sync, nu_sync = self._synchronized_coordinates(
+                tau_safe, nu_safe)
             phys_gain_all = compute_dd_phys_gain_batch(
-                tau_safe, nu_safe, self.delta_f, self.T_sym, self.M, self.N)
+                tau_sync, nu_sync, self.delta_f, self.T_sym, self.M, self.N)
             chi_rep_all = np.zeros((1, K, 1), dtype=np.float64)
             for j in rx_indices:
                 chi_rep_all[0, int(j), 0] = float(chi_rep_by_rx[int(j)])
@@ -528,8 +549,10 @@ class DeflectionComputer:
                     )
 
                     # Step 3: DD effectiveness
+                    tau_sync, nu_sync = self._synchronized_coordinates(
+                        tau[i, j, q], nu[i, j, q])
                     g_dd = compute_dd_effectiveness(
-                        tau[i, j, q], nu[i, j, q],
+                        tau_sync, nu_sync,
                         self.delta_f, self.T_sym,
                         self.M, self.N, self.g_min
                     )
@@ -545,7 +568,7 @@ class DeflectionComputer:
                         # Out-of-support targets get exactly zero even if the
                         # aliased fractional mismatch is near an integer bin.
                         phys_gain = compute_dd_phys_gain(
-                            tau[i, j, q], nu[i, j, q],
+                            tau_sync, nu_sync,
                             self.delta_f, self.T_sym,
                             self.M, self.N,
                         )

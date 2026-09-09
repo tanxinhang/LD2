@@ -1,0 +1,6 @@
+# Research-only difficulty calibration. Never use as the frozen formal baseline.
+extends: exp_strict_distributed_k16q16.yaml
+
+channel:
+  # Frame-varying Swerling-II target RCS in the physical sensing return.
+  use_swerling: true

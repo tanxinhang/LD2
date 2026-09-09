@@ -1210,6 +1210,10 @@ class EnvironmentCore:
             use_swerling=getattr(ch, 'use_swerling', False),
             use_report_link=self.ground_communication_enabled,
             dd_gain_mode=str(getattr(de, 'dd_gain_mode', 'binary')),
+            sync_delay_error_bins=float(getattr(
+                ch, 'sync_delay_error_bins', 0.0)),
+            sync_doppler_error_bins=float(getattr(
+                ch, 'sync_doppler_error_bins', 0.0)),
         )
 
         # File-backed configs validate one weight per target.  Programmatic

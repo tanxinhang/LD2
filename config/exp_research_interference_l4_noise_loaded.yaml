@@ -1,0 +1,10 @@
+# Research-only algorithm-development difficulty layer. Adds receiver noise /
+# unresolved interference loading to L3. It contains no burst-loss process.
+extends: exp_research_interference_l3_maneuver.yaml
+
+channel:
+  # +4 dB relative to the 4 dB formal receiver noise figure. This enters the
+  # physical sensing-noise denominator (and U2U receiver noise), but is not an
+  # explicit spatial co-channel interferer; reports must call it equivalent
+  # receiver loading rather than a modeled jammer.
+  NF: 8.0

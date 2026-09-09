@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "status": "calibrated_development_protocol",
+  "formal_eligible": false,
+  "calibration_seeds": [11114, 10069, 11149, 10749],
+  "seed_policy": "not in the frozen K16/Q16 formal test split; selected across the stored geometry-difficulty range",
+  "frames": 150,
+  "tail_window": 50,
+  "carrier_period": 3,
+  "target_development_interval_for_worst_mean": [0.70, 0.85],
+  "burst_loss_included": false,
+  "levels": [
+    {
+      "level": "L0",
+      "profile": "config/exp_strict_distributed_k16q16.yaml",
+      "managed_run": "pilot-ac6c79bd87c6ecb22180",
+      "steady_mean": 0.9968780883785788,
+      "weak3_mean": 0.9833498047508388,
+      "worst_mean": 0.9700300015501118,
+      "worst_min": 0.940060001990109,
+      "qos_rate": 1.0,
+      "delivery_rate_mean": 1.0
+    },
+    {
+      "level": "L1",
+      "profile": "config/exp_research_interference_l1_swerling.yaml",
+      "managed_run": "pilot-883565fc1b71eb1138ad",
+      "steady_mean": 0.9776585711626586,
+      "weak3_mean": 0.9499436850273086,
+      "worst_mean": 0.9331273849619209,
+      "worst_min": 0.8946201204650397,
+      "qos_rate": 1.0,
+      "delivery_rate_mean": 1.0
+    },
+    {
+      "level": "L2",
+      "profile": "config/exp_research_interference_l2_fixed_sync.yaml",
+      "managed_run": "pilot-1022dfdb7f76072901d4",
+      "steady_mean": 0.9731618183526447,
+      "weak3_mean": 0.9441430509883358,
+      "worst_mean": 0.9330116452905846,
+      "worst_min": 0.88597379176136,
+      "qos_rate": 1.0,
+      "delivery_rate_mean": 1.0,
+      "sync_error_bins": {"delay": 0.35, "doppler": 0.35}
+    },
+    {
+      "level": "L3",
+      "profile": "config/exp_research_interference_l3_maneuver.yaml",
+      "managed_run": "pilot-c050dfd6e518fb88727b",
+      "steady_mean": 0.9486340075785302,
+      "weak3_mean": 0.8993263013859596,
+      "worst_mean": 0.8784547075819243,
+      "worst_min": 0.7942267814402686,
+      "qos_rate": 1.0,
+      "delivery_rate_mean": 1.0
+    },
+    {
+      "level": "L4",
+      "profile": "config/exp_research_interference_l4_noise_loaded.yaml",
+      "managed_run": "pilot-3914d7973c8347948cc6",
+      "steady_mean": 0.9000074492464804,
+      "weak3_mean": 0.8286524337882096,
+      "worst_mean": 0.8051103581818632,
+      "worst_min": 0.6249989137162576,
+      "qos_rate": 0.75,
+      "delivery_rate_mean": 1.0,
+      "receiver_noise_figure_db": 8.0
+    }
+  ],
+  "selection": {
+    "algorithm_development_level": "L4",
+    "mechanism_ablation_levels": ["L0", "L1", "L2", "L3"],
+    "reason": "L4 enters the planned development interval without universal collapse; communication delivery remains perfect, so burst loss is not a hidden cause."
+  }
+}
