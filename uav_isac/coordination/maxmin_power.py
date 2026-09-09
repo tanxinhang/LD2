@@ -17,6 +17,19 @@ import numpy as np
 from scipy.optimize import linprog, minimize
 
 
+# HiGHS certifies feasibility in scaled coordinates.  Reconstructing the
+# physical objective from its basis marginals can therefore accumulate a few
+# solver tolerances when the optimum is hundreds or larger.  This bound is
+# still strict enough to reject a one-part-per-million optimality error while
+# avoiding an unsafe absolute-only comparison across physical scales.
+_PRIMAL_DUAL_RELATIVE_TOLERANCE = 1.0e-6
+
+
+def _primal_dual_tolerance(primal: float, dual: float) -> float:
+    scale = max(abs(float(primal)), abs(float(dual)), np.finfo(np.float64).tiny)
+    return _PRIMAL_DUAL_RELATIVE_TOLERANCE * scale
+
+
 @dataclass(frozen=True)
 class MaxMinPowerResult:
     power_w: np.ndarray
@@ -532,9 +545,7 @@ def solve_fixed_structure_maxmin_power_lp(
         budget * np.max(prices[None, :] * gain, axis=1)))
     # Any simplex target price is a valid upper bound for the unconstrained
     # max-min problem and therefore also for its reserve-constrained subset.
-    certificate_scale = max(
-        abs(raw_dual_upper), abs(worst), np.finfo(np.float64).tiny)
-    certificate_tolerance = 1.0e-7 * certificate_scale
+    certificate_tolerance = _primal_dual_tolerance(worst, raw_dual_upper)
     if (
         not np.isfinite(raw_dual_upper)
         or raw_dual_upper < worst - certificate_tolerance

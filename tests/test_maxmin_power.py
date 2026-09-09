@@ -14,6 +14,18 @@ from uav_isac.coordination.maxmin_power import (
     replicated_local_row_maxmin_power,
     solve_fixed_structure_maxmin_power_lp,
 )
+from uav_isac.coordination.maxmin_power import _primal_dual_tolerance
+
+
+def test_primal_dual_certificate_tolerance_scales_with_physical_objective():
+    primal = 383.6030900104997
+    dual = 383.6031843422889
+
+    tolerance = _primal_dual_tolerance(primal, dual)
+
+    assert dual - primal < tolerance
+    assert tolerance == pytest.approx(dual * 1.0e-6)
+    assert 2.0e-6 * dual > tolerance
 
 
 def test_inertia_blend_preserves_each_local_power_simplex():
