@@ -25,3 +25,12 @@ seed list and acceptance rules are frozen in
 `artifacts/research/l4_markov_prediction_h10_v1.json`. This is development
 confirmation, not formal evidence; a larger bank is required for a narrow
 confidence interval.
+
+The preregistered development confirmation rejected the endpoint-mean H10
+candidate. On the eight untouched seeds, baseline versus candidate
+steady/weak3/worst was 0.94847/0.89385/0.87547 versus
+0.94277/0.88661/0.86939. The candidate worst minimum was 0.72881 versus
+0.75218, with four wins and four losses. SCORE, WEAK3 and TAIL therefore
+failed; QoS, L0 and resource guards passed. The next hypothesis must integrate
+the path distribution and belief covariance rather than tune another fixed
+endpoint horizon.

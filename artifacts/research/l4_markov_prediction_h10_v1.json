@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "preregistered_development_confirmation_pending",
+  "status": "rejected_by_preregistered_development_confirmation",
   "formal_eligible": false,
   "hypothesis": "A one-second causal CV-Markov mean prediction improves distributed bistatic assignment under L4 without the clean-regime regression of short fixed commitment.",
   "candidate_profile": "config/exp_research_l4_markov_prediction_h10.yaml",
@@ -41,5 +41,21 @@
       "RESOURCE": "bits/frame, delivery rate and sensing-power cap must remain unchanged"
     }
   },
-  "confirmation_results": null
+  "confirmation_results": {
+    "baseline_run": "pilot-d7eb3af994455a710341",
+    "candidate_run": "pilot-cb5b1a92000665a172f6",
+    "baseline": {"steady": 0.9484704238090416, "weak3": 0.8938511664836937, "worst": 0.8754746822480002, "worst_min": 0.7521757402873008, "qos_rate": 1.0, "bits_per_frame": 2581.76},
+    "candidate": {"steady": 0.9427682902669474, "weak3": 0.8866088678101578, "worst": 0.8693885357373241, "worst_min": 0.7288084522838689, "qos_rate": 1.0, "bits_per_frame": 2581.76},
+    "paired_delta": {
+      "steady_mean": -0.0057021335420943,
+      "weak3_mean": -0.0072422986735358,
+      "worst_mean": -0.0060861465106762,
+      "worst_median": -0.0111040857459336,
+      "worst_wins": 4,
+      "worst_losses": 4,
+      "worst_mean_t95_ci": [-0.0251068506836455, 0.0129345576622932]
+    },
+    "gate": {"SCORE": false, "WEAK3": false, "TAIL": false, "QOS": true, "L0_GUARD": true, "RESOURCE": true},
+    "decision": "Reject endpoint-mean H10 as a promoted algorithm. Preserve the default-off predictor for reproducibility and test a path-integrated uncertainty-aware score as a distinct hypothesis."
+  }
 }
