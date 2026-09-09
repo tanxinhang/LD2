@@ -28,6 +28,11 @@ from .markov_kinematics import (
     predict_cv_markov_horizon,
     predict_reflecting_cv_mean,
 )
+from .markov_assignment import (
+    MarkovAssignmentPlan,
+    assignment_switch_distance,
+    solve_markov_assignment_path,
+)
 
 __all__ = [
     "append_causal_feature_residual",
@@ -54,4 +59,7 @@ __all__ = [
     "cv_markov_matrices",
     "predict_cv_markov_horizon",
     "predict_reflecting_cv_mean",
+    "MarkovAssignmentPlan",
+    "assignment_switch_distance",
+    "solve_markov_assignment_path",
 ]

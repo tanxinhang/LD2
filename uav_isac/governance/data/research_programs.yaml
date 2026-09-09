@@ -2,6 +2,15 @@
 # not promoted into this registry merely because their scripts still exist.
 schema_version: 1
 programs:
+  - name: l4_markov_assignment_dp
+    question: Can a finite-state Markov assignment path with physical future-stage costs improve L4 tail detection without assignment churn?
+    state: shadow_incomplete
+    implementation: uav_isac/prediction/markov_assignment.py
+    profile: config/exp_research_l4_markov_prediction_h10.yaml
+    evidence: docs/L4_MARKOV_PREDICTION_2026-09-10.md
+    formal_eligible: false
+    next_gate: Build a causal shadow evaluator whose per-stage costs re-solve predicted structure and power, then test ranking agreement before granting action authority.
+
   - name: l4_markov_prediction
     question: Does causal one-second CV-Markov target prediction improve L4 distributed bistatic assignment without clean-regime regression?
     state: falsified

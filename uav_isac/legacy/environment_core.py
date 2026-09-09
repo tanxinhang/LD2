@@ -8890,8 +8890,6 @@ class EnvironmentCore:
             'movement_gain_schedule_strategy_hold_rate': 0.0,
             'movement_gain_schedule_no_improvement_rate': 0.0,
             'movement_gain_schedule_far_range_rate': 0.0,
-            'movement_target_prediction_frames': float(
-                self._distributed_greedy_matching_prediction_frames),
         }
         if self.Q <= 0:
             return {}

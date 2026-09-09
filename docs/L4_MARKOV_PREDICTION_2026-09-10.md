@@ -34,3 +34,18 @@ steady/weak3/worst was 0.94847/0.89385/0.87547 versus
 failed; QoS, L0 and resource guards passed. The next hypothesis must integrate
 the path distribution and belief covariance rather than tune another fixed
 endpoint horizon.
+
+A follow-up compressed path-risk proxy (three horizon samples plus one
+position-standard-deviation radial margin) was rejected on the four calibration
+seeds: worst changed by -0.0031 and the minimum fell from 0.6250 to 0.5336
+(`pilot-a49cefd3f74f4a9739b1`). The proxy assigned persistent priority to
+uncertain targets without re-solving the downstream structure and power at
+each future state. Its implementation was removed.
+
+The active next stage is a finite-state Markov assignment dynamic program in
+`uav_isac/prediction/markov_assignment.py`. Its states are complete assignment
+vectors; stage costs will come from future physical solves, and transitions pay
+normalized endpoint churn. The dynamic-programming kernel is deterministic and
+tested, but it has no live action authority yet. No performance claim is made
+until a shadow evaluator demonstrates that its predicted assignment ranking
+agrees with executed closed-loop Deflection.
