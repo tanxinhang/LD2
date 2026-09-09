@@ -7,6 +7,7 @@ from .project_phase import (
     load_project_phase,
 )
 from .research_programs import ResearchProgram, load_research_programs
+from .research_readiness import ResearchReadiness, audit_research_readiness
 from .architecture import audit_architecture, load_architecture_rules
 from .fingerprint import canonical_sha256, semantic_differences, semantic_fingerprint
 from .baseline import load_characterization_baselines
@@ -27,4 +28,6 @@ __all__ = [
     "load_runtime_profiles",
     "ResearchProgram",
     "load_research_programs",
+    "ResearchReadiness",
+    "audit_research_readiness",
 ]

@@ -28,6 +28,7 @@ from uav_isac.governance import (
     load_runtime_profiles,
     semantic_fingerprint,
     load_research_programs,
+    audit_research_readiness,
 )
 
 
@@ -160,6 +161,16 @@ def _research_programs_command() -> int:
     return 0
 
 
+def _refactor_status_command() -> int:
+    status = audit_research_readiness()
+    print(json.dumps({
+        "ready_for_algorithm_optimization": status.ready_for_algorithm_optimization,
+        "blockers": status.blockers,
+        "metrics": status.metrics,
+    }, indent=2))
+    return 0 if status.ready_for_algorithm_optimization else 2
+
+
 def _dispatch_command(name: str, operation: str, arguments: list[str]) -> int:
     assert_operation_allowed(operation)
     forwarded = tuple(arguments[1:] if arguments[:1] == ["--"] else arguments)
@@ -179,6 +190,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "research-programs",
         help="list active hypotheses, baselines, evidence, and next gates",
+    )
+    commands.add_parser(
+        "refactor-status",
+        help="report scientific refactor blockers before algorithm optimization",
     )
     commands.add_parser(
         "verify-baseline",
@@ -216,6 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _profiles_command()
     if args.command == "research-programs":
         return _research_programs_command()
+    if args.command == "refactor-status":
+        return _refactor_status_command()
     if args.command == "verify-baseline":
         return _verify_baseline_command()
     if args.command == "characterize":

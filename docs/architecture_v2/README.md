@@ -20,6 +20,7 @@ python tools/check_architecture_v2.py
 python tools/audit_data_lifecycle_v2.py
 pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli phase
 pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli research-programs
+pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli refactor-status
 pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli characterize --seed 451 --frames 3
 pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli verify-baseline
 ```
