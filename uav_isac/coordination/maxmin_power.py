@@ -18,16 +18,22 @@ from scipy.optimize import linprog, minimize
 
 
 # HiGHS certifies feasibility in scaled coordinates.  Reconstructing the
-# physical objective from its basis marginals can therefore accumulate a few
-# solver tolerances when the optimum is hundreds or larger.  This bound is
-# still strict enough to reject a one-part-per-million optimality error while
-# avoiding an unsafe absolute-only comparison across physical scales.
-_PRIMAL_DUAL_RELATIVE_TOLERANCE = 1.0e-6
+# physical objective from its basis marginals can therefore undershoot by a
+# small solver tolerance.  A looser upper bound remains mathematically sound;
+# its actual gap must be propagated instead of rejected or reported as zero.
+_PRIMAL_DUAL_RELATIVE_TOLERANCE = 1.0e-7
 
 
 def _primal_dual_tolerance(primal: float, dual: float) -> float:
     scale = max(abs(float(primal)), abs(float(dual)), np.finfo(np.float64).tiny)
     return _PRIMAL_DUAL_RELATIVE_TOLERANCE * scale
+
+
+def _dual_upper_is_sound(primal: float, dual: float) -> bool:
+    return bool(
+        np.isfinite(dual)
+        and float(dual) >= float(primal) - _primal_dual_tolerance(primal, dual)
+    )
 
 
 @dataclass(frozen=True)
@@ -545,15 +551,7 @@ def solve_fixed_structure_maxmin_power_lp(
         budget * np.max(prices[None, :] * gain, axis=1)))
     # Any simplex target price is a valid upper bound for the unconstrained
     # max-min problem and therefore also for its reserve-constrained subset.
-    certificate_tolerance = _primal_dual_tolerance(worst, raw_dual_upper)
-    if (
-        not np.isfinite(raw_dual_upper)
-        or raw_dual_upper < worst - certificate_tolerance
-        or (
-            reserve is None
-            and raw_dual_upper > worst + certificate_tolerance
-        )
-    ):
+    if not _dual_upper_is_sound(worst, raw_dual_upper):
         raise RuntimeError(
             "fixed-structure max-min LP failed its primal-dual "
             "certificate; refusing a possible numerical false optimum: "
@@ -1062,6 +1060,10 @@ def replicated_local_row_maxmin_power(
             local = solved_results[problem_index]
             solve_elapsed = float(solve_times[problem_index])
             for viewer in pending_problem_viewers[problem_key]:
+                local_relative_gap[viewer] = (
+                    local.primal_dual_gap
+                    / max(local.dual_upper_bound, np.finfo(np.float64).tiny)
+                )
                 commit_complete_solution(
                     viewer,
                     views[viewer],
