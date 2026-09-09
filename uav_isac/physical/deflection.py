@@ -19,7 +19,8 @@ from uav_isac.physical.otfs import (
 )
 from uav_isac.physical.channel import (
     compute_noise_power,
-    compute_report_link_reliability
+    compute_report_link_reliability,
+    expected_report_link_reliability,
 )
 from uav_isac.utils.types import DeflectionEntry
 
@@ -355,6 +356,112 @@ class DeflectionComputer:
             )
             endpoint_valid &= ~np.eye(K, dtype=bool)
         valid = np.broadcast_to(endpoint_valid[:, :, None], (K, K, Q)).copy()
+        return DenseDeflection(
+            tau=tau, nu=nu, alpha=alpha, d_raw=d_raw,
+            g_dd=g_dd, d_eff=d_eff, valid=valid,
+        )
+
+    def compute_expected_dense(
+        self,
+        uav_positions: np.ndarray,
+        uav_velocities: np.ndarray,
+        target_positions: np.ndarray,
+        target_velocities: np.ndarray,
+        roles: np.ndarray,
+        fc_position: np.ndarray,
+        role_agnostic: bool = False,
+        sensing_power_w: Optional[np.ndarray] = None,
+        quadrature_order: int = 12,
+    ) -> DenseDeflection:
+        """Compute conditional-mean deflection without consuming live RNG.
+
+        Geometry, synchronization loss and the OTFS support gate are evaluated
+        at the supplied state.  Swerling-II contributes its exact unit-mean
+        exponential multiplier.  When enabled, receiver-to-fusion reliability
+        is integrated over normalized Rician fading by deterministic
+        Gauss--Hermite quadrature.  The result is therefore suitable for
+        counterfactual prediction branches, which must not advance the random
+        stream used by the live environment.
+        """
+
+        K = uav_positions.shape[0]
+        Q = target_positions.shape[0]
+        if sensing_power_w is None:
+            power = np.full((K, Q), self.P_sense, dtype=np.float64)
+        else:
+            power = np.asarray(sensing_power_w, dtype=np.float64)
+            if power.shape != (K, Q):
+                raise ValueError(
+                    f"sensing_power_w must have shape {(K, Q)}, got "
+                    f"{power.shape}")
+            if not np.all(np.isfinite(power)) or np.any(power < -1.0e-12):
+                raise ValueError(
+                    "sensing_power_w must be finite and non-negative")
+            power = np.maximum(power, 0.0)
+
+        tau, nu, alpha = compute_all_bistatic_params(
+            uav_positions, uav_velocities,
+            target_positions, target_velocities,
+            roles, self.fc, self.rcs, role_agnostic=role_agnostic,
+        )
+        raw_scale = float(
+            self.c_det * self.antenna_gain * self.M * self.N * self.n_cpi
+            / max(self.noise_power, 1.0e-15)
+        )
+        # For Swerling-II, E[X]=1 for X~Exp(1), so the conditional mean raw
+        # deflection is exactly the no-fading expression below.
+        d_raw = raw_scale * alpha * alpha * power[:, None, :]
+
+        finite_tau = np.isfinite(tau)
+        finite_nu = np.isfinite(nu)
+        tau_eval = np.where(finite_tau, tau, 0.0)
+        nu_eval = np.where(finite_nu, nu, 0.0)
+        tau_sync, nu_sync = self._synchronized_coordinates(tau_eval, nu_eval)
+        delay_fraction = tau_sync * self.M * self.delta_f
+        doppler_fraction = nu_sync * self.N * self.T_sym
+        delay_offset = delay_fraction - np.round(delay_fraction)
+        doppler_offset = doppler_fraction - np.round(doppler_fraction)
+        g_dd = np.abs(np.sinc(delay_offset) * np.sinc(doppler_offset))
+        if self.dd_gain_mode == "continuous":
+            support = (
+                finite_tau
+                & finite_nu
+                & (tau_sync >= 0.0)
+                & (tau_sync < 1.0 / self.delta_f)
+                & (np.abs(nu_sync) <= 1.0 / (2.0 * self.T_sym))
+            )
+            dd_factor = support.astype(np.float64) * g_dd ** 2
+        else:
+            dd_factor = (g_dd >= self.g_min).astype(np.float64)
+
+        if role_agnostic:
+            endpoint_valid = ~np.eye(K, dtype=bool)
+            rx_indices = np.arange(K)
+        else:
+            role_array = np.asarray(roles)
+            endpoint_valid = (
+                (role_array[:, None] == 0)
+                & (role_array[None, :] == 1)
+            )
+            endpoint_valid &= ~np.eye(K, dtype=bool)
+            rx_indices = np.where(role_array == 1)[0]
+        valid = np.broadcast_to(endpoint_valid[:, :, None], (K, K, Q)).copy()
+
+        chi_rep = np.ones((1, K, 1), dtype=np.float64)
+        if self.use_report_link:
+            chi_rep.fill(0.0)
+            for j in rx_indices:
+                chi_rep[0, int(j), 0] = expected_report_link_reliability(
+                    uav_positions[int(j)], fc_position,
+                    self.fc, self.ric_K, self.noise_power, self.P_report,
+                    use_los_prob=self.use_los_prob,
+                    los_a=self.los_a, los_b=self.los_b,
+                    eta_los_dB=self.eta_los_dB,
+                    eta_nlos_dB=self.eta_nlos_dB,
+                    quadrature_order=quadrature_order,
+                )
+        d_eff = chi_rep * d_raw * dd_factor
+        d_eff = np.where(valid, d_eff, 0.0)
         return DenseDeflection(
             tau=tau, nu=nu, alpha=alpha, d_raw=d_raw,
             g_dd=g_dd, d_eff=d_eff, valid=valid,

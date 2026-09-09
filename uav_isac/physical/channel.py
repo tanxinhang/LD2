@@ -5,6 +5,7 @@ both sensing (bistatic radar) and reporting (UAV→FC) links.
 """
 
 import numpy as np
+from functools import lru_cache
 from typing import Tuple
 
 
@@ -172,6 +173,96 @@ def compute_report_link_reliability(
     # chi_rep ≈ 1 for high SNR, ≈ 0 for low SNR
     chi_rep = snr / (snr + 1.0)
     return float(np.clip(chi_rep, 0.0, 1.0))
+
+
+@lru_cache(maxsize=8)
+def _hermite_rule(order: int) -> tuple[np.ndarray, np.ndarray]:
+    if int(order) != order or int(order) < 3:
+        raise ValueError("quadrature order must be an integer at least three")
+    nodes, weights = np.polynomial.hermite.hermgauss(int(order))
+    nodes.setflags(write=False)
+    weights.setflags(write=False)
+    return nodes, weights
+
+
+def expected_rician_soft_reliability(
+    mean_snr: float,
+    K_dB: float,
+    *,
+    quadrature_order: int = 12,
+) -> float:
+    """Deterministic expectation of ``SNR/(SNR+1)`` under Rician fading.
+
+    The Rician complex gain is normalized to unit mean power. Tensor-product
+    Gauss--Hermite quadrature integrates the two independent Gaussian
+    components without consuming a simulation random stream. ``mean_snr`` is
+    the SNR obtained from the mean channel power, before small-scale fading.
+    """
+
+    snr = float(mean_snr)
+    k_db = float(K_dB)
+    if not np.isfinite(snr) or snr < 0.0:
+        raise ValueError("mean_snr must be finite and non-negative")
+    if not np.isfinite(k_db):
+        raise ValueError("K_dB must be finite")
+    if snr == 0.0:
+        return 0.0
+    order = int(quadrature_order)
+    if order != quadrature_order:
+        raise ValueError("quadrature order must be an integer at least three")
+    nodes, weights = _hermite_rule(order)
+    k_linear = 10.0 ** (k_db / 10.0)
+    mean_component = np.sqrt(k_linear / (k_linear + 1.0))
+    component_std = np.sqrt(1.0 / (2.0 * (k_linear + 1.0)))
+    standard_nodes = np.sqrt(2.0) * nodes
+    real = mean_component + component_std * standard_nodes[:, None]
+    imag = component_std * standard_nodes[None, :]
+    normalized_power = real * real + imag * imag
+    instantaneous_snr = snr * normalized_power
+    reliability = instantaneous_snr / (instantaneous_snr + 1.0)
+    expectation = np.sum(
+        weights[:, None] * weights[None, :] * reliability) / np.pi
+    return float(np.clip(expectation, 0.0, 1.0))
+
+
+def expected_report_link_reliability(
+    rx_uav_pos: np.ndarray,
+    fc_position: np.ndarray,
+    fc: float,
+    K_dB: float,
+    noise_power: float,
+    P_report: float,
+    *,
+    use_los_prob: bool = False,
+    los_a: float = 4.88,
+    los_b: float = 0.43,
+    eta_los_dB: float = 0.1,
+    eta_nlos_dB: float = 21.0,
+    quadrature_order: int = 12,
+) -> float:
+    """Expected report reliability without drawing a fading realization."""
+
+    rx = np.asarray(rx_uav_pos, dtype=np.float64)
+    fusion = np.asarray(fc_position, dtype=np.float64)
+    if rx.shape != (3,) or fusion.shape != (3,) or np.any(~np.isfinite(rx)) or np.any(~np.isfinite(fusion)):
+        raise ValueError("report endpoints must be finite three-vectors")
+    noise = float(noise_power)
+    power = float(P_report)
+    if not np.isfinite(noise) or noise < 0.0 or not np.isfinite(power) or power < 0.0:
+        raise ValueError("report power and noise must be finite and non-negative")
+    distance = float(np.linalg.norm(rx - fusion))
+    path_loss_db = compute_path_loss_dB(distance, float(fc))
+    if use_los_prob:
+        vertical = abs(float(rx[2]) - float(fusion[2]))
+        horizontal = float(np.linalg.norm(rx[:2] - fusion[:2]))
+        elevation_deg = float(np.degrees(np.arctan2(
+            vertical, max(horizontal, 1.0e-6))))
+        path_loss_db += excess_loss_dB(
+            elevation_deg, los_a, los_b, eta_los_dB, eta_nlos_dB)
+    mean_gain = 10.0 ** (-path_loss_db / 10.0)
+    mean_snr = power * mean_gain / max(noise, 1.0e-15)
+    return expected_rician_soft_reliability(
+        mean_snr, K_dB, quadrature_order=quadrature_order)
 
 
 def compute_report_link_capacity(

@@ -56,5 +56,27 @@ continuous state, so future UAV geometry depends on the complete preceding
 assignment path. Transition and stage-cost callbacks are required to be finite
 and deterministic. This closes the state-aliasing error that would otherwise
 score different assignment histories at the same fictitious geometry. The
-remaining scientific task is to provide a deterministic expected-Swerling
-physical callback without consuming the live simulator RNG.
+physical callback is now implemented in
+`uav_isac/prediction/markov_physical_assignment.py`. Each reached geometry is
+scored by a conditional-mean channel calculation followed by the exact
+fixed-structure max-min sensing-power LP. Swerling-II uses its exact unit-mean
+exponential multiplier. Rician reporting reliability is integrated with
+deterministic tensor-product Gauss--Hermite quadrature, which agrees with a
+500,000-sample Monte Carlo check and does not consume the live simulator RNG.
+
+The target belief is no longer collapsed to its mean. Equal-weight
+spherical-radial cubature points reproduce each target's full `[x,y,vx,vy]`
+mean and covariance, then pass independently through bistatic geometry, OTFS
+support and expected report-link physics. Since a target's coefficient tensor
+depends only on that target's marginal state at fixed UAV geometry, this costs
+`8Q` physical evaluations rather than an exponentially large joint target
+tree. The stage can use the expected coefficient or a non-negative
+`mean - beta*standard_deviation` lower-confidence coefficient before the exact
+power solve.
+
+This is still a shadow kernel, not an online-authority result. The reporting
+structure is frozen over the planning horizon, target covariance horizons must
+come from causal local beliefs, and no closed-loop L4 gain is claimed yet. The
+next gate is to construct bounded candidate assignment neighborhoods from the
+existing causal movement assignments, log shadow rankings against the actually
+executed next-stage outcome, and only then preregister an authority experiment.

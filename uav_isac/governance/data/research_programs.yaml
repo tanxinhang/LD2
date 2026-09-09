@@ -4,12 +4,12 @@ schema_version: 1
 programs:
   - name: l4_markov_assignment_dp
     question: Can a finite-state Markov assignment path with physical future-stage costs improve L4 tail detection without assignment churn?
-    state: shadow_incomplete
-    implementation: uav_isac/prediction/markov_assignment.py
+    state: shadow_kernel_ready
+    implementation: uav_isac/prediction/markov_physical_assignment.py
     profile: config/exp_research_l4_markov_prediction_h10.yaml
     evidence: docs/L4_MARKOV_PREDICTION_2026-09-10.md
     formal_eligible: false
-    next_gate: Connect the action-conditioned scenario tree to deterministic expected-Swerling structure and power solves, then test shadow ranking agreement before granting action authority.
+    next_gate: Feed causal local-belief covariance horizons and bounded assignment neighborhoods into shadow logging, then test ranking agreement with executed next-stage tail detection before granting action authority.
 
   - name: l4_markov_prediction
     question: Does causal one-second CV-Markov target prediction improve L4 distributed bistatic assignment without clean-regime regression?
