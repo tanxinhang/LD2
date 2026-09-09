@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "development_candidate",
+  "status": "tail_effect_observed_mean_effect_unconfirmed",
   "formal_eligible": false,
   "calibration_seeds": [11114, 10069, 11149, 10749],
   "primary_environment": "L4",
@@ -31,6 +31,31 @@
       "delta_worst": -0.0299700490171857,
       "baseline_qos_rate": 1.0,
       "candidate_qos_rate": 1.0
+    },
+    "unseen_paired_holdout": {
+      "seeds": [11281, 11711, 11555, 10993, 10707, 10073, 11859, 10655],
+      "baseline_run": "pilot-77c1566c05fbdc28a682",
+      "candidate_run": "pilot-cbced31e6cfc0082ddb7",
+      "baseline": {"steady": 0.9414147494542442, "weak3": 0.8884938287383035, "worst": 0.866099674275929, "worst_min": 0.6362256478800806, "qos_rate": 0.875},
+      "candidate": {"steady": 0.946732772180374, "weak3": 0.890089238150336, "worst": 0.866508548147086, "worst_min": 0.7128206342591121, "qos_rate": 1.0},
+      "paired_delta": {
+        "steady_mean": 0.0053180227261298,
+        "weak3_mean": 0.0015954094120325,
+        "worst_mean": 0.0004088738711566,
+        "worst_median": -0.009657341,
+        "worst_wins": 4,
+        "worst_losses": 4,
+        "worst_mean_t95_ci": [-0.033938094, 0.034755842],
+        "worst_mean_bootstrap95_ci": [-0.024568110, 0.028641869],
+        "exact_sign_test_p": 1.0
+      },
+      "tail_diagnostic": {
+        "baseline_bottom_half_paired_delta_mean": 0.0200356011986511,
+        "baseline_top_half_paired_delta_mean": -0.0192178534563379,
+        "baseline_worst_vs_delta_pearson_r": -0.8552755867976631,
+        "pearson_p": 0.0067794357414792
+      },
+      "interpretation": "The independent holdout does not confirm a mean improvement. It supports a seed-dependent tail-regularization hypothesis: H5 repairs difficult trajectories while slightly harming easier ones."
     }
   },
   "rejected_screens": [
@@ -38,7 +63,9 @@
     {"name": "fixed_h15", "reason": "L4 hard-seed worst regressed"},
     {"name": "speed_or_local_pd_adaptive_hold", "reason": "local signals did not reproduce the h5 gain and harmed the hardest seed"},
     {"name": "geometry_improvement_event_trigger", "reason": "four-seed L4 worst improved only 0.0066 and one seed regressed by about 0.03"},
-    {"name": "gain_scheduled_movement", "reason": "hard-seed mean improved but worst minimum fell from 0.6250 to 0.5909"}
+    {"name": "gain_scheduled_movement", "reason": "hard-seed mean improved but worst minimum fell from 0.6250 to 0.5909"},
+    {"name": "certificate_adaptive_h20_h5", "managed_run": "pilot-2759ee7d8f5111475b8f", "reason": "calibration worst reached only 0.829 and worst minimum fell from 0.6250 to 0.5909; the lagged certificate was not a reliable reassignment trigger"},
+    {"name": "fixed_h3", "managed_run": "pilot-b72e03cafe5fa42a48f5", "reason": "calibration worst reached only 0.822 and worst minimum fell to 0.5789, disproving a monotone faster-is-better effect"}
   ],
-  "decision": "Retain h5 as an L4-specific development comparator, not a universal replacement. Require a new sealed paired bank before confirmation."
+  "decision": "Retain H5 as an L4-specific tail-risk comparator, not a universal replacement. The unseen holdout rejects a general mean-gain claim but motivates a preregistered lower-tail objective on a new untouched bank."
 }

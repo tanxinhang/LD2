@@ -9,7 +9,7 @@ programs:
     profile: config/exp_research_l4_adaptive_assignment_h5.yaml
     evidence: artifacts/research/l4_assignment_optimization_v1.json
     formal_eligible: false
-    next_gate: Evaluate paired against the 20-frame L4 baseline on a newly sealed seed bank and report confidence intervals plus the L0 regression guard.
+    next_gate: Preregister a lower-tail endpoint and acceptance rule, then evaluate H5 against H20 on a new untouched paired bank while retaining mean-worst and L0 regression guards.
 
   - name: k16q16_disturbance_ladder
     question: Can a candidate improve worst-target detection under simple sensing, synchronization, maneuver and receiver-load stress without degrading the clean control?
