@@ -23,6 +23,7 @@ from scipy.optimize import linprog, minimize
 # its actual gap must be propagated instead of rejected or reported as zero.
 _PRIMAL_DUAL_RELATIVE_TOLERANCE = 1.0e-7
 _LP_FEASIBILITY_RELATIVE_TOLERANCE = 1.0e-8
+_LP_FEASIBILITY_ABSOLUTE_TOLERANCE_W = 1.0e-7
 
 
 def _primal_dual_tolerance(primal: float, dual: float) -> float:
@@ -226,18 +227,21 @@ def _fill_budget(
             "fixed-structure max-min LP returned non-finite power")
     for transmitter in range(raw.shape[0]):
         negative_tolerance = max(
+            _LP_FEASIBILITY_ABSOLUTE_TOLERANCE_W,
             _LP_FEASIBILITY_RELATIVE_TOLERANCE * float(budget[transmitter]),
             64.0 * float(np.spacing(budget[transmitter])),
         )
         if float(np.min(raw[transmitter])) < -negative_tolerance:
             raise RuntimeError(
                 "fixed-structure max-min LP returned materially negative "
-                f"power for transmitter={transmitter}")
+                f"power for transmitter={transmitter}, "
+                f"minimum={float(np.min(raw[transmitter]))}")
     result = np.maximum(raw, 0.0).copy()
     for transmitter in range(result.shape[0]):
         slack = float(budget[transmitter] - np.sum(result[transmitter]))
         if slack < 0.0:
             tolerance = max(
+                _LP_FEASIBILITY_ABSOLUTE_TOLERANCE_W,
                 _LP_FEASIBILITY_RELATIVE_TOLERANCE * float(budget[transmitter]),
                 64.0 * float(np.spacing(budget[transmitter])),
             )

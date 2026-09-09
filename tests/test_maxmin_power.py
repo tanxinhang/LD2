@@ -43,7 +43,19 @@ def test_fill_budget_projects_solver_scale_residual_but_rejects_material_excess(
     assert np.sum(projected[0]) <= budget[0]
     np.testing.assert_allclose(np.sum(projected[0]), budget[0], rtol=0.0, atol=1e-15)
     with pytest.raises(RuntimeError, match="budget-infeasible"):
-        _fill_budget(np.asarray([[0.01, 0.0151 * (1.0 + 3.0e-6)]]), gain, budget)
+        _fill_budget(np.asarray([[0.01, 0.0151 * (1.0 + 3.0e-5)]]), gain, budget)
+
+
+def test_fill_budget_clips_only_highs_scale_negative_residual():
+    budget = np.asarray([0.0251])
+    gain = np.asarray([[2.0, 1.0]])
+
+    projected = _fill_budget(np.asarray([[-5.0e-8, 0.0251]]), gain, budget)
+
+    assert np.all(projected >= 0.0)
+    np.testing.assert_allclose(np.sum(projected[0]), budget[0], atol=1.0e-15)
+    with pytest.raises(RuntimeError, match="materially negative"):
+        _fill_budget(np.asarray([[-2.0e-7, 0.0251]]), gain, budget)
 
 
 def test_inertia_blend_preserves_each_local_power_simplex():
