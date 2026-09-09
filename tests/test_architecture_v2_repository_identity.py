@@ -11,7 +11,11 @@ def test_repository_identity_is_repeatable_and_covers_dirty_source():
     assert len(first.commit) == 40
     assert len(first.sha256) == 64
     expected_dirty = bool(subprocess.run(
-        ["git", "status", "--porcelain"],
+        [
+            "git", "status", "--porcelain", "--",
+            "uav_isac", "config", "scripts", "tools",
+            "requirements.txt", "constraints-ci.txt",
+        ],
         check=True,
         capture_output=True,
         text=True,
