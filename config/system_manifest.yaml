@@ -3,9 +3,9 @@
 # Scope: inherited physical/protocol contract for the canonical paper system.
 # A formal run must use a runtime profile that transitively extends this file
 # and binds a reset-distribution/v2 bank.  The current executable profile is
-# ``exp_strict_distributed_k16q16.yaml``.  Loading this base file alone retains
-# the legacy K4/Q2 defaults and K8 bank pointer for historical compatibility;
-# ``check_system_identity.py --strict`` therefore rejects it as a formal run.
+# ``exp_strict_distributed_k16q16.yaml``.  Loading this base file alone uses a
+# scenario-matched K4/Q2 v2 bank; scale profiles must override it with their own
+# scenario-matched bank.
 #
 # Frozen semantics (checked by tools/check_system_identity.py):
 #   scope        : U2U-only distributed ISAC, no UAV-ground fusion link
@@ -96,9 +96,9 @@ marl:
   comm_processing_delay_s: 0.0002
   comm_bandwidth_hz: 100000
   comm_tx_power_w: 0.25
-  # Historical compatibility pointer only.  Formal runtime profiles must
-  # override this with a scenario-matched reset-distribution/v2 bank.
-  eval_seed_bank_path: config/stratified_seeds_1130_k8q8_blind.json
+  # Base K4/Q2 identity. Scale profiles must override this with a matching
+  # reset-distribution/v2 bank.
+  eval_seed_bank_path: config/stratified_seeds_400_k4q2_v2.json
   eval_seed_split: test
   final_eval_seed_split: test
   checkpoint_confirmation_enabled: false

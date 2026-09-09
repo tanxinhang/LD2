@@ -1401,7 +1401,9 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
   显式切 v2）。
 - **文档/论文债**：`paper/` 手稿仍为 2026-07-22 旧稿（仍把 D1.10 当主结果、未按 6/6
   机理、C2 措辞更新）；文档编号 D0.87–D0.95 ≡ D0.10–D0.18 双轨并存（总纲 §1.4
-  有映射）；死链/孤儿引用审计未闭环（`_orphan_v3.txt` 589 行）。
+  有映射）。旧 `_orphan_v3.txt` 一次性快照已由 V2 全量 catalog、SHA-256 catalog 和
+  results-tree 治理审计替代并删除；未分类历史结果继续按 catalog 状态隔离，不再依赖根目录
+  临时清单。
 - **遗留代码**：`residual_actor.py` 无法工作（遗留 opt-in，崩溃即 fail-loud）；
   trainer oracle 引导探索（`_oracle_alpha`）从未接线（死功能）；maxmin 精确 LP
   的 `prices` 返回占位值（API 陷阱，现无消费者）。

@@ -54,27 +54,27 @@ def test_k16_v2_executable_config_has_exact_seed_bank_identity():
     )
 
 
-def test_base_semantic_manifest_is_not_formally_green():
-    failures, _messages = collect_checks(
+def test_base_semantic_manifest_has_exact_k4q2_seed_bank_identity():
+    failures, messages = collect_checks(
         str(ROOT / "config" / "system_manifest.yaml"), strict=True)
 
-    joined = "\n".join(failures)
-    assert "schema_version is 1, expected 2" in joined
-    assert "fingerprint_version" in joined
-    assert "scenario identity mismatch" in joined
-    assert "K: effective=4, bank_source=8" in joined
-    assert "Q: effective=2, bank_source=8" in joined
-    assert "region_size" in joined
+    assert failures == []
+    assert any(
+        "fingerprint matches its source_config" in message
+        for message in messages
+    )
+    assert any(
+        "matches effective K/Q/region/dynamics" in message
+        for message in messages
+    )
 
 
-def test_legacy_bank_defects_are_visible_warnings_in_compatibility_mode():
+def test_base_semantic_manifest_has_no_formal_warnings_in_compatibility_mode():
     failures, messages = collect_checks(
         str(ROOT / "config" / "system_manifest.yaml"), strict=False)
 
-    warnings = _formal_warnings(messages)
     assert failures == []
-    assert any("schema_version is 1" in warning for warning in warnings)
-    assert any("scenario identity mismatch" in warning for warning in warnings)
+    assert _formal_warnings(messages) == []
 
 
 def test_missing_configured_bank_fails_even_without_strict_git_gate(tmp_path):
@@ -124,4 +124,3 @@ def test_effective_scenario_must_match_bank_source_and_fingerprint(tmp_path):
     assert "scenario_fingerprint does not match the effective" in joined
     assert "scenario identity mismatch" in joined
     assert "K: effective=15, bank_source=16" in joined
-

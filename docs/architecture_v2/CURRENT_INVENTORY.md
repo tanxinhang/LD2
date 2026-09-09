@@ -8,7 +8,7 @@
 | `tools/` Python 脚本 | 154 |
 | `tests/` Python 文件 | 219 |
 | `config/` YAML | 383 |
-| `results/` 文件 | 6763（深度清理后） |
+| `results/` 文件 | 6761（复现分层后） |
 | `results/` 总量 | 15,483,932,320 bytes（深度清理后） |
 | `env_core.py` | 13316 行 |
 | `trainer.py` | 9192 行 |
@@ -61,15 +61,21 @@ post-G2 证据和 Git 对象完整性。随后精确清理 49 个目标、3384 �
 包括可重建的 Python/pytest/build/egg-info/codegraph 缓存、失败的隔离安装副本、未引用旧探针，
 以及已由正式 `FORMAL_COMPLETE` envelope 取代的 7 个中间结果。被文档引用的
 `.arts/algorithm_audit`、活动虚拟环境、成功的隔离复现、正式结果、checkpoint、trace、frozen
-证据及未分类数据均保留。深度清理后 results 为 6763 文件、15,483,932,320 bytes，已重新生成
-全文件 SHA-256 catalog；剩余重复项仍为 2280 个、8,756,091,454 bytes，继续保持
-`deletion_authorized=false`，不会仅凭重复或目录名继续删除。
+证据及未分类数据均保留。复现分层后 results 为 6761 文件、15,483,932,320 bytes，已重新生成
+全文件 SHA-256 catalog；2 个已验证且保留规范副本的零字节日志被删除。剩余重复项为
+2278 个、8,756,091,454 bytes，其中 2229 个位于含标准复现产物的目录，439 个被受版本控制
+文本引用；它们已单列为复现或待复核资产，不会当作垃圾删除。
 
 清理后的结果树治理审计仍识别出 1044 个一级结果目录，其中 38 个不含
 `summary.json`、`paired_eval.csv` 或 `run_manifest.json`，331 个为下划线前缀目录，现存
 `summary.json` 有 88 种顶层 schema。这些目录可能包含历史复现证据，当前统一视为待分类的
 legacy debt，不据名称或结构缺失自动删除。审计工具的 `--json-output` 路径另有 tuple-key
 序列化缺陷；本次通过只读兼容导出生成审计报告，暂不修改正式发布绑定的源代码。
+
+根目录 7 个一次性审计/探针脚本、旧 `_orphan_v3.txt` 和失败测试日志已删除；相应结论由
+版本化文档与 V2 catalog 接管。基础 `system_manifest.yaml` 的历史 K8/Q8 bank 指针已替换为
+场景匹配的 `stratified_seeds_400_k4q2_v2.json`，K4/Q2 基础身份现在可通过严格 fingerprint、
+source-config 和 K/Q/region/dynamics 检查；K16/Q16 profile 继续使用独立的正式 bank。
 
 M0 已建立项目阶段门禁。默认 K4/Q2 与正式 K16/Q16 短帧语义指纹均已连续重放稳定；墙钟
 求解、执行器预热和模拟器耗时字段被显式排除并保留给性能审计。因此
