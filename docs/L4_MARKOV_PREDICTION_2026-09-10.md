@@ -104,3 +104,21 @@ two-exchange outcomes will provide rollout-grounded supervision for a sparse
 message-passing edge residual. That later GNN will learn actual counterfactual
 return residuals, not imitate the old controller, and its single composed
 proposal will retain the exact final physical rejection gate.
+
+The first fixed-seed mechanism tests rejected direct Hungarian composition:
+on 12 K8/Q8 states it never beat the bounded blind-swap optimum and delivered
+only 0.00417 mean improvement versus 0.00776. Replacing composition with
+budgeted best-improvement local search changed the result. On 256 K16/Q16
+states at 32 evaluations, distance-ranked KNN improved the stage objective by
+0.005032 versus 0.004782 for blind swaps; the paired mean advantage was
+0.000250 with bootstrap 95% interval `[0.000053, 0.000462]`.
+
+Reusing the incumbent max-min LP dual prices as target messages improved the
+same-state result to 0.005132, a paired advantage of 0.000350 with interval
+`[0.000174, 0.000529]`. This remains a mechanism screen on generated geometry,
+not L4 closed-loop evidence. A 16-state covariance/LCB stress screen was also
+positive but too small for confirmation. Marginal-target evaluation and cached
+receiver report reliability reduced its mean graph-search time from 1.91 s to
+0.55 s without changing any score. The exact sequence, including the rejected
+variant, is recorded in
+`artifacts/research/markov_graph_assignment_mechanism_v1.json`.

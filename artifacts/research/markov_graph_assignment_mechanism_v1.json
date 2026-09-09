@@ -1,0 +1,81 @@
+{
+  "schema_version": "markov-graph-assignment-mechanism/v1",
+  "date": "2026-09-10",
+  "scope": "fixed-seed synthetic-geometry conditional-mean shadow screen; not L4 closed-loop evidence",
+  "cardinality": "K=Q",
+  "evaluation_budget": {
+    "k16_graph": 32,
+    "k16_blind_swap": 32
+  },
+  "stages": [
+    {
+      "name": "linear_hungarian_composition",
+      "K": 8,
+      "cases": 12,
+      "graph_mean_improvement": 0.004172126071109088,
+      "blind_mean_improvement": 0.0077626329681033295,
+      "graph_beats_blind_rate": 0.0,
+      "decision": "rejected",
+      "reason": "non-additive bistatic and power-coupled exchange values cannot be safely composed as a linear assignment"
+    },
+    {
+      "name": "distance_ranked_knn_local_search",
+      "K": 16,
+      "cases": 256,
+      "neighbors": 6,
+      "graph_mean_improvement": 0.00503206515288225,
+      "blind_mean_improvement": 0.00478182879310339,
+      "paired_delta_mean": 0.000250236359778858,
+      "paired_delta_bootstrap95": [
+        0.0000528855049520586,
+        0.000461708534548157
+      ],
+      "paired_wins_ties_losses": [96, 84, 76],
+      "decision": "retain_as_ablation"
+    },
+    {
+      "name": "maxmin_dual_ranked_knn_local_search",
+      "K": 16,
+      "cases": 256,
+      "neighbors": 6,
+      "graph_mean_improvement": 0.00513230599318734,
+      "blind_mean_improvement": 0.00478182879310339,
+      "paired_delta_mean": 0.000350477200083954,
+      "paired_delta_bootstrap95": [
+        0.000173603032632707,
+        0.000528519693391713
+      ],
+      "paired_wins_ties_losses": [108, 92, 56],
+      "graph_improvement_p10": 0.000156460427215874,
+      "blind_improvement_p10": 0.00000450512637300421,
+      "decision": "advance_to_causal_snapshot_shadow"
+    },
+    {
+      "name": "covariance_lcb_stress",
+      "K": 16,
+      "cases": 16,
+      "position_std_m": 25.0,
+      "velocity_std_mps": 3.0,
+      "uncertainty_penalty_std": 1.0,
+      "graph_mean_improvement": 0.00218333512937428,
+      "blind_mean_improvement": 0.00172893209658827,
+      "paired_delta_mean": 0.000454403032786018,
+      "paired_delta_bootstrap95": [
+        0.0000679665952608714,
+        0.000866271399141689
+      ],
+      "paired_wins_ties_losses": [11, 2, 3],
+      "mean_graph_time_s_before_optimization": 1.91403975624917,
+      "mean_graph_time_s_after_target_column_optimization": 1.40909049999982,
+      "mean_graph_time_s_after_report_cache": 0.550130100001752,
+      "decision": "promising_but_sample_too_small"
+    }
+  ],
+  "guards": {
+    "live_rng_advanced": false,
+    "action_authority": false,
+    "final_physical_rejection": true,
+    "formal_eligible": false
+  },
+  "next_gate": "Run the dual-ranked sparse graph on causal L4 local-belief snapshots, measure edge top-k recall and executed next-stage worst/weak3 ranking agreement, then train only a rollout-return residual if analytic ranking remains insufficient."
+}

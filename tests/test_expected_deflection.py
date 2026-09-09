@@ -81,3 +81,21 @@ def test_expected_swerling_mean_is_the_no_fading_raw_deflection():
         expected_faded.d_eff, plain_dense.d_eff,
         rtol=1.0e-14, atol=0.0,
     )
+
+
+def test_supplied_expected_report_reliability_matches_internal_integration():
+    dc = _computer(report=True, swerling=True)
+    args = _state()
+    internally_integrated = dc.compute_expected_dense(*args)
+    from uav_isac.physical.channel import expected_report_link_reliability
+    uav_positions, _uv, _tp, _tv, roles, fusion = args
+    reliability = np.zeros(4)
+    for receiver in np.flatnonzero(roles == 1):
+        reliability[receiver] = expected_report_link_reliability(
+            uav_positions[receiver], fusion, dc.fc, dc.ric_K,
+            dc.noise_power, dc.P_report, use_los_prob=dc.use_los_prob,
+            los_a=dc.los_a, los_b=dc.los_b,
+            eta_los_dB=dc.eta_los_dB, eta_nlos_dB=dc.eta_nlos_dB)
+    supplied = dc.compute_expected_dense(
+        *args, expected_report_reliability_by_rx=reliability)
+    np.testing.assert_array_equal(supplied.d_eff, internally_integrated.d_eff)

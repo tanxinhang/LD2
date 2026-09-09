@@ -18,6 +18,7 @@ from uav_isac.coordination.maxmin_power import (
     solve_fixed_structure_maxmin_power_lp,
 )
 from uav_isac.physical.deflection import DeflectionComputer
+from uav_isac.physical.channel import expected_report_link_reliability
 from uav_isac.physical.detection import compute_detection_probabilities
 from uav_isac.prediction.markov_kinematics import predict_reflecting_cv_mean
 
@@ -32,6 +33,7 @@ class MarkovPhysicalStageEvaluation:
     detection_probability: np.ndarray
     deflection: np.ndarray
     power_w: np.ndarray
+    target_price: np.ndarray
     feasible_geometry: bool
 
 
@@ -253,6 +255,25 @@ class MarkovPhysicalAssignmentModel:
             raise ValueError("target covariance must have shape (Q,4,4)")
         coefficient = np.zeros((self.K, self.K, self.Q), dtype=np.float64)
         squared = np.zeros_like(coefficient)
+        report_reliability = None
+        if self.deflection_computer.use_report_link:
+            if self.role_agnostic:
+                receivers = np.arange(self.K)
+            else:
+                receivers = np.flatnonzero(self.roles == 1)
+            report_reliability = np.zeros(self.K, dtype=np.float64)
+            dc = self.deflection_computer
+            for receiver in receivers:
+                report_reliability[int(receiver)] = (
+                    expected_report_link_reliability(
+                        uav_pos[int(receiver)], self.fc_position,
+                        dc.fc, dc.ric_K, dc.noise_power, dc.P_report,
+                        use_los_prob=dc.use_los_prob,
+                        los_a=dc.los_a, los_b=dc.los_b,
+                        eta_los_dB=dc.eta_los_dB,
+                        eta_nlos_dB=dc.eta_nlos_dB,
+                        quadrature_order=self.quadrature_order,
+                    ))
         for target in range(self.Q):
             mean = np.asarray([
                 target_pos[target, 0], target_pos[target, 1],
@@ -264,18 +285,22 @@ class MarkovPhysicalAssignmentModel:
                     point[None, :2], point[None, 2:], elapsed_s=0.0,
                     area_size_m=self.area_size_m,
                 )
-                scenario_pos = target_pos.copy()
-                scenario_vel = target_vel.copy()
-                scenario_pos[target, :2] = reflected_xy[0]
-                scenario_vel[target, :2] = reflected_velocity[0]
+                # At fixed UAV geometry each target occupies an independent
+                # tensor column. Evaluate only this marginal target rather than
+                # recomputing all Q columns for every one of its sigma points.
+                scenario_pos = target_pos[target:target + 1].copy()
+                scenario_vel = target_vel[target:target + 1].copy()
+                scenario_pos[0, :2] = reflected_xy[0]
+                scenario_vel[0, :2] = reflected_velocity[0]
                 dense = self.deflection_computer.compute_expected_dense(
                     uav_pos, uav_vel, scenario_pos, scenario_vel,
                     self.roles, self.fc_position,
                     role_agnostic=self.role_agnostic,
-                    sensing_power_w=unit_power,
+                    sensing_power_w=np.ones((self.K, 1), dtype=np.float64),
                     quadrature_order=self.quadrature_order,
+                    expected_report_reliability_by_rx=report_reliability,
                 )
-                sample = dense.d_eff[:, :, target]
+                sample = dense.d_eff[:, :, 0]
                 coefficient[:, :, target] += float(weight) * sample
                 squared[:, :, target] += float(weight) * sample * sample
         if self.uncertainty_penalty_std > 0.0:
@@ -305,6 +330,8 @@ class MarkovPhysicalAssignmentModel:
                 detection_probability=zeros_q,
                 deflection=zeros_q.copy(),
                 power_w=np.zeros((self.K, self.Q), dtype=np.float64),
+                target_price=np.full(
+                    self.Q, 1.0 / self.Q, dtype=np.float64),
                 feasible_geometry=False,
             )
 
@@ -333,6 +360,7 @@ class MarkovPhysicalAssignmentModel:
             detection_probability=probability,
             deflection=power.deflection.copy(),
             power_w=power.power_w.copy(),
+            target_price=power.prices.copy(),
             feasible_geometry=True,
         )
 

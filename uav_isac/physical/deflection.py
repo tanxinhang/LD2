@@ -372,6 +372,7 @@ class DeflectionComputer:
         role_agnostic: bool = False,
         sensing_power_w: Optional[np.ndarray] = None,
         quadrature_order: int = 12,
+        expected_report_reliability_by_rx: Optional[np.ndarray] = None,
     ) -> DenseDeflection:
         """Compute conditional-mean deflection without consuming live RNG.
 
@@ -450,16 +451,28 @@ class DeflectionComputer:
         chi_rep = np.ones((1, K, 1), dtype=np.float64)
         if self.use_report_link:
             chi_rep.fill(0.0)
-            for j in rx_indices:
-                chi_rep[0, int(j), 0] = expected_report_link_reliability(
-                    uav_positions[int(j)], fc_position,
-                    self.fc, self.ric_K, self.noise_power, self.P_report,
-                    use_los_prob=self.use_los_prob,
-                    los_a=self.los_a, los_b=self.los_b,
-                    eta_los_dB=self.eta_los_dB,
-                    eta_nlos_dB=self.eta_nlos_dB,
-                    quadrature_order=quadrature_order,
-                )
+            supplied = expected_report_reliability_by_rx
+            if supplied is not None:
+                supplied = np.asarray(supplied, dtype=np.float64).reshape(-1)
+                if (
+                    supplied.shape != (K,) or np.any(~np.isfinite(supplied))
+                    or np.any(supplied < 0.0) or np.any(supplied > 1.0)
+                ):
+                    raise ValueError(
+                        "expected report reliability must be a length-K "
+                        "vector in [0,1]")
+                chi_rep[0, :, 0] = supplied
+            else:
+                for j in rx_indices:
+                    chi_rep[0, int(j), 0] = expected_report_link_reliability(
+                        uav_positions[int(j)], fc_position,
+                        self.fc, self.ric_K, self.noise_power, self.P_report,
+                        use_los_prob=self.use_los_prob,
+                        los_a=self.los_a, los_b=self.los_b,
+                        eta_los_dB=self.eta_los_dB,
+                        eta_nlos_dB=self.eta_nlos_dB,
+                        quadrature_order=quadrature_order,
+                    )
         d_eff = chi_rep * d_raw * dd_factor
         d_eff = np.where(valid, d_eff, 0.0)
         return DenseDeflection(

@@ -7,9 +7,9 @@ programs:
     state: shadow_incomplete
     implementation: uav_isac/prediction/markov_graph_assignment.py
     profile: config/exp_research_l4_markov_prediction_h10.yaml
-    evidence: docs/L4_MARKOV_PREDICTION_2026-09-10.md
+    evidence: artifacts/research/markov_graph_assignment_mechanism_v1.json
     formal_eligible: false
-    next_gate: Use the physics-weighted KNN exchange oracle to collect causal rollout edge-return labels, train a sparse message-passing residual rather than a distillation target, and retain exact joint proposal rejection before any action authority.
+    next_gate: Evaluate dual-ranked KNN exchanges on causal L4 local-belief snapshots for top-k edge recall and next-stage worst/weak3 ranking agreement; train a rollout-return GNN residual only if the analytic ranker is insufficient, retaining exact proposal rejection.
 
   - name: l4_markov_prediction
     question: Does causal one-second CV-Markov target prediction improve L4 distributed bistatic assignment without clean-regime regression?

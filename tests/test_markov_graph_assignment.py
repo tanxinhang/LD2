@@ -5,6 +5,7 @@ import numpy as np
 
 from uav_isac.prediction.markov_graph_assignment import (
     propose_physics_knn_assignment,
+    propose_physics_knn_local_search,
 )
 from uav_isac.physical.deflection import DeflectionComputer
 from uav_isac.prediction.markov_physical_assignment import (
@@ -126,3 +127,39 @@ def test_knn_proposal_runs_on_expected_physics_without_advancing_rng():
     assert sorted(proposal.assignment.tolist()) == [0, 1]
     assert np.isfinite(proposal.incumbent_cost)
     assert np.isfinite(proposal.proposal_cost)
+
+
+def test_knn_local_search_accepts_only_exact_improvements_within_budget():
+    value = np.array([
+        [0.0, 3.0, 0.0], [0.0, 0.0, 4.0], [5.0, 0.0, 0.0],
+    ])
+    model = _GraphFixture(value)
+    proposal = propose_physics_knn_local_search(
+        model, np.zeros(1), np.array([0, 1, 2]),
+        stage_index=0, k_neighbors=2, evaluation_budget=6,
+        max_rounds=3)
+    assert proposal.proposal_cost < proposal.incumbent_cost
+    assert proposal.evaluated_assignments <= 6
+    assert proposal.accepted_swaps
+    np.testing.assert_array_equal(
+        np.bincount(proposal.assignment, minlength=3),
+        np.ones(3, dtype=np.int64))
+
+
+def test_knn_local_search_returns_incumbent_when_no_swap_improves():
+    model = _GraphFixture(np.eye(3))
+    incumbent = np.array([0, 1, 2])
+    proposal = propose_physics_knn_local_search(
+        model, np.zeros(1), incumbent,
+        stage_index=0, k_neighbors=2, evaluation_budget=6)
+    np.testing.assert_array_equal(proposal.assignment, incumbent)
+    assert proposal.accepted_swaps == ()
+    assert proposal.proposal_cost == proposal.incumbent_cost
+
+
+def test_knn_local_search_validates_target_priority():
+    model = _GraphFixture(np.eye(3))
+    with np.testing.assert_raises_regex(ValueError, "target_priority"):
+        propose_physics_knn_local_search(
+            model, np.zeros(1), np.array([0, 1, 2]),
+            stage_index=0, target_priority=np.array([1.0, 0.0, 1.0]))

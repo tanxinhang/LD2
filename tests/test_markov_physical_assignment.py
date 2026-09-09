@@ -75,6 +75,7 @@ def test_stage_evaluation_matches_explicit_expected_physics_and_exact_lp():
     np.testing.assert_allclose(result.power_w, expected_lp.power_w)
     np.testing.assert_allclose(result.deflection, expected_lp.deflection)
     np.testing.assert_allclose(result.detection_probability, expected_pd)
+    np.testing.assert_allclose(result.target_price, expected_lp.prices)
     assert result.cost == -(np.min(expected_pd) + 0.25 * np.mean(expected_pd))
 
 
@@ -170,3 +171,36 @@ def test_uncertainty_penalty_builds_a_lower_confidence_physical_score():
     conservative_result = conservative_model.evaluate(state, stage_index=0)
     assert conservative_result.worst_detection_probability <= (
         mean_result.worst_detection_probability + 1.0e-14)
+
+
+def test_marginal_covariance_columns_match_explicit_full_target_evaluations():
+    dc, model, state = _fixture()
+    uav_pos, uav_vel, target_pos, target_vel = model.unpack_state(state)
+    covariance = np.zeros((2, 4, 4))
+    covariance[:, 0, 0] = 225.0
+    covariance[:, 1, 1] = 100.0
+    optimized = model._expected_coefficient(
+        uav_pos, uav_vel, target_pos, target_vel, covariance)
+
+    explicit = np.zeros_like(optimized)
+    from uav_isac.prediction.markov_physical_assignment import (
+        cubature_sigma_points,
+    )
+    for target in range(2):
+        mean = np.array([
+            target_pos[target, 0], target_pos[target, 1],
+            target_vel[target, 0], target_vel[target, 1],
+        ])
+        points, weights = cubature_sigma_points(mean, covariance[target])
+        for point, weight in zip(points, weights):
+            positions = target_pos.copy()
+            velocities = target_vel.copy()
+            positions[target, :2] = point[:2]
+            velocities[target, :2] = point[2:]
+            dense = dc.compute_expected_dense(
+                uav_pos, uav_vel, positions, velocities,
+                model.roles, model.fc_position,
+                sensing_power_w=np.ones((4, 2)),
+                quadrature_order=model.quadrature_order)
+            explicit[:, :, target] += weight * dense.d_eff[:, :, target]
+    np.testing.assert_allclose(optimized, explicit, rtol=2.0e-14, atol=0.0)
