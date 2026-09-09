@@ -1,0 +1,7 @@
+# Paired control for the Stage-2 candidate.  It has the same 25% robust
+# execution gain as the candidate but restores the online certificate payload,
+# isolating transport cost from controller effects.
+extends: exp_strict_distributed_k16q16_constraint_first_robust25.yaml
+
+marl:
+  distributed_composable_certificate_enabled: true

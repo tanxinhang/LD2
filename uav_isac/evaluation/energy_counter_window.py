@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-import time
-from typing import Sequence
-
 import numpy as np
 
 from uav_isac.evaluation.compute_energy_calibration import (
@@ -210,84 +206,3 @@ def close_energy_counter_window(
         duration_s=duration_s,
         censored_reason=None,
     )
-
-
-@dataclass(frozen=True)
-class LinuxRaplPackageDomain:
-    path: Path
-    name: str
-    counter_modulus_j: float
-
-    @property
-    def counter_id(self) -> str:
-        return str(self.path.resolve())
-
-    def read_sample(
-        self,
-        *,
-        generation_id: str,
-        reading_uncertainty_j: float,
-        energy_rate_upper_w: float,
-        monotonic_ns: int | None = None,
-    ) -> EnergyCounterSample:
-        captured_ns = (
-            time.monotonic_ns() if monotonic_ns is None else int(monotonic_ns))
-        try:
-            energy_uj = int((self.path / "energy_uj").read_text(
-                encoding="ascii").strip())
-            return EnergyCounterSample(
-                counter_id=self.counter_id,
-                monotonic_ns=captured_ns,
-                counter_j=float(energy_uj * 1.0e-6),
-                counter_resolution_j=1.0e-6,
-                reading_uncertainty_j=float(reading_uncertainty_j),
-                counter_modulus_j=float(self.counter_modulus_j),
-                generation_id=str(generation_id),
-                # Linux powercap exposes the modulus but not a cumulative wrap
-                # index.  A decreasing two-sample window must therefore censor.
-                wrap_index=None,
-                valid=True,
-                energy_rate_upper_w=float(energy_rate_upper_w),
-            )
-        except (OSError, UnicodeError, ValueError):
-            return EnergyCounterSample(
-                counter_id=self.counter_id,
-                monotonic_ns=captured_ns,
-                counter_j=None,
-                counter_resolution_j=None,
-                reading_uncertainty_j=None,
-                counter_modulus_j=float(self.counter_modulus_j),
-                generation_id=str(generation_id),
-                wrap_index=None,
-                valid=False,
-                energy_rate_upper_w=float(energy_rate_upper_w),
-            )
-
-
-def discover_linux_rapl_package_domains(
-    powercap_root: Path = Path("/sys/class/powercap"),
-) -> tuple[LinuxRaplPackageDomain, ...]:
-    root = Path(powercap_root)
-    if not root.is_dir():
-        return ()
-    domains = []
-    # Linux uses names such as ``intel-rapl:0``.  The broader prefix also
-    # permits a colon-free synthetic sysfs fixture on Windows test hosts;
-    # package name and required files are still validated below.
-    for path in sorted(root.glob("intel-rapl*")):
-        if not path.is_dir():
-            continue
-        try:
-            name = (path / "name").read_text(encoding="ascii").strip()
-            modulus_uj = int((path / "max_energy_range_uj").read_text(
-                encoding="ascii").strip())
-        except (OSError, UnicodeError, ValueError):
-            continue
-        if not name.startswith("package-") or modulus_uj <= 0:
-            continue
-        domains.append(LinuxRaplPackageDomain(
-            path=path,
-            name=name,
-            counter_modulus_j=float(modulus_uj * 1.0e-6),
-        ))
-    return tuple(domains)

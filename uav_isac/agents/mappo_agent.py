@@ -15,7 +15,7 @@ from copy import deepcopy
 
 from uav_isac.agents.base_agent import BaseAgent
 from uav_isac.agents.networks import ActorNetwork, CriticNetwork, StructuredActorNetwork
-from uav_isac.environment.action import ActionSpace
+from uav_isac.domain.action import ActionSpace
 from uav_isac.utils.types import Action
 
 

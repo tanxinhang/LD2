@@ -45,7 +45,7 @@ class FrameEncoder(nn.Module):
                  use_p0: bool = False, use_rel_features: bool = True):
         super().__init__()
         self.K, self.Q = K, Q
-        from uav_isac.environment.observation_slices import ObservationSlices
+        from uav_isac.domain.observation_slices import ObservationSlices
         self.slices = ObservationSlices.from_config(
             K=K, Q=Q, use_p0=use_p0, use_rel_features=use_rel_features)
 

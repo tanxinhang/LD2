@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 from uav_isac.utils.sentinels import AGE_NO_CACHE
 
-from uav_isac.environment.observation_slices import ObservationSlices
+from uav_isac.domain.observation import ObservationLayout
 from uav_isac.physical.geometry import C_LIGHT
 
 
@@ -173,7 +173,7 @@ def advance_owner_local_kinematics(
 
 def decode_owner_local_kinematics(
     local_obs: np.ndarray,
-    slices: ObservationSlices,
+    slices: ObservationLayout,
     *,
     area_size_m: tuple[float, float],
     height_m: float,

@@ -1,4 +1,4 @@
-"""Multi-Head Neighbor Cross-Attention for Belief Fusion.
+"""Environment-owned Multi-Head Neighbor Cross-Attention for Belief Fusion.
 
 Per-target attention: node i queries which neighbors to trust for target q.
 Outputs learned fusion weights for conservative belief fusion (CI) and

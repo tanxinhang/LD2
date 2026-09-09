@@ -2089,6 +2089,45 @@ def fixed_owner_gain_matrix(
     return gain, owners
 
 
+def fixed_owner_gain_matrix_from_selected_values(
+    selected_values: np.ndarray,
+    selected: Sequence[tuple[int, int, int]],
+    *,
+    num_uavs: int,
+    num_targets: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse COO edge values without materializing ``(...,K,K,Q)``.
+
+    Leading dimensions are preserved, so a viewer batch ``(V,E)`` becomes
+    ``(V,K,Q)``.  Edge iteration deliberately matches
+    :func:`fixed_owner_gain_matrix`, including its accumulation order.
+    """
+    values = np.asarray(selected_values, dtype=np.float64)
+    edges = tuple(tuple(int(value) for value in edge) for edge in selected)
+    K = int(num_uavs)
+    Q = int(num_targets)
+    if values.ndim < 1 or values.shape[-1] != len(edges):
+        raise ValueError("selected_values must have trailing edge dimension E")
+    if K < 1 or Q < 1:
+        raise ValueError("num_uavs and num_targets must be positive")
+    if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+        raise ValueError("selected_values must be finite and non-negative")
+    owners = np.full(Q, -1, dtype=np.int64)
+    gain = np.zeros(values.shape[:-1] + (K, Q), dtype=np.float64)
+    for edge_index, (i, j, q) in enumerate(edges):
+        if not (0 <= i < K and 0 <= j < K and 0 <= q < Q) or i == j:
+            raise ValueError("selected edge is outside coefficient support")
+        if owners[q] not in (-1, j):
+            raise NonUniqueFixedOwnerStructureError(
+                "fixed-owner LP requires one receiver per target")
+        owners[q] = j
+        gain[..., i, q] += values[..., edge_index]
+    if np.any(owners < 0):
+        raise IncompleteFixedOwnerStructureError(
+            "fixed-owner LP requires every target to have an owner")
+    return gain, owners
+
+
 def relaxed_same_geometry_target_ceiling(
     coefficient: np.ndarray,
     sensing_budget_w: np.ndarray,

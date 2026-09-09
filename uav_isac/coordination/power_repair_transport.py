@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _index_bits(cardinality: int) -> int:
@@ -73,7 +73,7 @@ class PowerRepairTransportCertificate:
 
 
 def _required_power_for_packet(
-    model: InterUAVCommunicationModel,
+    model: CommunicationTransport,
     sender: np.ndarray,
     receiver: np.ndarray,
     bits: int,
@@ -116,7 +116,7 @@ def _candidate_certificate(
     existing_comm_power_w: np.ndarray,
     *,
     coordinator: int,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: PowerRepairWireLayout,
     control_period_s: float,
     snr_margin_db: float,
@@ -253,7 +253,7 @@ def certify_power_repair_transport(
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
     *,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: PowerRepairWireLayout,
     control_period_s: float,
     snr_margin_db: float = 0.0,

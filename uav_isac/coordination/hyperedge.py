@@ -42,6 +42,26 @@ def _sinc_alignment_lower_array(
     return np.abs(np.sinc(distance))
 
 
+def _sinc_alignment_upper_array(
+    center: np.ndarray,
+    radius: np.ndarray,
+) -> np.ndarray:
+    """Maximum ``abs(sinc(x-round(x)))`` on ``center +/- radius``."""
+    x = np.asarray(center, dtype=np.float64)
+    r = np.asarray(radius, dtype=np.float64)
+    if np.any(~np.isfinite(x)) or np.any(~np.isfinite(r)) or np.any(r < 0.0):
+        raise ValueError("sinc interval center/radius must be finite/non-negative")
+    left = x - r
+    right = x + r
+    contains_integer = np.ceil(left) <= np.floor(right)
+    endpoint_distance = np.minimum(
+        np.abs(left - np.round(left)),
+        np.abs(right - np.round(right)),
+    )
+    distance = np.where(contains_integer, 0.0, endpoint_distance)
+    return np.abs(np.sinc(np.minimum(distance, 0.5)))
+
+
 def deterministic_bottleneck_cost_assignment(
     cost_matrix: np.ndarray,
 ) -> np.ndarray:
@@ -1438,45 +1458,50 @@ def reconstruct_bistatic_coefficient_from_public_state(
     doppler_offset = doppler_fraction - np.round(doppler_fraction)
     ambiguity_amplitude = np.abs(
         np.sinc(delay_offset) * np.sinc(doppler_offset))
-    # Deterministic uncertainty-set lower bound.  The bistatic delay is
-    # 1-Lipschitz in each endpoint/target range.  Doppler uses the standard
-    # unit-vector perturbation bound min(2, 2r/(R-r)); velocity and direction
-    # errors are then combined by the triangle inequality.  With zero radii
-    # this reduces exactly to the historical point evaluation.
-    endpoint_position_radius = (
-        uncertainty[:, None] + target_uncertainty[None, :])
-    delay_radius = (
-        uncertainty[:, None, None]
-        + uncertainty[None, :, None]
-        + 2.0 * target_uncertainty[None, None, :]
-    ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
-    unit_radius = np.minimum(
-        2.0,
-        2.0 * endpoint_position_radius
-        / np.maximum(endpoint_range - endpoint_position_radius, 1.0e-9),
-    )
-    relative_velocity = velocities - target_velocity[None, :, :]
-    relative_speed = np.linalg.norm(relative_velocity, axis=-1)
-    relative_velocity_radius = (
-        velocity_uncertainty[:, None]
-        + target_velocity_uncertainty[None, :])
-    radial_radius = (
-        relative_velocity_radius
-        + (relative_speed + relative_velocity_radius) * unit_radius
-    )
-    doppler_radius = (
-        float(fc_hz) / C_LIGHT
-        * (radial_radius[:, None, :] + radial_radius[None, :, :])
-        * int(doppler_bins) * float(symbol_period_s)
-    )
-    ambiguity_lower = (
-        _sinc_alignment_lower_array(delay_fraction, delay_radius)
-        * _sinc_alignment_lower_array(doppler_fraction, doppler_radius)
-    )
     if not bool(robust_dd_uncertainty):
-        delay_radius = np.zeros_like(delay_radius)
-        doppler_radius = np.zeros_like(doppler_radius)
+        # The nominal ranking/power view does not consume uncertainty-set DD
+        # bounds.  Previously the complete radius propagation and two sinc
+        # lower-bound kernels ran first and were discarded here.  Keep the
+        # exact historical nominal result while avoiding that dead work.
+        delay_radius = np.zeros_like(delay_fraction)
+        doppler_radius = np.zeros_like(doppler_fraction)
         ambiguity_lower = ambiguity_amplitude
+    else:
+        # Deterministic uncertainty-set lower bound.  The bistatic delay is
+        # 1-Lipschitz in each endpoint/target range.  Doppler uses the standard
+        # unit-vector perturbation bound min(2, 2r/(R-r)); velocity and
+        # direction errors are combined by the triangle inequality.
+        endpoint_position_radius = (
+            uncertainty[:, None] + target_uncertainty[None, :])
+        delay_radius = (
+            uncertainty[:, None, None]
+            + uncertainty[None, :, None]
+            + 2.0 * target_uncertainty[None, None, :]
+        ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
+        unit_radius = np.minimum(
+            2.0,
+            2.0 * endpoint_position_radius
+            / np.maximum(
+                endpoint_range - endpoint_position_radius, 1.0e-9),
+        )
+        relative_velocity = velocities - target_velocity[None, :, :]
+        relative_speed = np.linalg.norm(relative_velocity, axis=-1)
+        relative_velocity_radius = (
+            velocity_uncertainty[:, None]
+            + target_velocity_uncertainty[None, :])
+        radial_radius = (
+            relative_velocity_radius
+            + (relative_speed + relative_velocity_radius) * unit_radius
+        )
+        doppler_radius = (
+            float(fc_hz) / C_LIGHT
+            * (radial_radius[:, None, :] + radial_radius[None, :, :])
+            * int(doppler_bins) * float(symbol_period_s)
+        )
+        ambiguity_lower = (
+            _sinc_alignment_lower_array(delay_fraction, delay_radius)
+            * _sinc_alignment_lower_array(doppler_fraction, doppler_radius)
+        )
     if str(dd_gain_mode) == "continuous":
         support = (
             (tau - delay_radius / (
@@ -1585,6 +1610,624 @@ def reconstruct_bistatic_coefficient_upper_from_public_state(
     )
     upper *= (~np.eye(K, dtype=bool))[:, :, None]
     return upper
+
+
+def reconstruct_bistatic_coefficient_dd_upper_from_public_state(
+    node_positions_xy: np.ndarray,
+    node_velocities_xy: np.ndarray,
+    target_positions: np.ndarray,
+    target_velocities: np.ndarray,
+    visible: np.ndarray,
+    *,
+    uav_height_m: float,
+    fc_hz: float,
+    rcs_m2: float,
+    delta_f_hz: float,
+    symbol_period_s: float,
+    delay_bins: int,
+    doppler_bins: int,
+    dd_gate_min: float,
+    coefficient_scale: float,
+    position_uncertainty_m: float | np.ndarray = 0.0,
+    target_position_uncertainty_m: float | np.ndarray = 0.0,
+    velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    target_velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    dd_gain_mode: str = "binary",
+) -> np.ndarray:
+    """Tighten the range upper with an exact interval DD-gain maximum."""
+    range_upper = reconstruct_bistatic_coefficient_upper_from_public_state(
+        node_positions_xy,
+        target_positions,
+        visible,
+        uav_height_m=uav_height_m,
+        fc_hz=fc_hz,
+        rcs_m2=rcs_m2,
+        coefficient_scale=coefficient_scale,
+        position_uncertainty_m=position_uncertainty_m,
+        target_position_uncertainty_m=target_position_uncertainty_m,
+    )
+    positions_xy = np.asarray(node_positions_xy, dtype=np.float64)
+    velocities_xy = np.asarray(node_velocities_xy, dtype=np.float64)
+    targets = np.asarray(target_positions, dtype=np.float64)
+    target_velocity = np.asarray(target_velocities, dtype=np.float64)
+    K, Q, _ = positions_xy.shape
+    if (
+        velocities_xy.shape != positions_xy.shape
+        or targets.shape != (Q, 3)
+        or target_velocity.shape != (Q, 3)
+        or delay_bins < 1
+        or doppler_bins < 1
+        or not np.isfinite(delta_f_hz)
+        or float(delta_f_hz) <= 0.0
+        or not np.isfinite(symbol_period_s)
+        or float(symbol_period_s) <= 0.0
+    ):
+        raise ValueError("DD upper-bound inputs are invalid")
+
+    def vector(value: float | np.ndarray, size: int, name: str) -> np.ndarray:
+        array = np.asarray(value, dtype=np.float64)
+        array = (
+            np.full(size, float(array), dtype=np.float64)
+            if array.ndim == 0 else array.reshape(-1))
+        if (
+            array.shape != (size,)
+            or np.any(~np.isfinite(array))
+            or np.any(array < 0.0)
+        ):
+            raise ValueError(f"{name} must be a non-negative vector")
+        return array
+
+    node_position_radius = vector(
+        position_uncertainty_m, K, "position uncertainty")
+    target_position_radius = vector(
+        target_position_uncertainty_m, Q, "target position uncertainty")
+    node_velocity_radius = vector(
+        velocity_uncertainty_mps, K, "velocity uncertainty")
+    target_velocity_radius = vector(
+        target_velocity_uncertainty_mps, Q,
+        "target velocity uncertainty")
+    positions = np.concatenate((
+        positions_xy,
+        np.full((K, Q, 1), float(uav_height_m), dtype=np.float64),
+    ), axis=-1)
+    velocities = np.concatenate((
+        velocities_xy,
+        np.zeros((K, Q, 1), dtype=np.float64),
+    ), axis=-1)
+    endpoint_vector = targets[None, :, :] - positions
+    endpoint_range = np.linalg.norm(endpoint_vector, axis=-1)
+    endpoint_unit = endpoint_vector / (endpoint_range[..., None] + 1.0e-10)
+    tau = (
+        endpoint_range[:, None, :] + endpoint_range[None, :, :]
+    ) / C_LIGHT
+    node_radial = np.sum(velocities * endpoint_unit, axis=-1)
+    target_radial = np.sum(
+        target_velocity[None, :, :] * endpoint_unit, axis=-1)
+    nu = (float(fc_hz) / C_LIGHT) * (
+        node_radial[:, None, :] + node_radial[None, :, :]
+        - target_radial[:, None, :] - target_radial[None, :, :])
+    endpoint_radius = (
+        node_position_radius[:, None] + target_position_radius[None, :])
+    delay_radius = (
+        node_position_radius[:, None, None]
+        + node_position_radius[None, :, None]
+        + 2.0 * target_position_radius[None, None, :]
+    ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
+    unit_radius = np.minimum(
+        2.0,
+        2.0 * endpoint_radius
+        / np.maximum(endpoint_range - endpoint_radius, 1.0e-9),
+    )
+    relative_velocity = velocities - target_velocity[None, :, :]
+    relative_speed = np.linalg.norm(relative_velocity, axis=-1)
+    relative_velocity_radius = (
+        node_velocity_radius[:, None] + target_velocity_radius[None, :])
+    radial_radius = (
+        relative_velocity_radius
+        + (relative_speed + relative_velocity_radius) * unit_radius)
+    doppler_radius = (
+        float(fc_hz) / C_LIGHT
+        * (radial_radius[:, None, :] + radial_radius[None, :, :])
+        * int(doppler_bins) * float(symbol_period_s))
+    delay_fraction = tau * int(delay_bins) * float(delta_f_hz)
+    doppler_fraction = (
+        nu * int(doppler_bins) * float(symbol_period_s))
+    ambiguity_upper = (
+        _sinc_alignment_upper_array(delay_fraction, delay_radius)
+        * _sinc_alignment_upper_array(doppler_fraction, doppler_radius))
+    if str(dd_gain_mode) == "continuous":
+        delay_scale = int(delay_bins) * float(delta_f_hz)
+        doppler_scale = int(doppler_bins) * float(symbol_period_s)
+        support_possible = (
+            (tau + delay_radius / delay_scale >= 0.0)
+            & (tau - delay_radius / delay_scale < 1.0 / float(delta_f_hz))
+            & (np.maximum(np.abs(nu) - doppler_radius / doppler_scale, 0.0)
+               <= 1.0 / (2.0 * float(symbol_period_s)))
+        )
+        dd_upper = support_possible.astype(np.float64) * ambiguity_upper ** 2
+    elif str(dd_gain_mode) == "binary":
+        dd_upper = (ambiguity_upper >= float(dd_gate_min)).astype(np.float64)
+    else:
+        raise ValueError("dd_gain_mode must be binary or continuous")
+    return range_upper * dd_upper
+
+
+@dataclass(frozen=True)
+class SelectedBistaticCoefficients:
+    """Nominal and certificate coefficients for one sparse edge set."""
+
+    edges: Tuple[Hyperedge, ...]
+    nominal: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+
+
+def reconstruct_selected_bistatic_coefficients_from_public_state(
+    positions_xy_by_target: np.ndarray,
+    velocities_xy_by_target: np.ndarray,
+    target_positions_m: np.ndarray,
+    target_velocities_mps: np.ndarray,
+    seen_mask: np.ndarray,
+    edges: Iterable[Hyperedge],
+    *,
+    uav_height_m: float,
+    fc_hz: float,
+    rcs_m2: float,
+    delta_f_hz: float,
+    symbol_period_s: float,
+    delay_bins: int,
+    doppler_bins: int,
+    dd_gate_min: float,
+    coefficient_scale: float,
+    nominal_position_uncertainty_m: float | np.ndarray = 0.0,
+    certificate_position_uncertainty_m: float | np.ndarray = 0.0,
+    target_position_uncertainty_m: float | np.ndarray = 0.0,
+    velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    target_velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    dd_gain_mode: str = "binary",
+) -> SelectedBistaticCoefficients:
+    """Reconstruct only selected edges and share their endpoint geometry.
+
+    This is the hold-path counterpart of the two dense reconstruction
+    functions above.  It preserves their semantics: nominal coefficients use
+    point DD alignment plus endpoint path-loss uncertainty, lower coefficients
+    use the complete position/velocity uncertainty set, and upper coefficients
+    use minimum possible range with DD gain bounded by one.
+    """
+    positions_xy = np.asarray(positions_xy_by_target, dtype=np.float64)
+    velocities_xy = np.asarray(velocities_xy_by_target, dtype=np.float64)
+    targets = np.asarray(target_positions_m, dtype=np.float64)
+    target_velocity = np.asarray(target_velocities_mps, dtype=np.float64)
+    seen = np.asarray(seen_mask, dtype=bool)
+    selected = tuple(tuple(int(value) for value in edge) for edge in edges)
+    if positions_xy.ndim != 3 or positions_xy.shape[-1] != 2:
+        raise ValueError("positions must have shape (K,Q,2)")
+    K, Q, _ = positions_xy.shape
+    if (
+        velocities_xy.shape != positions_xy.shape
+        or targets.shape != (Q, 3)
+        or target_velocity.shape != (Q, 3)
+        or seen.shape != (K, Q)
+    ):
+        raise ValueError("selected coefficient input shapes are inconsistent")
+    edge_array = np.asarray(selected, dtype=np.int64).reshape(-1, 3)
+    if edge_array.size and (
+        np.any(edge_array[:, 0] < 0)
+        or np.any(edge_array[:, 0] >= K)
+        or np.any(edge_array[:, 1] < 0)
+        or np.any(edge_array[:, 1] >= K)
+        or np.any(edge_array[:, 2] < 0)
+        or np.any(edge_array[:, 2] >= Q)
+        or np.any(edge_array[:, 0] == edge_array[:, 1])
+    ):
+        raise ValueError("selected edge is outside the physical graph")
+    if len(set(selected)) != len(selected):
+        raise ValueError("selected edges must be unique")
+
+    def uncertainty_vector(value, size, name):
+        array = np.asarray(value, dtype=np.float64)
+        if array.ndim == 0:
+            array = np.full(size, float(array), dtype=np.float64)
+        else:
+            array = array.reshape(-1)
+        if array.shape != (size,) or np.any(~np.isfinite(array)) or np.any(array < 0.0):
+            raise ValueError(f"{name} must be a non-negative {size}-vector")
+        return array
+
+    nominal_uncertainty = uncertainty_vector(
+        nominal_position_uncertainty_m, K,
+        "nominal_position_uncertainty_m")
+    certificate_uncertainty = uncertainty_vector(
+        certificate_position_uncertainty_m, K,
+        "certificate_position_uncertainty_m")
+    target_uncertainty = uncertainty_vector(
+        target_position_uncertainty_m, Q,
+        "target_position_uncertainty_m")
+    velocity_uncertainty = uncertainty_vector(
+        velocity_uncertainty_mps, K, "velocity_uncertainty_mps")
+    target_velocity_uncertainty = uncertainty_vector(
+        target_velocity_uncertainty_mps, Q,
+        "target_velocity_uncertainty_mps")
+    scalar_values = (
+        float(uav_height_m), float(fc_hz), float(rcs_m2),
+        float(delta_f_hz), float(symbol_period_s), float(dd_gate_min),
+        float(coefficient_scale),
+    )
+    if (
+        any(np.any(~np.isfinite(value)) for value in (
+            positions_xy, velocities_xy, targets, target_velocity))
+        or not all(np.isfinite(value) for value in scalar_values)
+        or delay_bins < 1 or doppler_bins < 1
+        or float(uav_height_m) <= 0.0 or float(fc_hz) <= 0.0
+        or float(rcs_m2) < 0.0 or float(coefficient_scale) < 0.0
+    ):
+        raise ValueError("selected coefficient physical inputs are invalid")
+    if not len(selected):
+        empty = np.zeros(0, dtype=np.float64)
+        return SelectedBistaticCoefficients(selected, empty, empty, empty)
+
+    tx = edge_array[:, 0]
+    rx = edge_array[:, 1]
+    target = edge_array[:, 2]
+    altitude = np.full((len(selected), 1), float(uav_height_m))
+    tx_position = np.concatenate(
+        (positions_xy[tx, target], altitude), axis=1)
+    rx_position = np.concatenate(
+        (positions_xy[rx, target], altitude), axis=1)
+    tx_velocity = np.concatenate(
+        (velocities_xy[tx, target], np.zeros_like(altitude)), axis=1)
+    rx_velocity = np.concatenate(
+        (velocities_xy[rx, target], np.zeros_like(altitude)), axis=1)
+    target_position = targets[target]
+    target_velocity_edge = target_velocity[target]
+    tx_vector = target_position - tx_position
+    rx_vector = target_position - rx_position
+    tx_range = np.linalg.norm(tx_vector, axis=1)
+    rx_range = np.linalg.norm(rx_vector, axis=1)
+    tx_unit = tx_vector / (tx_range[:, None] + 1.0e-10)
+    rx_unit = rx_vector / (rx_range[:, None] + 1.0e-10)
+    tau = (tx_range + rx_range) / C_LIGHT
+    node_radial = (
+        np.sum(tx_velocity * tx_unit, axis=1)
+        + np.sum(rx_velocity * rx_unit, axis=1))
+    target_radial = (
+        np.sum(target_velocity_edge * tx_unit, axis=1)
+        + np.sum(target_velocity_edge * rx_unit, axis=1))
+    nu = float(fc_hz) / C_LIGHT * (node_radial - target_radial)
+
+    wavelength = C_LIGHT / float(fc_hz)
+    path_constant = (
+        wavelength * wavelength * float(rcs_m2) / (4.0 * np.pi) ** 3)
+    alpha_sq = path_constant / (
+        np.maximum(tx_range, 1.0e-6) ** 2
+        * np.maximum(rx_range, 1.0e-6) ** 2)
+    delay_fraction = tau * int(delay_bins) * float(delta_f_hz)
+    doppler_fraction = nu * int(doppler_bins) * float(symbol_period_s)
+    ambiguity_amplitude = np.abs(
+        np.sinc(delay_fraction - np.round(delay_fraction))
+        * np.sinc(doppler_fraction - np.round(doppler_fraction)))
+    nominal_support = (
+        (tau >= 0.0)
+        & (tau < 1.0 / float(delta_f_hz))
+        & (np.abs(nu) <= 1.0 / (2.0 * float(symbol_period_s))))
+    nominal_dd = (
+        nominal_support.astype(np.float64) * ambiguity_amplitude ** 2
+        if str(dd_gain_mode) == "continuous"
+        else (ambiguity_amplitude >= float(dd_gate_min)).astype(np.float64)
+    )
+    nominal_tx_path = tx_range / (
+        tx_range + nominal_uncertainty[tx])
+    nominal_rx_path = rx_range / (
+        rx_range + nominal_uncertainty[rx])
+    executable = seen[tx, target] & seen[rx, target]
+    nominal = (
+        float(coefficient_scale) * alpha_sq
+        * nominal_tx_path ** 2 * nominal_rx_path ** 2
+        * nominal_dd * executable.astype(np.float64))
+
+    tx_position_radius = (
+        certificate_uncertainty[tx] + target_uncertainty[target])
+    rx_position_radius = (
+        certificate_uncertainty[rx] + target_uncertainty[target])
+    delay_radius = (
+        certificate_uncertainty[tx]
+        + certificate_uncertainty[rx]
+        + 2.0 * target_uncertainty[target]
+    ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
+    tx_unit_radius = np.minimum(
+        2.0,
+        2.0 * tx_position_radius
+        / np.maximum(tx_range - tx_position_radius, 1.0e-9))
+    rx_unit_radius = np.minimum(
+        2.0,
+        2.0 * rx_position_radius
+        / np.maximum(rx_range - rx_position_radius, 1.0e-9))
+    tx_relative_speed = np.linalg.norm(
+        tx_velocity - target_velocity_edge, axis=1)
+    rx_relative_speed = np.linalg.norm(
+        rx_velocity - target_velocity_edge, axis=1)
+    tx_velocity_radius = (
+        velocity_uncertainty[tx] + target_velocity_uncertainty[target])
+    rx_velocity_radius = (
+        velocity_uncertainty[rx] + target_velocity_uncertainty[target])
+    tx_radial_radius = (
+        tx_velocity_radius
+        + (tx_relative_speed + tx_velocity_radius) * tx_unit_radius)
+    rx_radial_radius = (
+        rx_velocity_radius
+        + (rx_relative_speed + rx_velocity_radius) * rx_unit_radius)
+    doppler_radius = (
+        float(fc_hz) / C_LIGHT
+        * (tx_radial_radius + rx_radial_radius)
+        * int(doppler_bins) * float(symbol_period_s))
+    ambiguity_lower = (
+        _sinc_alignment_lower_array(delay_fraction, delay_radius)
+        * _sinc_alignment_lower_array(doppler_fraction, doppler_radius))
+    if str(dd_gain_mode) == "continuous":
+        lower_support = (
+            (tau - delay_radius / (
+                int(delay_bins) * float(delta_f_hz)) >= 0.0)
+            & (tau + delay_radius / (
+                int(delay_bins) * float(delta_f_hz))
+               < 1.0 / float(delta_f_hz))
+            & ((np.abs(nu) + doppler_radius / (
+                int(doppler_bins) * float(symbol_period_s)))
+               <= 1.0 / (2.0 * float(symbol_period_s))))
+        lower_dd = lower_support.astype(np.float64) * ambiguity_lower ** 2
+    else:
+        lower_dd = (
+            ambiguity_lower >= float(dd_gate_min)).astype(np.float64)
+    lower_tx_path = tx_range / (
+        tx_range + certificate_uncertainty[tx]
+        + target_uncertainty[target])
+    lower_rx_path = rx_range / (
+        rx_range + certificate_uncertainty[rx]
+        + target_uncertainty[target])
+    lower = (
+        float(coefficient_scale) * alpha_sq
+        * lower_tx_path ** 2 * lower_rx_path ** 2
+        * lower_dd * executable.astype(np.float64))
+
+    upper_tx_range = np.maximum(
+        tx_range - certificate_uncertainty[tx]
+        - target_uncertainty[target], float(uav_height_m))
+    upper_rx_range = np.maximum(
+        rx_range - certificate_uncertainty[rx]
+        - target_uncertainty[target], float(uav_height_m))
+    upper_tx_range = np.where(
+        seen[tx, target], upper_tx_range, float(uav_height_m))
+    upper_rx_range = np.where(
+        seen[rx, target], upper_rx_range, float(uav_height_m))
+    upper = (
+        float(coefficient_scale) * path_constant
+        / (upper_tx_range ** 2 * upper_rx_range ** 2))
+    return SelectedBistaticCoefficients(
+        selected, nominal, lower, upper)
+
+
+def reconstruct_selected_bistatic_coefficients_batch_from_public_state(
+    positions_xy_by_view: np.ndarray,
+    velocities_xy_by_view: np.ndarray,
+    target_positions_by_view: np.ndarray,
+    target_velocities_by_view: np.ndarray,
+    seen_mask_by_view: np.ndarray,
+    edges: Iterable[Hyperedge],
+    *,
+    uav_height_m: float,
+    fc_hz: float,
+    rcs_m2: float,
+    delta_f_hz: float,
+    symbol_period_s: float,
+    delay_bins: int,
+    doppler_bins: int,
+    dd_gate_min: float,
+    coefficient_scale: float,
+    nominal_position_uncertainty_m: float | np.ndarray = 0.0,
+    certificate_position_uncertainty_m: float | np.ndarray = 0.0,
+    target_position_uncertainty_m: float | np.ndarray = 0.0,
+    velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    target_velocity_uncertainty_mps: float | np.ndarray = 0.0,
+    dd_gain_mode: str = "binary",
+) -> SelectedBistaticCoefficients:
+    """Jointly reconstruct the same selected COO edges for all viewers.
+
+    Arrays carry a leading viewer dimension ``V``.  The returned nominal,
+    lower and upper arrays have shape ``(V,E)`` and are exactly the per-view
+    selected kernel evaluated without its repeated Python validation/setup.
+    """
+    positions = np.asarray(positions_xy_by_view, dtype=np.float64)
+    velocities = np.asarray(velocities_xy_by_view, dtype=np.float64)
+    targets = np.asarray(target_positions_by_view, dtype=np.float64)
+    target_velocities = np.asarray(
+        target_velocities_by_view, dtype=np.float64)
+    seen = np.asarray(seen_mask_by_view, dtype=bool)
+    selected = tuple(tuple(int(value) for value in edge) for edge in edges)
+    if positions.ndim != 4 or positions.shape[-1] != 2:
+        raise ValueError("positions must have shape (V,K,Q,2)")
+    V, K, Q, _ = positions.shape
+    if (
+        velocities.shape != positions.shape
+        or targets.shape != (V, Q, 3)
+        or target_velocities.shape != (V, Q, 3)
+        or seen.shape != (V, K, Q)
+    ):
+        raise ValueError("batched selected coefficient shapes are inconsistent")
+    edge_array = np.asarray(selected, dtype=np.int64).reshape(-1, 3)
+    if edge_array.size and (
+        np.any(edge_array[:, 0] < 0)
+        or np.any(edge_array[:, 0] >= K)
+        or np.any(edge_array[:, 1] < 0)
+        or np.any(edge_array[:, 1] >= K)
+        or np.any(edge_array[:, 2] < 0)
+        or np.any(edge_array[:, 2] >= Q)
+        or np.any(edge_array[:, 0] == edge_array[:, 1])
+    ):
+        raise ValueError("selected edge is outside the batched physical graph")
+    if len(set(selected)) != len(selected):
+        raise ValueError("selected edges must be unique")
+
+    def uncertainty_table(value, rows, columns, name):
+        array = np.asarray(value, dtype=np.float64)
+        if array.ndim == 0:
+            array = np.full((rows, columns), float(array), dtype=np.float64)
+        elif array.shape == (columns,):
+            array = np.broadcast_to(array[None, :], (rows, columns))
+        elif array.shape != (rows, columns):
+            raise ValueError(
+                f"{name} must be scalar, ({columns},), or "
+                f"({rows},{columns})")
+        if np.any(~np.isfinite(array)) or np.any(array < 0.0):
+            raise ValueError(f"{name} must be finite and non-negative")
+        return array
+
+    nominal_uncertainty = uncertainty_table(
+        nominal_position_uncertainty_m, V, K,
+        "nominal_position_uncertainty_m")
+    certificate_uncertainty = uncertainty_table(
+        certificate_position_uncertainty_m, V, K,
+        "certificate_position_uncertainty_m")
+    target_uncertainty = uncertainty_table(
+        target_position_uncertainty_m, V, Q,
+        "target_position_uncertainty_m")
+    velocity_uncertainty = uncertainty_table(
+        velocity_uncertainty_mps, V, K, "velocity_uncertainty_mps")
+    target_velocity_uncertainty = uncertainty_table(
+        target_velocity_uncertainty_mps, V, Q,
+        "target_velocity_uncertainty_mps")
+    scalar_values = (
+        float(uav_height_m), float(fc_hz), float(rcs_m2),
+        float(delta_f_hz), float(symbol_period_s), float(dd_gate_min),
+        float(coefficient_scale),
+    )
+    if (
+        any(np.any(~np.isfinite(value)) for value in (
+            positions, velocities, targets, target_velocities))
+        or not all(np.isfinite(value) for value in scalar_values)
+        or delay_bins < 1 or doppler_bins < 1
+        or float(uav_height_m) <= 0.0 or float(fc_hz) <= 0.0
+        or float(rcs_m2) < 0.0 or float(coefficient_scale) < 0.0
+    ):
+        raise ValueError("batched selected physical inputs are invalid")
+    if not selected:
+        empty = np.zeros((V, 0), dtype=np.float64)
+        return SelectedBistaticCoefficients(selected, empty, empty, empty)
+
+    tx = edge_array[:, 0]
+    rx = edge_array[:, 1]
+    target = edge_array[:, 2]
+    altitude = np.full((V, len(selected), 1), float(uav_height_m))
+    zeros = np.zeros_like(altitude)
+    tx_position = np.concatenate((positions[:, tx, target], altitude), axis=2)
+    rx_position = np.concatenate((positions[:, rx, target], altitude), axis=2)
+    tx_velocity = np.concatenate((velocities[:, tx, target], zeros), axis=2)
+    rx_velocity = np.concatenate((velocities[:, rx, target], zeros), axis=2)
+    target_position = targets[:, target]
+    target_velocity = target_velocities[:, target]
+    tx_vector = target_position - tx_position
+    rx_vector = target_position - rx_position
+    tx_range = np.linalg.norm(tx_vector, axis=2)
+    rx_range = np.linalg.norm(rx_vector, axis=2)
+    tx_unit = tx_vector / (tx_range[:, :, None] + 1.0e-10)
+    rx_unit = rx_vector / (rx_range[:, :, None] + 1.0e-10)
+    tau = (tx_range + rx_range) / C_LIGHT
+    node_radial = (
+        np.sum(tx_velocity * tx_unit, axis=2)
+        + np.sum(rx_velocity * rx_unit, axis=2))
+    target_radial = (
+        np.sum(target_velocity * tx_unit, axis=2)
+        + np.sum(target_velocity * rx_unit, axis=2))
+    nu = float(fc_hz) / C_LIGHT * (node_radial - target_radial)
+
+    wavelength = C_LIGHT / float(fc_hz)
+    path_constant = (
+        wavelength * wavelength * float(rcs_m2) / (4.0 * np.pi) ** 3)
+    alpha_sq = path_constant / (
+        np.maximum(tx_range, 1.0e-6) ** 2
+        * np.maximum(rx_range, 1.0e-6) ** 2)
+    delay_fraction = tau * int(delay_bins) * float(delta_f_hz)
+    doppler_fraction = nu * int(doppler_bins) * float(symbol_period_s)
+    ambiguity_amplitude = np.abs(
+        np.sinc(delay_fraction - np.round(delay_fraction))
+        * np.sinc(doppler_fraction - np.round(doppler_fraction)))
+    nominal_support = (
+        (tau >= 0.0)
+        & (tau < 1.0 / float(delta_f_hz))
+        & (np.abs(nu) <= 1.0 / (2.0 * float(symbol_period_s))))
+    nominal_dd = (
+        nominal_support.astype(np.float64) * ambiguity_amplitude ** 2
+        if str(dd_gain_mode) == "continuous"
+        else (ambiguity_amplitude >= float(dd_gate_min)).astype(np.float64)
+    )
+    nominal_tx_uncertainty = nominal_uncertainty[:, tx]
+    nominal_rx_uncertainty = nominal_uncertainty[:, rx]
+    executable = seen[:, tx, target] & seen[:, rx, target]
+    nominal = (
+        float(coefficient_scale) * alpha_sq
+        * (tx_range / (tx_range + nominal_tx_uncertainty)) ** 2
+        * (rx_range / (rx_range + nominal_rx_uncertainty)) ** 2
+        * nominal_dd * executable.astype(np.float64))
+
+    certificate_tx = certificate_uncertainty[:, tx]
+    certificate_rx = certificate_uncertainty[:, rx]
+    target_radius = target_uncertainty[:, target]
+    tx_position_radius = certificate_tx + target_radius
+    rx_position_radius = certificate_rx + target_radius
+    delay_radius = (
+        certificate_tx + certificate_rx + 2.0 * target_radius
+    ) / C_LIGHT * int(delay_bins) * float(delta_f_hz)
+    tx_unit_radius = np.minimum(
+        2.0, 2.0 * tx_position_radius
+        / np.maximum(tx_range - tx_position_radius, 1.0e-9))
+    rx_unit_radius = np.minimum(
+        2.0, 2.0 * rx_position_radius
+        / np.maximum(rx_range - rx_position_radius, 1.0e-9))
+    tx_relative_speed = np.linalg.norm(tx_velocity - target_velocity, axis=2)
+    rx_relative_speed = np.linalg.norm(rx_velocity - target_velocity, axis=2)
+    target_velocity_radius = target_velocity_uncertainty[:, target]
+    tx_velocity_radius = velocity_uncertainty[:, tx] + target_velocity_radius
+    rx_velocity_radius = velocity_uncertainty[:, rx] + target_velocity_radius
+    tx_radial_radius = tx_velocity_radius + (
+        tx_relative_speed + tx_velocity_radius) * tx_unit_radius
+    rx_radial_radius = rx_velocity_radius + (
+        rx_relative_speed + rx_velocity_radius) * rx_unit_radius
+    doppler_radius = (
+        float(fc_hz) / C_LIGHT
+        * (tx_radial_radius + rx_radial_radius)
+        * int(doppler_bins) * float(symbol_period_s))
+    ambiguity_lower = (
+        _sinc_alignment_lower_array(delay_fraction, delay_radius)
+        * _sinc_alignment_lower_array(doppler_fraction, doppler_radius))
+    if str(dd_gain_mode) == "continuous":
+        lower_support = (
+            (tau - delay_radius / (
+                int(delay_bins) * float(delta_f_hz)) >= 0.0)
+            & (tau + delay_radius / (
+                int(delay_bins) * float(delta_f_hz))
+               < 1.0 / float(delta_f_hz))
+            & ((np.abs(nu) + doppler_radius / (
+                int(doppler_bins) * float(symbol_period_s)))
+               <= 1.0 / (2.0 * float(symbol_period_s))))
+        lower_dd = lower_support.astype(np.float64) * ambiguity_lower ** 2
+    else:
+        lower_dd = (
+            ambiguity_lower >= float(dd_gate_min)).astype(np.float64)
+    lower = (
+        float(coefficient_scale) * alpha_sq
+        * (tx_range / (tx_range + certificate_tx + target_radius)) ** 2
+        * (rx_range / (rx_range + certificate_rx + target_radius)) ** 2
+        * lower_dd * executable.astype(np.float64))
+
+    upper_tx_range = np.maximum(
+        tx_range - certificate_tx - target_radius, float(uav_height_m))
+    upper_rx_range = np.maximum(
+        rx_range - certificate_rx - target_radius, float(uav_height_m))
+    upper_tx_range = np.where(
+        seen[:, tx, target], upper_tx_range, float(uav_height_m))
+    upper_rx_range = np.where(
+        seen[:, rx, target], upper_rx_range, float(uav_height_m))
+    upper = float(coefficient_scale) * path_constant / (
+        upper_tx_range ** 2 * upper_rx_range ** 2)
+    return SelectedBistaticCoefficients(selected, nominal, lower, upper)
 
 
 def plan_budget_certified_hyperedges(

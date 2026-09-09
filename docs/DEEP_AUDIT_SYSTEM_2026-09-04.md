@@ -35,7 +35,7 @@
 - 建议：提交收口前必须补 `.gitignore`（`.arts/`、`.codegraph/`、`.workbuddy/`、根调试文件），并**杜绝裸 `git add -A`**。
 
 ### N3【持续】R3 工作树与 HEAD 的裂口维持（未跟踪项继续增加）
-- HEAD 仍为 `56e8e2c`（Author Date 一手确认 2026-08-26）。08-26 之后全部修复（严格加载器 +597、CI 双平台矩阵、`constraints-ci.txt`、新模块/新测试/新文档）尚未入库。
+- HEAD 仍为 `56e8e2c`（Author Date 一手确认 2026-08-26）。08-26 之后全部修复（严格加载器 +597、CI 门禁、`constraints-ci.txt`、新模块/新测试/新文档）尚未入库。
 - dirty 组成一手实测：**91 M / 14 D / 129 ?**（09-03 为 122 ?，未跟踪新增 7 项）；`advice/003-016` 14 个删除未提交。
 - 未跟踪 uav_isac 源码 12 个；未跟踪测试 23 个；未跟踪 config yaml 36 个；未跟踪 docs .md 15 个。
 - **关键悖论仍成立**：R1/R2/R10-R15 等修复证据（测试）本身就是未跟踪文件——从 HEAD 检出既缺模块、也缺"修复存在"的证明。
@@ -65,7 +65,7 @@
 | R1 | manifest+pilot 无法构造训练 actor | `check_system_identity.py --strict` 对 profile 的目标/comm/tracking 全 OK；profile 链可解析 | ✅ 配置层已达成 |
 | R2 | PPO KL 爆炸→NaN | 全量套件内 trainer 相关测试全绿（含 stable_ppo_ratio 回归） | ✅ |
 | R3 | 重构未提交 HEAD≠当前 | dirty 91M/14D/129??；HEAD 08-26；manifest/profile 仍未跟踪 | ❌ **持续** |
-| R4 | CI 硬读未跟踪 CSV | 依赖子代理确认 CI 双平台、装包带 constraints、不依赖 results/；test_assert_gate_thresholds 用 tmp_path 合成 | ✅ 已修复 |
+| R4 | CI 硬读未跟踪 CSV | CI 在 Windows 参考环境装包带 constraints、不依赖 results/；test_assert_gate_thresholds 用 tmp_path 合成 | ✅ 已修复 |
 | R5 | 权重冗余 | 一手实测 best_restored.pt=923、risk_critic_final.pt=680；树未增长（12.92GB） | ⚠ 未处理，口径修正 |
 | R6 | summary 覆盖 23.5% | 一手：230/979 目录含 summary | ❌ 仍存在 |
 | R7 | 调试目录混放 | `_` 前缀 + smoke 目录持续存在 | ❌ 仍存在 |
@@ -231,3 +231,56 @@ echo %OMP_NUM_THREADS% %MKL_NUM_THREADS% %OPENBLAS_NUM_THREADS% %NUMEXPR_NUM_THR
 - **results/ 08-28 后"零新实验"的口径修正**：P1/P2 实验确实跑了，产物落在此 scratch 区而非 results/。
 - **冗余**：263 个 `.pt`（每目录两份 ~7.2MB）主导 1.4GB；86 个变体目录高度同构。这些证据落在未登记、忽略、不进 results/ 管道、CI 不可见的区域内。
 - **后续（如需）**：留作证据→先哈希清单再迁 results/formal_evidence 经正式门径注册；清理→先哈希清单备份再删，预估可回收 1GB+。当前不动作。
+
+---
+
+## 10. 开发模块合理性审计（同日追加，作者拍板：保留为主）
+
+> 审计对象：`uav_isac` 全部 **128 个模块**（其中 81 个不在部署运行时路径）。本文的"开发模块"指这 81 个。
+> 审计方法：全量引用扫描（import 图，128 模块逐一核验至少一处引用）+ 测试存在性（`tests/` 专属/间接覆盖核对）+ `docs/README.md` §3.3 与 EXPERIMENT_LOG / ALGORITHM_EVOLUTION 的机制登记交叉核对。
+> 与 §3 源码维度（"88 个未接线认证/研究并行层"）口径的差异：本次按"模块级引用"而非"运行时可达性"逐项分类，81 与 88 之差来自 `__init__`/常量/工具脚本的计数归属不同，判定方向一致。
+
+### 10.1 总判定
+
+**绝大多数（约 75/81）合理保留**——它们是项目明确保留、带专属测试、有实验日志登记的研究/认证机制；**无真孤儿**（128 模块全部至少被一处引用，与 2026-08-25 源码审计一致，无死模块可删）；真正需要处置的只有一小撮（§10.3）。
+
+### 10.2 A 类：合理保留（研究/认证机制层，均有专属测试与文档登记）
+
+- **认证控制器簇**：`certified_hierarchical_controller`、`certified_maxmin_power_controller`、`certified_geometry_repair`、`persistent_geometry_execution`、`owner_local_physics`、`causal_hierarchical_controller`、`causal_joint_plan`——L2/L3 证书机制，各带专属测试（`test_certified_*` / `test_persistent_geometry_execution` / `test_causal_*`）。
+- **结构修复/MILP 簇**：`minimum_intervention_repair`、`nested_task_repair`、`horizon_atomic_repair`、`fixing_conflict_filter`、`permission_cut_master`、`dual_guided_structure_repair`、`bottleneck_router`、`oracle_free_candidate_locator`——G4/OLCS 系列，实验日志有明确负/正结果记录（如 B2d/B2e 的 cert 判定）。
+- **分布式信息/传输簇**：`progressive_information_transport`、`spectral_information_reuse`、`distributed_compute_fusion`、`digest_rendezvous`、`owner_*_transport`、`power_repair_transport`、`geometry_repair_transport`、`structure_sequence_transport`、`target_invariant_transport`、`protocol_fingerprint`、`ai_candidate_screener`——M 系/ISCC 研究线。
+- **evaluation/audit 层（约 20）**：`certified_feedback`、`self_normalized_feedback`、`horizon_future_audit`、`horizon_transition_gate`、`transition_certificate`、`episode_joint_conformal`、`quantized_evidence_audit`、`finite_sample_feasibility`、`physics_interval_gate`、各类 calibration/wiring、`expert_arbitration`、`channel_margin` 等——支撑正式门禁的审计/校准工具，几乎全带专属测试。
+- **agent 变体**：`equivariant_movement_plan`、`tica_actor`、`residual_actor`、`p0_fixed_agent`、`base_agent`——架构变体研究线，均有测试或工具引用。
+
+### 10.3 B 类：存疑——两类需处置（4 个无专属测试小模块 + 1 个结构性风险）
+
+**B1. 无专属测试的小模块（补测或归档）**
+- `evaluation/metrics.py`——仅 `scripts/run_baselines.py` 引用、无任何测试（**最弱**）；
+- `coordination/learned_move_ranker.py`、`coordination/local_move_ranker.py`——无专属测试（间接覆盖：`test_safe_checkpoint_loading.py` 装载/推理路径、`test_local_exchange_oracle.py` 特征函数）；
+- `coordination/safe_structural_reduction.py`——S0-A 机制（README 已登记安全 PASS / 稀疏化 FAIL），无专属测试（间接覆盖：`test_minimum_intervention_repair.py` 的 `context_free_zero_gain_screen`）。
+
+**B2. 结构性风险（非删除，需对齐）**：认证控制器簇与 `env_core` 内联逻辑存在**重复实现漂移**——`certified_hierarchical_controller` / `persistent_geometry_execution` / `certified_geometry_repair` 等是"影子认证"，而 `env_core` 用另一套内联控制流执行同一算法（`env_core` 未 import 它们）。两边语义漂移会让"证书"与"运行时"脱节。处置方向：把它们固化绑到运行时调用点，或显式声明为 shadow 并加"与 env_core 运行时语义一致"的对照测试（见 §10.5，未执行）。
+
+### 10.4 C 类：死模块
+
+**无**——128 模块全部至少被一处引用（与 2026-08-25 源码审计一致），无孤儿可删。
+
+### 10.5 处置决定（作者拍板 2026-09-04）
+
+- **保留为主，不删开发层**：它是"默认关闭但保留审计"的研究资产（`docs/README.md` §3.3 明示）。
+- **小动作（已执行，见 §10.6）**：给 B1 的 4 个模块补最小行为测试。
+- **中动作（未执行，待后续独立步骤）**：给影子认证簇加"与 env_core 运行时语义一致"的对照测试（目前各自测试只验证模块自身，不验证与运行时的等价性）；或按 §10.3 B2 显式声明 shadow 并固化绑定。
+
+### 10.6 补测执行记录（同日追加）
+
+**新增三个测试文件（§10.3 B1 处置）**：
+
+1. `tests/test_evaluation_metrics.py`（13 个测试）——`metrics.py` 全部 7 个函数的行为锁定：avg/worst P_D、Jain 公平性（相等→1、单目标→1、空/全零→1、非均匀∈(1/Q,1)）、累积能量守恒、通信位求和、违约率（空→0）、`compute_episode_metrics` 完整 schema 与 steady 窗口尾部切片语义。
+2. `tests/test_move_ranker.py`（11 个测试）——`local_move_ranker.py` 特征契约（宽度==`FEATURE_NAMES`、确定性、kind 独热顺序、owner 变化分数、增删边分数、形状校验、有限性）+ `learned_move_ranker.py` 的 `LocalMoveRanker`（归一化宽度校验、rank/positive 双头输出形状、std 钳制除零安全）。`FrozenLocalMoveRanker` 装载路径已有 `test_safe_checkpoint_loading.py` 覆盖，不重复。
+3. `tests/test_safe_structural_reduction.py`（8 个测试）——S0 层专属语义：零增益边全覆盖离对边、feasibility/optimality 分割、选中零边报 repair toggle、正增益永不入屏、**精确零无容差**（1e-12 不入屏）、负/非有限/形状校验。
+
+**独立运行验证**：三文件 **33 passed / 0 failed**（含 `--cache-clear` 复跑）。
+
+**全量复核（受限环境下如实记录）**：本会话沙箱对平台临时目录的 `os.scandir` 拒绝（`WinError 5`），pytest `tmp_path` fixture 不可用，且 git/multiprocessing 子进程被拦截——全量结果为 **1442 passed / 104 errors / 7 failed**，其中 **1442 已包含全部 33 个新测试**，104 errors 全为 tmp_path 环境性失败，7 failed 全为 git/multiprocessing 子进程类环境性失败（`test_parallel_power_executor` ×2、`test_physics_closure_c0c1` entrypoint ×1、`test_reproducibility` ×4），**无一来自本次改动**（收集数 1553 = §8 基线 1520 + 33，完全对账）。在无沙箱限制环境按 §5 复验命令重跑预期 **1553 passed**。
+
+**§10 自身状态**：审计结论（§10.1–§10.5）为只读登记；§10.6 为本轮补测执行记录（对应 §7/§8 的「同日追加」惯例）。B2 影子认证簇对照测试仍为**后续独立步骤**（§10.5 中动作），未在本轮执行。

@@ -1294,7 +1294,7 @@ LP 单独恢复 deployed→ceiling 缺口的 **65.5%**；几何层（L3）进一
   现包含 P0 cache、结构选择、V3/拥塞修复计数、错误状态和通信 bit 计数，保证同状态
   反事实不因隐藏控制状态分叉。
 - **工程基线**：`requirements.txt`、`constraints-ci.txt`、
-  `.github/workflows/ci.yml`（Linux + Windows 全量 pytest 与严格身份门禁）、`pytest.ini` 排除 scripts/
+  `.github/workflows/ci.yml`（Windows 参考环境全量 pytest 与严格身份门禁）、`pytest.ini` 排除 scripts/
   （`test_ppo_ratio_fix.py` 曾模块级执行训练被 pytest 误收集）。全量测试基线
   2026-08-20 G2-1A 基础设施在 Windows/MKL 稳定边界下分两进程回归：非 belief
   `1036 passed`、belief `14 passed`，合计 **1050 passed**、无断言失败。单进程仍可能在 MKL

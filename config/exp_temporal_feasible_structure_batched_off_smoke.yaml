@@ -1,0 +1,7 @@
+# Reference ablation for the exact Pareto-gradient implementation.  All
+# environment, optimizer and seed settings are inherited; only the VJP path
+# changes from batched to scalar reverse-mode.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  temporal_unrolled_power_batched_vjp_enabled: false

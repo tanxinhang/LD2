@@ -9,9 +9,9 @@ from uav_isac.evaluation.compute_energy_epoch_wiring import (
 )
 
 
-def _artifact(*, source="rapl_package"):
+def _artifact(*, source="external_cpu_rail"):
     document = _document(source=source)
-    if source in {"rapl_package", "external_cpu_rail"}:
+    if source == "external_cpu_rail":
         validation_ids = [f"val-supported-{index}" for index in range(80)]
         document["validation_episode_ids"] = validation_ids
         document["validation_events"] = [

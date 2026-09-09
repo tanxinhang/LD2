@@ -8,7 +8,7 @@ It represents the lower bound of "no trajectory optimization".
 import numpy as np
 from typing import Dict, Optional, Tuple
 from uav_isac.agents.base_agent import BaseAgent
-from uav_isac.environment.action import ActionSpace
+from uav_isac.domain.action import ActionSpace
 from uav_isac.utils.types import Action
 
 

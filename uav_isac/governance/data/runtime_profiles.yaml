@@ -1,0 +1,13 @@
+# Packaged active runtime profile registry.
+schema_version: 1
+profiles:
+  default_dev:
+    path: config/default.yaml
+    purpose: development_characterization
+    formal: false
+    status: active
+  strict_k16q16:
+    path: config/exp_strict_distributed_k16q16.yaml
+    purpose: canonical_distributed_audit
+    formal: true
+    status: active

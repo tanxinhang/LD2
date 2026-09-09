@@ -47,7 +47,7 @@ from uav_isac.coordination.target_invariant_transport import (
     decode_owner_target_invariant_tokens,
     encode_owner_target_invariant_tokens,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _sha256(path: Path) -> str:
@@ -308,7 +308,7 @@ def build_causal_coefficient_envelope(
     elapsed_frames: int,
     max_age_frames: int,
     calibration: FrozenCausalEnvelopeCalibration,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     carrier_hz: float,
     delta_f_hz: float,
     symbol_period_s: float,
@@ -458,7 +458,7 @@ def certified_causal_hierarchical_isac_control(
     elapsed_frames: int,
     max_age_frames: int,
     calibration: FrozenCausalEnvelopeCalibration,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     control_period_s: float,
     p_fa: float,
     controller_config: CertifiedHierarchicalControllerConfig,

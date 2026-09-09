@@ -48,7 +48,7 @@ from uav_isac.coordination.maxmin_power import (
     distributed_column_generation_maxmin_power,
     fixed_owner_gain_matrix,
 )
-from uav_isac.evaluation.horizon_transition_gate import (
+from uav_isac.domain.horizon_transition import (
     HorizonRouteDecision,
     HorizonTransitionBounds,
     certify_horizon_paired_deflection_transition,

@@ -21,9 +21,9 @@ from uav_isac.coordination.certified_geometry_repair import (
     CertifiedGeometryRepairDecision,
 )
 from uav_isac.coordination.causal_joint_plan import CausalJointPlanCommitment
-from uav_isac.environment.communication import (
-    CommunicationStepStats,
-    InterUAVCommunicationModel,
+from uav_isac.domain.communication import (
+    CommunicationStepStatsLike,
+    CommunicationTransport,
 )
 
 
@@ -350,8 +350,8 @@ class FrozenTokenInbox:
         outgoing_token_mask: np.ndarray,
         positions: np.ndarray,
         communication_power_w: np.ndarray,
-        communication_model: InterUAVCommunicationModel,
-    ) -> tuple["FrozenTokenInbox", CommunicationStepStats]:
+        communication_model: CommunicationTransport,
+    ) -> tuple["FrozenTokenInbox", CommunicationStepStatsLike]:
         """Re-evaluate the frozen Token action at the modified geometry."""
         messages = np.asarray(outgoing_message, dtype=np.float64)
         rates = np.asarray(outgoing_rate, dtype=np.int64).reshape(-1)
@@ -424,7 +424,7 @@ class FrozenTokenInbox:
         repair_positions: np.ndarray,
         baseline_positions: np.ndarray,
         communication_power_w: np.ndarray,
-        communication_model: InterUAVCommunicationModel,
+        communication_model: CommunicationTransport,
     ) -> tuple["FrozenTokenInbox", np.ndarray]:
         """Commit only Token deliveries feasible on both geometry branches."""
         messages = np.asarray(outgoing_message, dtype=np.float64)

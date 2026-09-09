@@ -15,8 +15,8 @@ def _document(count=19, *, with_validation=True, source="synthetic_unit_test"):
         "runtime_id": "python-test-runtime-v1",
         "meter_id": "synthetic-counter-v1",
         "meter_calibration_id": "synthetic-calibration-none",
-        "meter_difference_uncertainty_accounted": source in {
-            "rapl_package", "external_cpu_rail"},
+        "meter_difference_uncertainty_accounted": (
+            source == "external_cpu_rail"),
         "meter_scope": "complete_controller_package",
         "counter_semantics": "monotone_quantized_energy_joule",
         "training_episode_ids": ["train-0"],
@@ -33,8 +33,7 @@ def _document(count=19, *, with_validation=True, source="synthetic_unit_test"):
                 "counter_wrap_count": 0,
                 "window_censored": False,
                 "counter_difference_uncertainty_j": (
-                    0.0002 if source in {
-                        "rapl_package", "external_cpu_rail"} else None),
+                    0.0002 if source == "external_cpu_rail" else None),
             }
             for index, episode in enumerate(calibration_ids)
         ],
@@ -48,8 +47,7 @@ def _document(count=19, *, with_validation=True, source="synthetic_unit_test"):
                 "counter_wrap_count": 0,
                 "window_censored": False,
                 "counter_difference_uncertainty_j": (
-                    0.0002 if source in {
-                        "rapl_package", "external_cpu_rail"} else None),
+                    0.0002 if source == "external_cpu_rail" else None),
             }
             for index, episode in enumerate(validation_ids)
         ],
@@ -105,13 +103,13 @@ def test_tool_requires_meter_domain_and_bound_identities():
 
 
 def test_hardware_source_without_statistical_validation_support_is_not_candidate():
-    result = calibrate_document(_document(source="rapl_package"))
+    result = calibrate_document(_document(source="external_cpu_rail"))
     assert not result["authority"]["compute_energy_certificate_candidate"]
     assert not result["authority"]["system_commit_authority"]
 
 
 def test_hardware_candidate_requires_exact_validation_upper_below_risk():
-    document = _document(source="rapl_package")
+    document = _document(source="external_cpu_rail")
     validation_ids = [f"val-supported-{index}" for index in range(80)]
     document["validation_episode_ids"] = validation_ids
     document["validation_events"] = [
@@ -136,7 +134,7 @@ def test_hardware_candidate_requires_exact_validation_upper_below_risk():
 
 
 def test_hardware_source_requires_meter_uncertainty_accounting():
-    document = _document(source="rapl_package")
+    document = _document(source="external_cpu_rail")
     document["meter_difference_uncertainty_accounted"] = False
     with pytest.raises(ValueError, match="difference-uncertainty"):
         calibrate_document(document)

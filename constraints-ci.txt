@@ -12,9 +12,8 @@ networkx==3.6.1
 scikit-learn==1.9.0
 pytest==9.1.1
 
-# Transitive graph resolved on both CPython 3.12/manylinux_2_28 and
-# CPython 3.14/win_amd64.  This is a cross-platform version lock; artifact
-# hashes remain a separate release-hardening step.
+# Transitive graph resolved on the reference CPython 3.14/win_amd64 runtime.
+# Artifact hashes remain a separate release-hardening step.
 cloudpickle==3.1.2
 colorama==0.4.6
 Farama-Notifications==0.0.6

@@ -7,12 +7,15 @@ from uav_isac.coordination.composable_certificate import (
     conservative_row_contribution,
     quantize_lower_log,
     quantize_upper_log,
+    optimal_simplex_dual_upper,
     robust_movement_dominates,
     robust_primal_dual_bounds,
+    targetwise_price_row_dual_upper,
     uniform_price_row_dual_upper,
 )
 from uav_isac.coordination.hyperedge import (
     reconstruct_bistatic_coefficient_from_public_state,
+    reconstruct_bistatic_coefficient_dd_upper_from_public_state,
     reconstruct_bistatic_coefficient_upper_from_public_state,
 )
 from uav_isac.coordination.maxmin_power import (
@@ -46,6 +49,36 @@ def test_uniform_dual_row_terms_bound_exact_maxmin_optimum():
     # Analytic/LP optimum cannot exceed any feasible simplex-price dual value.
     exact = solve_fixed_structure_maxmin_power_lp(gain, budget)
     assert exact.worst_deflection <= np.sum(row_upper) + 1.0e-12
+
+
+def test_targetwise_dual_family_bounds_exact_and_never_loosens_uniform():
+    rng = np.random.default_rng(20260908)
+    for _ in range(100):
+        gain = rng.lognormal(size=(5, 4))
+        budget = rng.uniform(0.05, 1.0, size=5)
+        exact = solve_fixed_structure_maxmin_power_lp(gain, budget)
+        uniform = float(np.sum(uniform_price_row_dual_upper(gain, budget)))
+        targetwise = float(np.min(np.sum(
+            targetwise_price_row_dual_upper(gain, budget), axis=0)))
+        combined = min(uniform, targetwise)
+        assert exact.worst_deflection <= combined + 1.0e-9
+        assert combined <= uniform + 1.0e-12
+
+
+def test_optimal_simplex_dual_matches_exact_and_tightens_fixed_prices():
+    rng = np.random.default_rng(20260909)
+    for _ in range(50):
+        gain = rng.lognormal(mean=0.0, sigma=2.0, size=(5, 4))
+        budget = rng.uniform(0.05, 1.0, size=5)
+        exact = solve_fixed_structure_maxmin_power_lp(gain, budget)
+        optimal, prices = optimal_simplex_dual_upper(gain, budget)
+        uniform = float(np.sum(uniform_price_row_dual_upper(gain, budget)))
+        targetwise = float(np.min(np.sum(
+            targetwise_price_row_dual_upper(gain, budget), axis=0)))
+        assert np.sum(prices) == pytest.approx(1.0)
+        assert optimal == pytest.approx(
+            exact.worst_deflection, rel=2.0e-7, abs=1.0e-10)
+        assert optimal <= min(uniform, targetwise) + 1.0e-9
 
 
 def test_robust_primal_dual_sandwich_contains_sampled_optima() -> None:
@@ -147,6 +180,43 @@ def test_complete_reports_compose_global_dual_upper_and_ratio():
         0.7 / 1.1)
 
 
+def test_targetwise_reports_tighten_composable_upper_without_changing_lower():
+    reports = np.asarray([
+        [[0.3, 0.2], [0.4, 0.5]],
+        [[0.3, 0.2], [0.4, 0.5]],
+    ])
+    targetwise = np.asarray([
+        [[0.40, 9.0], [0.40, 8.0]],
+        [[7.00, 0.45], [6.00, 0.45]],
+    ])
+    certificate = aggregate_target_responsibility_certificate(
+        reports,
+        np.full((2, 2), 9),
+        target_owner=np.asarray([0, 1]),
+        max_age_frames=1,
+        current_frame=9,
+        row_dual_upper=np.asarray([[0.5, 0.6], [0.5, 0.6]]),
+        row_targetwise_upper=targetwise,
+    )
+    assert certificate.target_deflection_lower.tolist() == pytest.approx(
+        [0.7, 0.7])
+    assert certificate.global_optimum_upper == pytest.approx(0.8)
+    assert certificate.joint_approximation_ratio_lower == pytest.approx(
+        0.7 / 0.8)
+
+
+def test_composable_certificate_rejects_primal_above_targetwise_dual():
+    with pytest.raises(ValueError, match="primal lower exceeds"):
+        aggregate_target_responsibility_certificate(
+            np.full((2, 2, 1), 0.4),
+            np.full((2, 2), 4),
+            target_owner=np.asarray([0]),
+            max_age_frames=1,
+            current_frame=4,
+            row_targetwise_upper=np.full((2, 2, 1), 0.1),
+        )
+
+
 def test_robust_geometry_dd_coefficient_is_lower_than_sampled_set():
     rng = np.random.default_rng(20260828)
     position = np.asarray([
@@ -196,6 +266,19 @@ def test_robust_geometry_dd_coefficient_is_lower_than_sampled_set():
         position_uncertainty_m=np.asarray([2.0, 3.0]),
         target_position_uncertainty_m=np.asarray([4.0]),
     )
+    dd_upper = reconstruct_bistatic_coefficient_dd_upper_from_public_state(
+        position,
+        velocity,
+        target,
+        target_velocity,
+        seen,
+        position_uncertainty_m=np.asarray([2.0, 3.0]),
+        target_position_uncertainty_m=np.asarray([4.0]),
+        velocity_uncertainty_mps=np.asarray([0.3, 0.4]),
+        target_velocity_uncertainty_mps=np.asarray([0.5]),
+        **kwargs,
+    )
+    assert np.all(dd_upper <= upper + 1.0e-30)
 
     def ball(radius, shape):
         direction = rng.normal(size=shape)
@@ -226,4 +309,5 @@ def test_robust_geometry_dd_coefficient_is_lower_than_sampled_set():
             **kwargs,
         )
         assert np.all(robust <= point + 1.0e-30)
+        assert np.all(point <= dd_upper + 1.0e-30)
         assert np.all(point <= upper + 1.0e-30)

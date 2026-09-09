@@ -1,0 +1,21 @@
+# Paired PPO smoke profile for Stage 2.  The only execution difference from
+# the control profile is the bounded distributed primal--dual sensing block.
+extends: exp_constrained_cvar_ppo_smoke.yaml
+
+uav:
+  # Make the target-wise P_D reserve reachable in this tiny engineering run.
+  P_sense: 1.0
+  P_sense_max: 1.0
+  P_isac_total: 1.0
+
+marl:
+  analytical_sensing_power_enabled: true
+  analytical_sensing_power_reserve_pd: 0.6
+  distributed_primal_dual_power_enabled: true
+  distributed_primal_dual_power_rounds: 32
+  distributed_primal_dual_power_acceptance_tolerance: 1.0e-10
+  distributed_primal_dual_power_primal_tolerance: 2.0e-4
+  distributed_primal_dual_power_stationarity_tolerance: 2.0e-4
+  distributed_primal_dual_power_dual_tolerance: 2.0e-4
+  distributed_primal_dual_power_convergence_patience: 3
+  num_episodes: 3

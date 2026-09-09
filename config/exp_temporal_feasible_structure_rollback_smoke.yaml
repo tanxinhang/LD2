@@ -1,0 +1,8 @@
+# Stage-5 transaction fault injection: the feasible-structure and temporal
+# power updates must be rolled back together with ordinary PPO.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  target_kl: 0.01
+  num_episodes: 3
+

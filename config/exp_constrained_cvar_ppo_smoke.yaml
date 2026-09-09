@@ -1,0 +1,42 @@
+# Fixed-seed engineering smoke test for the teacher-free target-wise CVaR
+# condition.  This is intentionally small and is not publication evidence.
+extends: exp_800_q4_u2u_joint_isac.yaml
+
+scenario:
+  K: 2
+  Q: 2
+  T: 32
+
+target:
+  omega_q: [0.5, 0.5]
+
+detection:
+  K_q_max: 2
+
+marl:
+  num_envs: 1
+  rollout_steps: 32
+  minibatch_size: 32
+  ppo_epochs: 1
+  num_episodes: 6
+  early_stop: false
+  eval_interval: 100
+  eval_episodes: 1
+  eval_seeds: [31001]
+  eval_seed_bank_path: ""
+  checkpoint_confirmation_enabled: false
+  training_seed_replay_enabled: false
+  training_fixed_seed: 31415
+  target_allocation_aux_epochs: 0
+  comm_rate_bonus_aux_coef: 0.0
+
+  cvar_tau: 0.0
+  constrained_cvar_ppo_enabled: true
+  constrained_cvar_qos_floor: 0.60
+  constrained_cvar_tail_fraction: 0.20
+  constrained_cvar_penalty: 0.10
+  constrained_cvar_dual_step_size: 0.10
+  constrained_cvar_dual_maximum: 10.0
+  constrained_cvar_primal_tolerance: 0.01
+  constrained_cvar_power_tolerance_w: 1.0e-9
+  constrained_cvar_convergence_patience: 3

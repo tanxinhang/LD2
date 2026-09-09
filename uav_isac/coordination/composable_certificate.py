@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import linprog
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,87 @@ def uniform_price_row_dual_upper(
     return budget * np.max(gain, axis=1) / float(gain.shape[1])
 
 
+def targetwise_price_row_dual_upper(
+    row_gain_upper_per_watt: np.ndarray,
+    sensing_budget_w: np.ndarray,
+) -> np.ndarray:
+    """Return row terms for every one-hot target-price dual point.
+
+    Column ``q`` uses the valid simplex point ``pi=e_q``. Summing that
+    column over rows bounds the max-min optimum; taking the minimum over q
+    remains a valid upper bound and is never used to execute power.
+    """
+    gain = np.asarray(row_gain_upper_per_watt, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    if gain.ndim != 2 or gain.shape[0] != budget.size or gain.shape[1] < 1:
+        raise ValueError("gain upper must be (K,Q) matching the budget")
+    if (
+        np.any(~np.isfinite(gain)) or np.any(gain < 0.0)
+        or np.any(~np.isfinite(budget)) or np.any(budget < 0.0)
+    ):
+        raise ValueError("gain upper and budget must be finite/non-negative")
+    return budget[:, None] * gain
+
+
+def optimal_simplex_dual_upper(
+    row_gain_upper_per_watt: np.ndarray,
+    sensing_budget_w: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """Solve the tight simplex-price dual for an upper gain envelope.
+
+    This is a diagnostic/certificate primitive, not an execution shortcut.
+    Global gain normalization keeps the LP stable without changing its
+    optimizer. A failed solve is rejected rather than replaced by a guess.
+    """
+    gain = np.asarray(row_gain_upper_per_watt, dtype=np.float64)
+    budget = np.asarray(sensing_budget_w, dtype=np.float64).reshape(-1)
+    if gain.ndim != 2 or gain.shape[0] != budget.size or gain.shape[1] < 1:
+        raise ValueError("gain upper must be (K,Q) matching the budget")
+    if (
+        np.any(~np.isfinite(gain)) or np.any(gain < 0.0)
+        or np.any(~np.isfinite(budget)) or np.any(budget < 0.0)
+    ):
+        raise ValueError("gain upper and budget must be finite/non-negative")
+    K, Q = gain.shape
+    scale = max(float(np.max(gain, initial=0.0)), 1.0)
+    normalized = gain / scale
+    # Variables are [pi_0..pi_Q-1, y_0..y_K-1].
+    objective = np.concatenate((np.zeros(Q), budget))
+    matrix = np.zeros((K * Q, Q + K), dtype=np.float64)
+    row = 0
+    for transmitter in range(K):
+        for target in range(Q):
+            matrix[row, target] = normalized[transmitter, target]
+            matrix[row, Q + transmitter] = -1.0
+            row += 1
+    equality = np.zeros((1, Q + K), dtype=np.float64)
+    equality[0, :Q] = 1.0
+    solved = linprog(
+        objective,
+        A_ub=matrix,
+        b_ub=np.zeros(K * Q),
+        A_eq=equality,
+        b_eq=np.ones(1),
+        bounds=(0.0, None),
+        method="highs-ds",
+        options={"presolve": False},
+    )
+    if not solved.success or solved.x is None:
+        raise RuntimeError(
+            "optimal simplex dual certificate failed: " + solved.message)
+    prices = np.maximum(np.asarray(solved.x[:Q]), 0.0)
+    mass = float(np.sum(prices))
+    if mass <= 0.0:
+        raise RuntimeError("optimal simplex dual returned zero price mass")
+    prices /= mass
+    # Re-evaluate in original units rather than trusting the scaled objective.
+    upper = float(np.sum(
+        budget * np.max(prices[None, :] * gain, axis=1)))
+    if not np.isfinite(upper) or upper < 0.0:
+        raise RuntimeError("optimal simplex dual returned an invalid upper")
+    return upper, prices
+
+
 def aggregate_target_responsibility_certificate(
     row_contribution_lower: np.ndarray,
     report_frame: np.ndarray,
@@ -233,6 +315,7 @@ def aggregate_target_responsibility_certificate(
     max_age_frames: int,
     current_frame: int,
     row_dual_upper: np.ndarray | None = None,
+    row_targetwise_upper: np.ndarray | None = None,
 ) -> ComposableTargetCertificate:
     """Compose row reports at deterministic target owners.
 
@@ -275,6 +358,18 @@ def aggregate_target_responsibility_certificate(
         ):
             raise ValueError("row_dual_upper must be finite non-negative (K,K)")
     owner_upper_candidates: list[float] = []
+    targetwise_reports = None
+    if row_targetwise_upper is not None:
+        targetwise_reports = np.asarray(
+            row_targetwise_upper, dtype=np.float64)
+        if (
+            targetwise_reports.shape != (K, K, Q)
+            or np.any(~np.isfinite(targetwise_reports))
+            or np.any(targetwise_reports < 0.0)
+        ):
+            raise ValueError(
+                "row_targetwise_upper must be finite non-negative (K,K,Q)")
+    targetwise_upper_candidates: list[float] = []
     for q in range(Q):
         owner = int(owners[q])
         owner_frames = frames[owner]
@@ -293,13 +388,27 @@ def aggregate_target_responsibility_certificate(
         if upper_reports is not None:
             owner_upper_candidates.append(float(np.sum(
                 upper_reports[owner])))
+        if targetwise_reports is not None:
+            targetwise_upper_candidates.append(float(np.sum(
+                targetwise_reports[owner, :, q])))
+    valid_upper_families: list[float] = []
+    if len(owner_upper_candidates) == Q and Q > 0:
+        valid_upper_families.append(float(np.min(owner_upper_candidates)))
+    if len(targetwise_upper_candidates) == Q and Q > 0:
+        valid_upper_families.append(float(np.min(
+            targetwise_upper_candidates)))
     global_upper = (
-        float(np.min(owner_upper_candidates))
-        if len(owner_upper_candidates) == Q and Q > 0
-        else float("inf")
-    )
+        float(np.min(valid_upper_families))
+        if valid_upper_families else float("inf"))
     joint_lower = (
         float(np.min(target_lower)) if np.all(target_complete) else 0.0)
+    if (
+        np.isfinite(global_upper)
+        and joint_lower > global_upper
+        + 1.0e-9 * max(1.0, abs(global_upper))
+    ):
+        raise ValueError(
+            "composable primal lower exceeds the reported dual upper")
     ratio = (
         float(np.clip(joint_lower / global_upper, 0.0, 1.0))
         if np.isfinite(global_upper) and global_upper > 0.0 else 0.0

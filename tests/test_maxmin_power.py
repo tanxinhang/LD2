@@ -7,6 +7,7 @@ from uav_isac.coordination.maxmin_power import (
     distributed_column_generation_maxmin_power,
     distributed_dual_maxmin_power,
     fixed_owner_gain_matrix,
+    fixed_owner_gain_matrix_from_selected_values,
     local_transmitter_range_minimax_share,
     optimal_maxmin_dual_prices,
     relaxed_same_geometry_target_ceiling,
@@ -651,6 +652,29 @@ def test_fixed_owner_gain_rejects_multiple_receivers():
     ):
         fixed_owner_gain_matrix(
             coefficient, [(0, 1, 0), (2, 0, 0)])
+
+
+def test_sparse_batched_fixed_owner_gain_matches_dense_collapse():
+    selected = [(0, 1, 0), (2, 1, 0), (1, 3, 1), (3, 2, 2)]
+    values = np.asarray([
+        [0.2, 0.3, 0.4, 0.5],
+        [1.2, 1.3, 1.4, 1.5],
+    ])
+    sparse_gain, sparse_owner = (
+        fixed_owner_gain_matrix_from_selected_values(
+            values, selected, num_uavs=4, num_targets=3))
+
+    dense_gains = []
+    for view in values:
+        coefficient = np.zeros((4, 4, 3), dtype=np.float64)
+        for edge, value in zip(selected, view):
+            coefficient[edge] = value
+        dense_gain, dense_owner = fixed_owner_gain_matrix(
+            coefficient, selected)
+        dense_gains.append(dense_gain)
+        np.testing.assert_array_equal(sparse_owner, dense_owner)
+
+    np.testing.assert_array_equal(sparse_gain, np.stack(dense_gains))
 
 
 def test_relaxed_geometry_ceiling_dominates_fixed_owner_optimum():

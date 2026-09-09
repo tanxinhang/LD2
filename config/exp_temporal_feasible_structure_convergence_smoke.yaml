@@ -1,0 +1,8 @@
+# Same physical/model assumptions as the Stage-5 smoke, with doubled bounded
+# inner work to test whether the reported stationarity/dual residual is merely
+# an iteration-budget effect.  This is a latency trade-off audit.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  distributed_primal_dual_power_rounds: 64
+  temporal_unrolled_power_inner_iterations: 4

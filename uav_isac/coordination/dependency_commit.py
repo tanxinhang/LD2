@@ -24,7 +24,7 @@ from typing import Iterable
 import numpy as np
 
 from uav_isac.coordination.local_exchange_oracle import LocalMove
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _index_bits(cardinality: int) -> int:
@@ -286,7 +286,7 @@ def _round_report(
     payload_bits: int,
     positions: np.ndarray,
     comm_power_w: np.ndarray,
-    model: InterUAVCommunicationModel,
+    model: CommunicationTransport,
     snr_margin_db: float = 0.0,
     latency_margin_s: float = 0.0,
 ) -> tuple[CommitRoundReport, np.ndarray, tuple[str, ...]]:
@@ -365,7 +365,7 @@ def certify_dependency_commit(
     state_versions: np.ndarray,
     certificate_epoch_ids: np.ndarray,
     certificate_digests: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     total_power_w: float = 1.0,
     total_deadline_s: float | None = None,
     layout: DependencyCommitLayout | None = None,
@@ -630,7 +630,7 @@ def minimum_uniform_control_reserve(
     state_versions: np.ndarray,
     certificate_epoch_ids: np.ndarray,
     certificate_digests: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     reserve_upper_w: float,
     total_power_w: float = 1.0,
     total_deadline_s: float | None = None,

@@ -1,0 +1,8 @@
+# Stage-0 ablation for replacing the online composable-certificate protocol
+# with execution-time constraints.  The physical model, state beacons,
+# hyperedge negotiation, owner feedback and replicated power controller are
+# inherited unchanged; only the post-execution certificate payload is removed.
+extends: exp_strict_distributed_k16q16.yaml
+
+marl:
+  distributed_composable_certificate_enabled: false

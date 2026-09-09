@@ -119,8 +119,7 @@ def calibrate_document(document: Mapping[str, object]) -> dict[str, object]:
 
     source_kind = str(document.get("source_kind", "unspecified"))
     allowed_sources = {
-        "unspecified", "synthetic_unit_test", "rapl_package",
-        "external_cpu_rail",
+        "unspecified", "synthetic_unit_test", "external_cpu_rail",
     }
     if source_kind not in allowed_sources:
         raise ValueError(f"unsupported source_kind: {source_kind}")
@@ -160,7 +159,7 @@ def calibrate_document(document: Mapping[str, object]) -> dict[str, object]:
 
     calibration_events = _observations(calibration_values)
     validation_events = _observations(validation_values)
-    if source_kind in {"rapl_package", "external_cpu_rail"}:
+    if source_kind == "external_cpu_rail":
         if not uncertainty_accounted:
             raise ValueError(
                 "hardware energy sources require meter difference-uncertainty "
@@ -201,8 +200,7 @@ def calibrate_document(document: Mapping[str, object]) -> dict[str, object]:
             "frozen_compute_energy_epoch_calibrated_pending_validation"
         )
     )
-    empirical_hardware_source = source_kind in {
-        "rapl_package", "external_cpu_rail"}
+    empirical_hardware_source = source_kind == "external_cpu_rail"
     exact_validation_upper = None
     validation_supports_declared_risk = False
     if validation is not None:

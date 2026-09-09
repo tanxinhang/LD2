@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
-from uav_isac.agents.neighbor_attention import MultiHeadNeighborAttention
+from uav_isac.environment.belief_fusion import MultiHeadNeighborAttention
 from uav_isac.agents.networks import CriticNetwork, StructuredActorNetwork
 from uav_isac.environment.observation_slices import ObservationSlices
 

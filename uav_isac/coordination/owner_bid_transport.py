@@ -15,7 +15,7 @@ from uav_isac.coordination.owner_gain_ceiling import owner_gain_ceiling
 from uav_isac.coordination.power_repair_transport import (
     _required_power_for_packet,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _index_bits(cardinality: int) -> int:
@@ -212,7 +212,7 @@ def _candidate_transport(
     existing_comm_power_w: np.ndarray,
     *,
     coordinator: int,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: OwnerBidWireLayout,
     control_period_s: float,
     snr_margin_db: float,
@@ -318,7 +318,7 @@ def certify_owner_bid_transport(
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
     *,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: OwnerBidWireLayout,
     control_period_s: float,
     snr_margin_db: float = 0.0,

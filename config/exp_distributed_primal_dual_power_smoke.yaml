@@ -1,0 +1,36 @@
+# Stage-2 smoke profile for the bounded fixed-structure distributed
+# primal--dual sensing-power block.  This is an execution-only profile; PPO
+# remains disabled so the power controller can be audited in isolation.
+extends: exp_800_q4_u2u_joint_isac.yaml
+
+scenario:
+  T: 3
+
+uav:
+  # Raise the sensing cap only for this tiny feasibility smoke test.  The
+  # production default remains 0.0251 W; the larger cap makes the configured
+  # P_D reserve reachable for a deterministic fixed seed.
+  P_sense: 1.0
+  P_sense_max: 1.0
+  P_isac_total: 1.0
+
+marl:
+  num_envs: 1
+  rollout_steps: 16
+  minibatch_size: 8
+  ppo_epochs: 0
+  num_episodes: 0
+  eval_interval: 0
+  eval_seed_bank_path: ""
+  eval_seeds: [1]
+  final_eval_seed_split: test
+  checkpoint_confirmation_enabled: false
+  analytical_sensing_power_enabled: true
+  analytical_sensing_power_reserve_pd: 0.6
+  distributed_primal_dual_power_enabled: true
+  distributed_primal_dual_power_rounds: 64
+  distributed_primal_dual_power_acceptance_tolerance: 1.0e-10
+  distributed_primal_dual_power_primal_tolerance: 2.0e-4
+  distributed_primal_dual_power_stationarity_tolerance: 2.0e-4
+  distributed_primal_dual_power_dual_tolerance: 2.0e-4
+  distributed_primal_dual_power_convergence_patience: 3

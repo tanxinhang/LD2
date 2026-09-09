@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from uav_isac.environment.action import ActionSpace
 from tools.run_strict_distributed_pilot import (
     _algorithm_version,
     _episode,
+    run as run_strict_pilot,
     validate_formal_system_identity,
     validate_strict_config,
 )
@@ -259,6 +261,13 @@ def test_strict_online_validator_rejects_training_only_difference_reward():
         validate_strict_config(cfg)
 
 
+def test_strict_validator_allows_online_certificate_transport_ablation():
+    cfg = load_config(PILOT)
+    cfg.marl.distributed_composable_certificate_enabled = False
+
+    validate_strict_config(cfg)
+
+
 def test_hyperedge_submission_is_invariant_to_hidden_target_truth():
     """Only the fixed local beliefs may influence a sender's public beacon."""
     cfg = load_config(PILOT)
@@ -289,6 +298,48 @@ def test_strict_pilot_control_protocol_gets_on_air():
     assert episode["bits_per_frame"] > 0.0
     assert episode["active_senders_per_frame"] > 0.0
     assert 0.0 <= episode["movement_target_coverage"] <= 1.0
+    assert set(episode["multiframe_detection"]["windows"]) == {"1", "2"}
+    assert episode["closed_loop_convergence"]["scope"].startswith(
+        "closed-loop trajectory")
+    assert "terminal_slope_per_frame" in episode[
+        "closed_loop_convergence"]["worst"]
+
+
+def test_strict_report_audits_controller_ownership_and_is_strict_json():
+    report = run_strict_pilot(
+        PILOT,
+        seeds=[7],
+        tail_window=1,
+        frames=1,
+    )
+    audit = report["execution_audit"]
+
+    assert audit == report["run_manifest"]["execution_audit"]
+    assert audit["controller_family"] == "analytical_distributed_baseline"
+    assert audit["learned_policy_executed"] is False
+    assert audit["checkpoint_loaded"] is False
+    assert audit["decision_owners"]["submitted_agent_action"] == (
+        "deterministic_hold")
+    assert audit["decision_owners"]["sensing_power"] == "analytical"
+    assert audit["extension_flags"] == {
+        "constrained_cvar_ppo": False,
+        "distributed_primal_dual_power": False,
+        "temporal_feasible_structure": False,
+    }
+    assert audit["observed_module_imports"][
+        "uav_isac.prediction.certified_gnn"
+    ]["imported_during_episode"] is False
+
+    episode = report["episodes"][0]
+    if episode["power_deadline_shadow_minimum_reserve_fraction_mean"] is None:
+        assert episode[
+            "power_deadline_shadow_minimum_reserve_fraction_unavailable_reason"
+        ]
+    if episode["certificate_global_optimum_upper"] is None:
+        assert episode[
+            "certificate_global_optimum_upper_unavailable_reason"
+        ]
+    json.dumps(report, allow_nan=False)
 
 
 def test_periodic_control_carrier_reduces_airtime_without_disabling_protocol():
@@ -458,6 +509,9 @@ def test_scale_protocol_does_not_require_online_optimality_certificate():
     result = _aggregate([episode], SweepCase("k8_q8", "scale_baseline"))
 
     assert result["passes_all_gates"]
+    assert result["certificate_global_optimum_upper"] is None
+    assert result["certificate_global_optimum_upper_unavailable_reason"]
+    json.dumps(result, allow_nan=False)
     assert set(result["hard_and_service_gates"]) == {
         "qos_rate_ge_0_80",
         "delivery_rate_ge_0_99",

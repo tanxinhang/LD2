@@ -551,6 +551,234 @@ class ObservationBuilder:
         obs = np.concatenate([np.atleast_1d(p).ravel() for p in obs_parts])
         return obs.astype(np.float64)
 
+    def build_strict_local_obs_batch(
+        self,
+        uav_states: List,
+        *,
+        prev_p_d: np.ndarray,
+        belief_mean: np.ndarray,
+        belief_cov_diag: np.ndarray,
+        belief_aoi: np.ndarray,
+        comm_msgs: Dict[int, Dict[int, np.ndarray]],
+        comm_metadata: Dict[int, Dict[int, dict]],
+        own_token_masks: Dict[int, np.ndarray],
+        own_target_claims: Dict[int, np.ndarray],
+        oracle_targets: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Build all strict target-token observations from shared tensors.
+
+        This is the SoA fast path used when neighbor state and P0 global state
+        are intentionally hidden.  It preserves the historical flat layout
+        while computing belief and relative-geometry blocks once per frame.
+        """
+        if (
+            self.expose_neighbor_state
+            or self.use_p0_global_info
+            or not self.use_relative_features
+            or not self.use_comm_tokens
+            or self.comm_payload_mode != 'target_tokens'
+            or self.use_channel_feedback
+        ):
+            raise ValueError("strict batch observation profile is not active")
+        mean = np.asarray(belief_mean, dtype=np.float64)
+        covariance = np.asarray(belief_cov_diag, dtype=np.float64)
+        aoi = np.asarray(belief_aoi, dtype=np.float64)
+        detection = np.asarray(prev_p_d, dtype=np.float64)
+        if (
+            mean.shape != (self.K, self.Q, 4)
+            or covariance.shape != (self.K, self.Q, 4)
+            or aoi.shape != (self.K, self.Q)
+            or detection.shape != (self.K, self.Q)
+        ):
+            raise ValueError("strict observation tensor shapes are inconsistent")
+
+        positions = np.stack([
+            np.asarray(state.pos, dtype=np.float64) for state in uav_states
+        ])
+        velocities = np.stack([
+            np.asarray(state.vel, dtype=np.float64) for state in uav_states
+        ])
+        batteries = np.asarray([
+            float(state.battery) for state in uav_states
+        ], dtype=np.float64)
+        roles = np.asarray([
+            float(state.role) for state in uav_states
+        ], dtype=np.float64)
+        self_block = np.concatenate([
+            positions / self._position_scale,
+            velocities / 25.0,
+            (batteries / 50000.0)[:, None],
+            roles[:, None],
+        ], axis=1)
+
+        if oracle_targets is None:
+            target_mean = mean
+            belief_block = np.zeros(
+                (self.K, self.Q, self.belief_dim), dtype=np.float64)
+            belief_block[:, :, 4:8] = (
+                covariance / self._belief_covariance_scale)
+            belief_block[:, :, 8] = aoi / 100.0
+        else:
+            oracle = np.asarray(oracle_targets, dtype=np.float64)
+            if oracle.shape != (self.Q, 4):
+                raise ValueError("oracle_targets must have shape (Q,4)")
+            target_mean = np.broadcast_to(
+                oracle[None, :, :], (self.K, self.Q, 4))
+            belief_block = np.zeros(
+                (self.K, self.Q, self.belief_dim), dtype=np.float64)
+        belief_block[:, :, :4] = (
+            target_mean / self._belief_mean_scale)
+
+        target_xy = target_mean[:, :, :2]
+        delta = target_xy - positions[:, None, :2]
+        distance = np.linalg.norm(delta, axis=2)
+        angle = np.arctan2(delta[:, :, 1], delta[:, :, 0])
+        relative_block = np.stack([
+            delta[:, :, 0] / self.area_w,
+            delta[:, :, 1] / self.area_h,
+            distance / self._area_diagonal,
+            np.sin(angle),
+            np.cos(angle),
+            np.exp(-distance / 50.0),
+            np.exp(-distance / 150.0),
+            np.exp(-distance / 400.0),
+        ], axis=2)
+        nearest_target = np.argmin(distance, axis=1)
+        row = np.arange(self.K, dtype=np.int64)
+        nearest_angle = angle[row, nearest_target]
+        nearest_block = np.stack([
+            distance[row, nearest_target] / self._area_diagonal,
+            np.sin(nearest_angle),
+            np.cos(nearest_angle),
+        ], axis=1)
+
+        aggregate = np.zeros((self.K, 16), dtype=np.float64)
+        for agent in range(self.K):
+            mask = np.asarray(
+                own_token_masks.get(agent, np.zeros(self.Q)),
+                dtype=np.float64,
+            ).reshape(-1)
+            claims = np.asarray(
+                own_target_claims.get(agent, np.zeros(self.Q)),
+                dtype=np.float64,
+            ).reshape(-1)
+            if mask.shape != (self.Q,) or claims.shape != (self.Q,):
+                raise ValueError("own target token state has invalid shape")
+            if self.Q <= 8:
+                aggregate[agent, :self.Q] = claims
+                aggregate[agent, self.Q:2 * self.Q] = mask > 0.5
+            else:
+                aggregate[agent, :8] = compress_target_summary(
+                    claims, slots=8, reduction='mean')
+                aggregate[agent, 8:] = compress_target_summary(
+                    (mask > 0.5).astype(np.float64),
+                    slots=8,
+                    reduction='max',
+                )
+
+        payload_grid = np.zeros((
+            self.K, self.K, self.Q, self.comm_target_token_dim,
+        ), dtype=np.float64)
+        valid_grid = np.zeros(
+            (self.K, self.K, self.Q), dtype=bool)
+        rate_grid = np.zeros((self.K, self.K), dtype=np.float64)
+        latency_grid = np.zeros_like(rate_grid)
+        snr_grid = np.zeros_like(rate_grid)
+        age_grid = np.zeros_like(rate_grid)
+        target_norm = (
+            np.arange(self.Q, dtype=np.float64)
+            / max(self.Q - 1, 1))
+        for agent in range(self.K):
+            inbox = comm_msgs.get(agent, {})
+            metadata = comm_metadata.get(agent, {})
+            for sender, raw_message in inbox.items():
+                sender = int(sender)
+                if sender == agent or not (0 <= sender < self.K):
+                    continue
+                message = np.asarray(
+                    raw_message, dtype=np.float64).reshape(-1)
+                if message.size != self.comm_payload_dim:
+                    raise ValueError(
+                        f'expected {self.comm_payload_dim}-D payload from '
+                        f'UAV {sender}, got {message.size}')
+                md = metadata.get(sender, {})
+                delivered = np.asarray(
+                    md.get('token_mask', np.ones(self.Q)),
+                    dtype=np.float64,
+                ).reshape(-1)
+                if delivered.shape != (self.Q,):
+                    raise ValueError("delivered token mask has invalid shape")
+                valid = delivered > 0.5
+                payload_grid[agent, sender] = message.reshape(
+                    self.Q, self.comm_target_token_dim)
+                valid_grid[agent, sender] = valid
+                rate_grid[agent, sender] = (
+                    float(md.get('rate_index', 0))
+                    / self.comm_rate_metadata_denominator)
+                latency_grid[agent, sender] = np.clip(
+                    float(md.get('latency_s', 0.0)) / self.comm_deadline_s,
+                    0.0,
+                    2.0,
+                )
+                snr_grid[agent, sender] = np.tanh(
+                    float(md.get('snr_db', 0.0)) / 20.0)
+                age_grid[agent, sender] = np.clip(
+                    float(md.get('age_frames', 0.0)) / 10.0,
+                    0.0,
+                    1.0,
+                )
+        token_grid = np.zeros((
+            self.K, self.K, self.Q, self.comm_token_dim,
+        ), dtype=np.float64)
+        token_grid[..., :self.comm_target_token_dim] = np.where(
+            valid_grid[..., None], payload_grid, 0.0)
+        metadata_start = self.comm_target_token_dim
+        token_grid[..., metadata_start] = np.where(
+            valid_grid,
+            np.arange(self.K, dtype=np.float64)[None, :, None]
+            / max(self.K - 1, 1),
+            0.0,
+        )
+        token_grid[..., metadata_start + 1] = np.where(
+            valid_grid, target_norm[None, None, :], 0.0)
+        token_grid[..., metadata_start + 2] = np.where(
+            valid_grid, rate_grid[:, :, None], 0.0)
+        token_grid[..., metadata_start + 3] = np.where(
+            valid_grid, latency_grid[:, :, None], 0.0)
+        token_grid[..., metadata_start + 4] = np.where(
+            valid_grid, snr_grid[:, :, None], 0.0)
+        token_grid[..., metadata_start + 5] = np.where(
+            valid_grid, age_grid[:, :, None], 0.0)
+        peer_indices = np.asarray([
+            [sender for sender in range(self.K) if sender != agent]
+            for agent in range(self.K)
+        ], dtype=np.int64)
+        receiver_indices = np.arange(self.K, dtype=np.int64)[:, None]
+        token_rows = token_grid[
+            receiver_indices, peer_indices].reshape(
+                self.K, self.comm_token_count, self.comm_token_dim)
+        token_mask = valid_grid[
+            receiver_indices, peer_indices].reshape(
+                self.K, self.comm_token_count).astype(np.float64)
+
+        observations = np.concatenate([
+            self_block,
+            belief_block.reshape(self.K, -1),
+            relative_block.reshape(self.K, -1),
+            nearest_block,
+            np.zeros(
+                (self.K, (self.K - 1) * self.neighbor_dim),
+                dtype=np.float64,
+            ),
+            detection,
+            aggregate,
+            token_rows.reshape(self.K, -1),
+            token_mask,
+        ], axis=1)
+        if observations.shape != (self.K, self.obs_dim):
+            raise RuntimeError("strict observation batch layout drifted")
+        return observations
+
     def build_global_state(
         self,
         uav_states: List,

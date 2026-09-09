@@ -11,7 +11,7 @@ from uav_isac.coordination.dependency_commit import (
     _index_bits,
     _round_report,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 @dataclass(frozen=True)
@@ -213,7 +213,7 @@ def certify_geometry_repair_transport(
     positions: np.ndarray,
     target_owner: np.ndarray,
     communication_power_w: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     control_period_s: float,
     layout: GeometryRepairWireLayout,
     verification_candidate_count: int = 1,

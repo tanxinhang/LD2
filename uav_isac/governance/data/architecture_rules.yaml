@@ -1,0 +1,95 @@
+# Packaged architecture dependency contract.
+schema_version: 1
+source_root: uav_isac
+max_module_lines: 500
+
+layers:
+  domain:
+    paths: [uav_isac/domain]
+    forbidden_imports:
+      - config
+      - uav_isac.application
+      - uav_isac.adapters
+      - uav_isac.interfaces
+      - uav_isac.research
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+  application:
+    paths: [uav_isac/application]
+    forbidden_imports:
+      - config
+      - uav_isac.adapters
+      - uav_isac.interfaces
+      - uav_isac.research
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+  adapters:
+    paths: [uav_isac/adapters]
+    forbidden_imports:
+      - uav_isac.interfaces
+      - uav_isac.research
+  interfaces:
+    paths: [uav_isac/interfaces]
+    forbidden_imports:
+      - config
+      - uav_isac.research
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+  governance:
+    paths: [uav_isac/governance]
+    forbidden_imports:
+      - config
+      - uav_isac.domain
+      - uav_isac.application
+      - uav_isac.adapters
+      - uav_isac.interfaces
+      - uav_isac.research
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+  legacy_coordination:
+    paths: [uav_isac/coordination]
+    enforce_module_size: false
+    forbidden_imports:
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+    allowed_imports: []
+  legacy_physical:
+    paths: [uav_isac/physical]
+    enforce_module_size: false
+    forbidden_imports:
+      - uav_isac.coordination
+      - uav_isac.environment
+      - uav_isac.agents
+      - uav_isac.evaluation
+    allowed_imports:
+      - {path: uav_isac/physical/feasibility_oracle.py, module: uav_isac.coordination.maxmin_power}
+  legacy_environment:
+    paths: [uav_isac/environment]
+    enforce_module_size: false
+    forbidden_imports:
+      - uav_isac.agents
+      - uav_isac.evaluation
+    allowed_imports: []
+  legacy_agents:
+    paths: [uav_isac/agents]
+    enforce_module_size: false
+    forbidden_imports:
+      - uav_isac.environment
+      - uav_isac.evaluation
+      - uav_isac.application
+      - uav_isac.adapters
+      - uav_isac.interfaces
+    allowed_imports: []
+  legacy_boundary:
+    paths: [uav_isac]
+    enforce_module_size: false
+    forbidden_imports:
+      - uav_isac.legacy
+    allowed_imports:
+      - {path: uav_isac/agents/trainer.py, module: uav_isac.legacy}
+      - {path: uav_isac/environment/env_core.py, module: uav_isac.legacy}

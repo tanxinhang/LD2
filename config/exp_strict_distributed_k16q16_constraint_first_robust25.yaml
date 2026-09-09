@@ -1,0 +1,8 @@
+# Stage-2 trade-off candidate: remove certificate transport while applying a
+# calibrated conservative component to the execution gain.  This keeps the
+# robust bound in the optimizer without letting a loose lower envelope fully
+# replace the nominal physical estimate.
+extends: exp_strict_distributed_k16q16_certificate_transport_off.yaml
+
+marl:
+  distributed_replicated_power_robust_gain_mix: 0.25

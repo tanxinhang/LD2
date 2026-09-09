@@ -12,7 +12,7 @@ from uav_isac.coordination.local_exchange_oracle import LocalMove
 from uav_isac.coordination.power_repair_transport import (
     _required_power_for_packet,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _index_bits(cardinality: int) -> int:
@@ -177,7 +177,7 @@ def _candidate_certificate(
     existing_comm_power_w: np.ndarray,
     *,
     coordinator: int,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: OwnerProposalWireLayout,
     snr_margin_db: float,
     latency_margin_s: float,
@@ -258,7 +258,7 @@ def certify_owner_proposal_transport(
     *,
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: OwnerProposalWireLayout,
     snr_margin_db: float = 0.0,
     latency_margin_s: float = 0.0,

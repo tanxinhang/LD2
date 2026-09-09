@@ -27,7 +27,9 @@ if str(ROOT) not in sys.path:
 from config.params import load_config
 from tools.run_strict_distributed_pilot import (
     DEFAULT_CARRIER_PERIOD,
+    _algorithm_version,
     _episode,
+    _execution_audit,
     validate_formal_system_identity,
     validate_strict_config,
 )
@@ -121,6 +123,13 @@ def _aggregate(episodes: list[dict[str, Any]], case: SweepCase) -> dict[str, Any
     mean_optional = lambda key, default: float(np.mean([
         episode.get(key, default) for episode in episodes
     ]))
+    finite_certificate_upper = np.asarray([
+        episode.get("certificate_global_optimum_upper")
+        for episode in episodes
+        if episode.get("certificate_global_optimum_upper") is not None
+    ], dtype=np.float64)
+    finite_certificate_upper = finite_certificate_upper[
+        np.isfinite(finite_certificate_upper)]
     bits = mean("bits_per_frame")
     result = {
         "case": case.name,
@@ -147,8 +156,12 @@ def _aggregate(episodes: list[dict[str, Any]], case: SweepCase) -> dict[str, Any
             "certificate_complete_fraction", 0.0),
         "certificate_worst_pd_lower": mean_optional(
             "certificate_worst_pd_lower", 0.0),
-        "certificate_global_optimum_upper": mean_optional(
-            "certificate_global_optimum_upper", float("inf")),
+        "certificate_global_optimum_upper": (
+            float(np.mean(finite_certificate_upper))
+            if finite_certificate_upper.size else None),
+        "certificate_global_optimum_upper_unavailable_reason": (
+            None if finite_certificate_upper.size else
+            "no finite global certificate upper bound was produced"),
         "certificate_joint_approximation_ratio_lower": mean_optional(
             "certificate_joint_approximation_ratio_lower", 0.0),
         "certificate_payload_bits_per_sender": mean_optional(
@@ -230,18 +243,21 @@ def run_sweep(
             cfg,
             config_path=config,
             seeds=seeds,
-            algorithm_version=(
-                "strict-distributed-composable-owner-posterior-v2"),
+            algorithm_version=_algorithm_version(cfg),
             root=ROOT,
         )
         if formal:
             validate_formal_run(cfg, seeds, manifest)
+        modules_before_episode = set(sys.modules)
         episodes = [
             _episode(cfg, seed, tail_window, carrier_period)
             for seed in seeds
         ]
+        execution_audit = _execution_audit(cfg, modules_before_episode)
+        manifest["execution_audit"] = execution_audit
         case_result = _aggregate(episodes, case)
         case_result["run_manifest"] = manifest
+        case_result["execution_audit"] = execution_audit
         results.append(case_result)
     return {
         "config": os.path.normpath(config),
@@ -271,6 +287,9 @@ def run_sweep(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from uav_isac.governance import assert_operation_allowed
+    assert_operation_allowed("full_result_refresh")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", default="config/exp_strict_distributed_no_truth_pilot.yaml")
@@ -327,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         args.config, cases, seeds, args.frames,
         args.tail_window, args.carrier_period, args.movement_mode,
         args.power_reuse_relative_tolerance, args.formal)
-    rendered = json.dumps(report, indent=2, ensure_ascii=False)
+    rendered = json.dumps(
+        report, indent=2, ensure_ascii=False, allow_nan=False)
     print(rendered)
     if args.output:
         output = Path(args.output)

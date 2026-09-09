@@ -50,7 +50,7 @@
 
 ### C4【高危】CI 设计缺陷：干净检出上全量 pytest 必挂
 - `tests/test_assert_gate_thresholds.py:104-115` 硬读 `results/architecture_v2_structure_student_u2u_resolve_bw50k_adaptive_b4b8_failclosed_gate100/paired_eval.csv`——该文件**未被 git 跟踪**（results/ 仅 45 个历史文件被跟踪，此 CSV 不在其中），无 skip 保护。
-- .github/workflows/ci.yml 在 ubuntu 干净检出上跑 `python -m pytest tests/ -q` → FileNotFoundError → **CI 红**。
+- .github/workflows/ci.yml 曾在干净检出上跑 `python -m pytest tests/ -q` → FileNotFoundError → **CI 红**。
 - （对照：test_tica_exact_adapter.py:189 读 `results/dagger_corrected/dagger_D1.pt` — 该文件被跟踪，CI 可过。）
 - 建议：该测试改为 tmp_path 合成数据，或显式 `pytest.skip(..., reason=缺少正式 artifact)`；并把 CI 已跑通的证据纳入仓库。
 

@@ -1,0 +1,19 @@
+# Stage-5 fixed-seed audit: teacher-free feasible-structure convex-hull
+# relaxation coupled to the multi-frame power unroll.  K=2/Q=2 makes the
+# enumerated feasible set complete and tiny; this is not a scalability claim.
+extends: exp_temporal_unrolled_power_smoke.yaml
+
+detection:
+  # Preserve the exact unambiguous-support indicator but use the physical
+  # continuous ambiguity energy inside that support.  The legacy binary gate
+  # creates discontinuous false-empty structure sets.
+  dd_gain_mode: continuous
+
+marl:
+  temporal_feasible_structure_enabled: true
+  temporal_feasible_structure_temperature: 0.50
+  temporal_feasible_structure_inertia: 0.50
+  temporal_feasible_structure_max_structures: 64
+  target_allocation_teacher_enabled: false
+  analytical_structure_ranking_enabled: false
+  num_episodes: 3

@@ -1,0 +1,7 @@
+# Fault-injection profile: deliberately tiny trust region to exercise the
+# transaction that rolls PPO plus the full-rollout CVaR step back together.
+extends: exp_constrained_cvar_ppo_smoke.yaml
+
+marl:
+  target_kl: 0.0001
+  num_episodes: 1

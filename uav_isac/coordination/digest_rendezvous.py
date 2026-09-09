@@ -38,7 +38,7 @@ from uav_isac.coordination.power_repair_transport import (
     _required_power_for_packet,
     certify_power_repair_transport,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 from uav_isac.coordination.target_invariant_transport import (
     TargetInvariantToken,
     TargetInvariantWireLayout,
@@ -187,7 +187,7 @@ def _candidate_certificate(
     *,
     coordinator: int,
     full_structure_verified: bool,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: StructureDigestRendezvousLayout,
     control_period_s: float,
     snr_margin_db: float,
@@ -368,7 +368,7 @@ def certify_structure_digest_rendezvous(
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
     full_structure_verified: bool,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: StructureDigestRendezvousLayout,
     control_period_s: float,
     snr_margin_db: float = 0.0,
@@ -439,7 +439,7 @@ def certify_rendezvous_candidate_suffix(
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
     final_sensing_weights: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     power_layout: PowerRepairWireLayout,
     control_period_s: float,
     reserve_upper_w: float = 0.25,
@@ -588,7 +588,7 @@ def certify_deferred_horizon_prefix(
     *,
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     power_layout: PowerRepairWireLayout,
     proposal_layout: OwnerProposalWireLayout,
     control_period_s: float,

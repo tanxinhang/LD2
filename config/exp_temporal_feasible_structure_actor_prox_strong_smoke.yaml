@@ -1,0 +1,7 @@
+# Stress ablation for the actor-centred proximal closure.  This is not a
+# production setting; it checks whether a visibly stronger causal anchor
+# improves the finite-round trajectory before any adaptive schedule is added.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  distributed_primal_dual_power_actor_proximal_regularization: 0.1

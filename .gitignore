@@ -5,6 +5,9 @@ pytrch_ven/
 __pycache__/
 *.pyc
 *.pyo
+build/
+dist/
+*.egg-info/
 
 # pytest cache
 .pytest_cache/
@@ -35,6 +38,11 @@ results/
 .claude/
 .codeartsdoer/
 
+# Architecture V2 run artifacts. Keep the layout contract, never generated data.
+/artifacts/*
+!/artifacts/README.md
+/.repro_install_v2/
+
 # Root-level audit/probe scratch scripts and logs (see DEEP_AUDIT 2026-09-04 N2).
 /_*.log
 /_*.py
@@ -42,4 +50,3 @@ results/
 # Editor temp/backup files (e.g. tools/assert_gate_thresholds.py~RF54ad2463.TMP).
 *.TMP
 *~
-

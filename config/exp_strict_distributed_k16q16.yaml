@@ -31,3 +31,13 @@ marl:
   eval_seed_bank_path: config/stratified_seeds_1130_k16q16_blind.json
   eval_seed_split: test
   final_eval_seed_split: test
+  # Independent private node LPs execute concurrently. A paired 3-seed/30-frame
+  # K16 audit showed bit-exact trajectories, no fallback, and 1.27x mean
+  # end-to-end speedup (about 97 ms -> 76 ms per frame).
+  distributed_replicated_power_process_parallel_enabled: true
+  distributed_replicated_power_process_workers: 4
+  distributed_replicated_power_process_timeout_s: 0.1
+  distributed_replicated_power_parallel_fallback_to_serial: true
+  distributed_replicated_power_parallel_failure_mode: serial
+  distributed_replicated_power_deadline_incumbent_relative_tolerance: 0.05
+  distributed_replicated_power_max_consecutive_process_failures: 3

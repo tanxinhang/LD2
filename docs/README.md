@@ -4,6 +4,10 @@
 > 是项目的首要阅读入口。公式与代码级细节见 `CURRENT_SYSTEM_MODEL.md`；算法为什么演进
 > 到当前形态见 `ALGORITHM_EVOLUTION.md`；所有历史数据和失败实验见 `EXPERIMENT_LOG.md`。
 
+> **2026-09-07 架构升级提案**：面向K16/Q16整帧20--30 ms目标，见
+> [`PREDICTIVE_CERTIFIED_ARCHITECTURE_2026-09-07.md`](PREDICTIVE_CERTIFIED_ARCHITECTURE_2026-09-07.md)。
+> 方案采用统一高维时空状态、异步预测慢平面和selected-only精确证书快平面。
+
 > **2026-09-01 身份门禁收口**：`config/system_manifest.yaml` 是 post-G2 基础契约，
 > 不是可单独用于正式运行的完整场景；当前 executable profile 为
 > `config/exp_strict_distributed_k16q16.yaml`，并绑定 K16/Q16
@@ -164,25 +168,65 @@ G2-0 又修正了 deflection 量纲，故当前代码尚无 post-G2 的 100-seed
 
 ## 6. 创新性定位
 
-当前创新主线不是单个标准模块，而是以下信息链：
+创新判断不再采用“某模块已有先例，因此不能再做”的表层口径，而采用“模块故障 →
+同范式修复 → 缺失性质 → 外部模块必要性 → 正交消融”的口径。完整的 MARL/DRL 模块级
+演进与重新审计见
+[`INNOVATION_LITERATURE_REAUDIT_2026-09-07.md`](INNOVATION_LITERATURE_REAUDIT_2026-09-07.md)。
+创新表述的脱水分级、近三年模块证据与升级门槛见
+[`INNOVATION_DEWATERING_AUDIT_2026-09-07.md`](INNOVATION_DEWATERING_AUDIT_2026-09-07.md)。
 
-```text
-physics-exact capability representation
-  → decision margin
-  → minimum task-sufficient information
-  → adaptive U2U communication
-```
+当前必须首先区分两条执行链：
 
-- 双基地物理导出的 exact factor+DD-exception 表示；
-- 以决策边界歧义而不是矩阵重建误差定义必要信息量；
-- fixed-plan、L1 route 与未来 L2 candidate decision 的统一 margin-rate 问题；
-- dense computational coupling 与 compressible information complexity 的严格区分；
-- certificate、structure regret、Student 和 fail-closed commit 只作为辅助工具。
+- `Structured MAPPO` 是学习研究链，包含 movement/assignment/sensing/message/rate/RF-split
+  等策略头；
+- 当前 canonical strict runner 是 **hold action + 固定控制载波 + 分布式解析协议栈**，没有
+  learned actor，且运动、结构和感知功率分别由确定性模块执行。
 
-创新性仍需通过与最新相关工作和强基线的独立对比验证；现有快速审计不等同于穷尽式文献
-综述或专利查新。
+因此 strict 性能不能归因给 MAPPO；MAPPO、Attention、Student、LP、factor message 和
+certificate 也都不能以简单组合形成创新。当前只保留三个**有条件候选**：
+
+1. 物理 exact factorization + decision-margin bit bound + outward interval 所形成的可认证
+   decision-sufficient message；
+2. 私有 belief 下局部 contribution interval 的可组合逐目标 QoS admission；
+3. 若重新启用 learned policy，长期策略、凸内层和硬准入之间可识别且 credit-consistent 的
+   混合控制接口。
+
+以上均尚未闭环。M4-B/C 只支持机制级结果，M4-D 无自然候选；现有数据也未证明 factor
+communication 能修复 Student 跨尺度、CT/CA belief 失配、目标增长的 sensing capacity 或
+K16 私有视图 LP 时延。进入新理论前，必须先完成 actor-head responsibility matrix、oracle
+ladder，以及等 bit learned-latent / factor-message 对照。
+
+actor-head responsibility matrix 已完成，见
+[`ACTOR_HEAD_RESPONSIBILITY_AUDIT_2026-09-07.md`](ACTOR_HEAD_RESPONSIBILITY_AUDIT_2026-09-07.md)：
+strict runner 不构造 learned actor；三 seed × 20 帧反事实干预中，movement、role、message、
+rate 和 sensing-weight 均不改变执行结果，communication-power 只改变 RF 记账而未改变检测。
+下一阶段为 oracle state/candidate/rank/projection ladder。
+
+oracle ladder 已完成，见
+[`ORACLE_LADDER_AUDIT_2026-09-07.md`](ORACLE_LADDER_AUDIT_2026-09-07.md)。18 个未参与训练
+seed 的 same-trace 结果显示：state 无增益，完整 candidate pool 对 episode-worst 有
+`+0.00561` 增益，exact rank 对 steady/weak3 有增益但降低 QoS-feasible，projection
+为 identity。创新方向采用“精炼提升”而非模块删减：以**决策权一致的多时间尺度混合
+控制**为核心，以 **episode-QoS-regret candidate localization + 稳定排序**为性能增强，
+factor message/certificate 保留为完成等 bit 闭环必要性检验后的条件性保证层。
+
+candidate provenance × task-regret rank 联合消融已完成，见
+[`CANDIDATE_REGRET_ABLATION_2026-09-07.md`](CANDIDATE_REGRET_ABLATION_2026-09-07.md)：CE rank
+受益于 full candidate，但 task-regret rank 在 full candidate 上反而恶化，证明两者存在
+显著交互。下一步创新对象应是 **candidate-aware、hold-aware 的 episode-QoS-regret
+排序接口**，而非孤立替换 Student loss。
+
+更严格的脱水结论是：截至 2026-09-07，没有已经被实验证明的算法首创点；“多时间尺度混合
+控制”是架构表述，“candidate-aware、hold-aware episode-QoS-regret”是待验证算法假设，
+均不能直接写成已完成的创新声明。具体降级理由与升级门槛见
+[`INNOVATION_DEWATERING_AUDIT_2026-09-07.md`](INNOVATION_DEWATERING_AUDIT_2026-09-07.md)。
 
 ## 7. 下一步
+
+多帧性能与闭环收敛指标已经接入 strict runner，定义与证据边界见
+[`TEMPORAL_PERFORMANCE_AND_CONVERGENCE_2026-09-07.md`](TEMPORAL_PERFORMANCE_AND_CONVERGENCE_2026-09-07.md)。
+多帧检测按窗口累积 Deflection，而不是平均 `P_D`；收敛同时检查尾窗均值、方差、斜率、
+振荡、settling frame、QoS首次达到和持续保持率。该指标改变的是评价维度，不改变当前算法。
 
 下一轮进入 **G2-1A paired bridge**，之后按 G2-1B blind confirmation 协议
 重认证，再推进 6/6 尾部置信缺口。候选机制必须同时满足：
@@ -193,6 +237,17 @@ physics-exact capability representation
 4. 使用 No-op/冻结 8/8 锚点作为安全基线；
 5. 先做 falsification，小样本只决定“是否值得继续”，不产生正式性能结论；
 6. 若 LCB 未过，结果保留为 `DISCLOSED FAIL`，不追尾调参。
+
+candidate-regret 的第一步已经完成：`episode_regret.py` 固定三维 episode regret，并把
+candidate unsupported 与 rank/execution residual 分开统计；现有 18-seed trace 没有 QoS
+可行性翻转证据。下一步先冻结该指标，再做候选生成器/排序器的同预算独立盲测。
+
+hold-aware 排序上界已完成，见
+[`HOLD_QOS_RANK_AUDIT_2026-09-07.md`](HOLD_QOS_RANK_AUDIT_2026-09-07.md)：用训练 seed
+校准后冻结的 future-hold q20 oracle，在18个未参与校准 seed 上将 worst 从 `0.5668` 提升到
+`0.6100`，QoS feasible 从 `0.444` 提升到 `0.500`；CVaR仅提升 `0.00037`。该结果定位了
+hold-time-scale 排序缺口，但因读取未来 realized `d_eff` 不能部署。下一步是训练 local-belief
+hold-q20 predictor，并与当前 CE/task-regret Student 在新 seed 上同预算比较。
 
 统计顺序固定为：G2-1A 使用已查看的原 100 seeds 做 paired bridge audit，只报告物理
 修正造成的分布变化，不称 blind；随后冻结代码和阈值，G2-1B 使用全新、预注册且未查看

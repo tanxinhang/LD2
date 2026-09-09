@@ -1,0 +1,39 @@
+# Packaged project phase contract.
+schema_version: 1
+phase: result_refresh
+updated_at: "2026-09-09"
+reason: >-
+  Architecture V2 migration, audit, and packaged reproduction have passed.
+  Permit controlled result refresh and verified redundant-data cleanup while
+  keeping algorithm optimization frozen.
+
+operations:
+  architecture_inventory: true
+  architecture_migration: false
+  characterization_tests: true
+  migration_audit: true
+  algorithm_optimization: false
+  full_result_refresh: true
+  destructive_data_cleanup: true
+
+required_gate_order:
+  - migration_freeze_declared
+  - baseline_characterized
+  - architecture_migrated
+  - architecture_audited
+  - reproduction_passed
+  - result_refresh_approved
+
+completed_gates:
+  - migration_freeze_declared
+  - baseline_characterized
+  - architecture_migrated
+  - architecture_audited
+  - reproduction_passed
+  - result_refresh_approved
+
+authoritative_documents:
+  architecture: docs/architecture_v2/TARGET_ARCHITECTURE.md
+  migration: docs/architecture_v2/MIGRATION_PLAN.md
+  data_lifecycle: docs/architecture_v2/DATA_LIFECYCLE.md
+  inventory: docs/architecture_v2/CURRENT_INVENTORY.md

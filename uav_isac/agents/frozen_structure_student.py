@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from uav_isac.environment.observation_slices import ObservationSlices
+from uav_isac.domain.observation_slices import ObservationSlices
 from uav_isac.utils.checkpoint_loading import safe_torch_load
 
 

@@ -95,7 +95,7 @@ def bind_compute_energy_epoch(
             f"{sorted(overlap)}")
 
     source_kind = str(provenance.get("source_kind", "unspecified"))
-    empirical = source_kind in {"rapl_package", "external_cpu_rail"}
+    empirical = source_kind == "external_cpu_rail"
     uncertainty_accounted = bool(provenance.get(
         "meter_difference_uncertainty_accounted", False))
     independent = bool(validation_ids) and bool(

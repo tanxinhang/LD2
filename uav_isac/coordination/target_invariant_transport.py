@@ -21,7 +21,7 @@ from uav_isac.coordination.owner_local_physics import (
 from uav_isac.coordination.power_repair_transport import (
     _required_power_for_packet,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 def _index_bits(cardinality: int) -> int:
@@ -321,7 +321,7 @@ def certify_target_invariant_transport(
     *,
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     layout: TargetInvariantWireLayout,
     snr_margin_db: float = 0.0,
     latency_margin_s: float = 0.0,

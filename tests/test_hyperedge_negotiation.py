@@ -22,6 +22,9 @@ from uav_isac.coordination.hyperedge import (
     plan_sparse_coalition_endpoint_hyperedges,
     refine_role_mask_local_search,
     reconstruct_bistatic_coefficient_from_public_state,
+    reconstruct_bistatic_coefficient_upper_from_public_state,
+    reconstruct_selected_bistatic_coefficients_from_public_state,
+    reconstruct_selected_bistatic_coefficients_batch_from_public_state,
     reconstruct_bistatic_pair_value,
     role_aware_bistatic_movement_cost,
     select_sparse_tx_coalition_role,
@@ -47,6 +50,144 @@ def test_offer_stream_round_trip_is_bounded():
     np.testing.assert_allclose(decoded[:, 0], np.clip(tx, 0.0, 1.0))
     np.testing.assert_allclose(decoded[:, 1], np.clip(rx, 0.0, 1.0))
     np.testing.assert_allclose(decoded[:, 2], np.clip(gap, 0.0, 1.0))
+
+
+def test_selected_coefficient_kernel_matches_dense_nominal_and_certificates():
+    rng = np.random.default_rng(1701)
+    K, Q = 6, 4
+    positions = rng.uniform(0.0, 800.0, size=(K, Q, 2))
+    velocities = rng.uniform(-20.0, 20.0, size=(K, Q, 2))
+    targets = np.column_stack((
+        rng.uniform(0.0, 800.0, size=(Q, 2)), np.zeros(Q)))
+    target_velocities = np.column_stack((
+        rng.uniform(-5.0, 5.0, size=(Q, 2)), np.zeros(Q)))
+    visible = rng.random((K, Q)) > 0.15
+    edges = ((0, 1, 0), (2, 3, 1), (4, 5, 2), (0, 3, 3))
+    nominal_uncertainty = np.linspace(0.5, 2.0, K)
+    certificate_uncertainty = np.linspace(1.0, 3.0, K)
+    target_uncertainty = np.linspace(2.0, 5.0, Q)
+    velocity_uncertainty = np.linspace(0.1, 0.6, K)
+    target_velocity_uncertainty = np.linspace(0.2, 0.8, Q)
+    common = dict(
+        uav_height_m=20.0,
+        fc_hz=28.0e9,
+        rcs_m2=1.0,
+        delta_f_hz=15625.0,
+        symbol_period_s=6.4e-5,
+        delay_bins=64,
+        doppler_bins=16,
+        dd_gate_min=0.5,
+        coefficient_scale=1.0e15,
+        dd_gain_mode="continuous",
+    )
+    nominal = reconstruct_bistatic_coefficient_from_public_state(
+        positions, velocities, targets, target_velocities, visible,
+        position_uncertainty_m=nominal_uncertainty,
+        robust_dd_uncertainty=False,
+        **common,
+    )
+    lower = reconstruct_bistatic_coefficient_from_public_state(
+        positions, velocities, targets, target_velocities, visible,
+        position_uncertainty_m=certificate_uncertainty,
+        target_position_uncertainty_m=target_uncertainty,
+        velocity_uncertainty_mps=velocity_uncertainty,
+        target_velocity_uncertainty_mps=target_velocity_uncertainty,
+        robust_dd_uncertainty=True,
+        **common,
+    )
+    upper = reconstruct_bistatic_coefficient_upper_from_public_state(
+        positions, targets, visible,
+        uav_height_m=common["uav_height_m"],
+        fc_hz=common["fc_hz"],
+        rcs_m2=common["rcs_m2"],
+        coefficient_scale=common["coefficient_scale"],
+        position_uncertainty_m=certificate_uncertainty,
+        target_position_uncertainty_m=target_uncertainty,
+    )
+    sparse = reconstruct_selected_bistatic_coefficients_from_public_state(
+        positions, velocities, targets, target_velocities, visible, edges,
+        nominal_position_uncertainty_m=nominal_uncertainty,
+        certificate_position_uncertainty_m=certificate_uncertainty,
+        target_position_uncertainty_m=target_uncertainty,
+        velocity_uncertainty_mps=velocity_uncertainty,
+        target_velocity_uncertainty_mps=target_velocity_uncertainty,
+        **common,
+    )
+    index = tuple(np.asarray(edges, dtype=np.int64).T)
+    np.testing.assert_allclose(sparse.nominal, nominal[index], rtol=1e-13)
+    np.testing.assert_allclose(sparse.lower, lower[index], rtol=1e-13)
+    np.testing.assert_allclose(sparse.upper, upper[index], rtol=1e-13)
+
+
+def test_batched_selected_kernel_matches_each_private_view():
+    rng = np.random.default_rng(1702)
+    V, K, Q = 5, 6, 4
+    positions = rng.uniform(0.0, 800.0, size=(V, K, Q, 2))
+    velocities = rng.uniform(-20.0, 20.0, size=(V, K, Q, 2))
+    targets = np.concatenate((
+        rng.uniform(0.0, 800.0, size=(V, Q, 2)),
+        np.zeros((V, Q, 1)),
+    ), axis=2)
+    target_velocities = np.concatenate((
+        rng.uniform(-5.0, 5.0, size=(V, Q, 2)),
+        np.zeros((V, Q, 1)),
+    ), axis=2)
+    visible = rng.random((V, K, Q)) > 0.15
+    edges = ((0, 1, 0), (2, 3, 1), (4, 5, 2), (0, 3, 3))
+    nominal_uncertainty = rng.uniform(0.5, 2.0, size=(V, K))
+    certificate_uncertainty = rng.uniform(1.0, 3.0, size=(V, K))
+    target_uncertainty = rng.uniform(2.0, 5.0, size=(V, Q))
+    velocity_uncertainty = rng.uniform(0.1, 0.6, size=(V, K))
+    target_velocity_uncertainty = rng.uniform(0.2, 0.8, size=(V, Q))
+    common = dict(
+        uav_height_m=20.0,
+        fc_hz=28.0e9,
+        rcs_m2=1.0,
+        delta_f_hz=15625.0,
+        symbol_period_s=6.4e-5,
+        delay_bins=64,
+        doppler_bins=16,
+        dd_gate_min=0.5,
+        coefficient_scale=1.0e15,
+        dd_gain_mode="continuous",
+    )
+    batched = reconstruct_selected_bistatic_coefficients_batch_from_public_state(
+        positions,
+        velocities,
+        targets,
+        target_velocities,
+        visible,
+        edges,
+        nominal_position_uncertainty_m=nominal_uncertainty,
+        certificate_position_uncertainty_m=certificate_uncertainty,
+        target_position_uncertainty_m=target_uncertainty,
+        velocity_uncertainty_mps=velocity_uncertainty,
+        target_velocity_uncertainty_mps=target_velocity_uncertainty,
+        **common,
+    )
+    for viewer in range(V):
+        single = reconstruct_selected_bistatic_coefficients_from_public_state(
+            positions[viewer],
+            velocities[viewer],
+            targets[viewer],
+            target_velocities[viewer],
+            visible[viewer],
+            edges,
+            nominal_position_uncertainty_m=nominal_uncertainty[viewer],
+            certificate_position_uncertainty_m=(
+                certificate_uncertainty[viewer]),
+            target_position_uncertainty_m=target_uncertainty[viewer],
+            velocity_uncertainty_mps=velocity_uncertainty[viewer],
+            target_velocity_uncertainty_mps=(
+                target_velocity_uncertainty[viewer]),
+            **common,
+        )
+        np.testing.assert_allclose(
+            batched.nominal[viewer], single.nominal, rtol=1e-13)
+        np.testing.assert_allclose(
+            batched.lower[viewer], single.lower, rtol=1e-13)
+        np.testing.assert_allclose(
+            batched.upper[viewer], single.upper, rtol=1e-13)
 
 
 def test_bottleneck_matching_minimizes_worst_travel_not_greedy_edge():

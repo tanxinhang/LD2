@@ -1,0 +1,13 @@
+# Packaged semantic characterization baselines.
+schema_version: 1
+baselines:
+  default_hold_seed451_3f:
+    config: null
+    seed: 451
+    frames: 3
+    semantic_sha256: 84f213fc4ddb264683bac34cdeb1f153c3f4ee9373f9e2c849f186c2192aa40f
+  strict_k16q16_hold_seed451_2f:
+    config: config/exp_strict_distributed_k16q16.yaml
+    seed: 451
+    frames: 2
+    semantic_sha256: ca14dac13bafa617f5fa53ba2c3f36df5541b0a2729819563566c90f04d9837b

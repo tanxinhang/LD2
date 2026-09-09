@@ -26,7 +26,7 @@ from uav_isac.coordination.target_invariant_transport import (
     TargetInvariantWireLayout,
     certify_target_invariant_transport,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def certify_top1_structure_sequence_transport(
     positions: np.ndarray,
     existing_comm_power_w: np.ndarray,
     final_sensing_weights: np.ndarray,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     power_layout: PowerRepairWireLayout,
     control_period_s: float,
     reserve_upper_w: float = 0.25,

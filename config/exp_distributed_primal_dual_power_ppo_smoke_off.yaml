@@ -1,0 +1,5 @@
+# Central analytical-power control for the Stage-2 paired PPO smoke.
+extends: exp_distributed_primal_dual_power_ppo_smoke.yaml
+
+marl:
+  distributed_primal_dual_power_enabled: false

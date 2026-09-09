@@ -50,7 +50,7 @@ from uav_isac.coordination.structure_sequence_transport import (
     StructureSequenceTransportCertificate,
     certify_top1_structure_sequence_transport,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 from uav_isac.physical.detection import compute_detection_probabilities
 from uav_isac.physical.detection import (
     minimum_deflection_for_detection_probability,
@@ -204,7 +204,7 @@ def certified_hierarchical_isac_control(
     existing_communication_power_w: np.ndarray,
     existing_sensing_power_w: np.ndarray,
     *,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     control_period_s: float,
     p_fa: float,
     config: CertifiedHierarchicalControllerConfig,

@@ -755,7 +755,7 @@ class StructuredActorNetwork(nn.Module):
         self.last_target_movement_delta = None
         self.last_comm_channel_feedback = None
         if self._use_corrected_parser:
-            from uav_isac.environment.observation_slices import ObservationSlices
+            from uav_isac.domain.observation_slices import ObservationSlices
             self._obs_slices = ObservationSlices.from_config(
                 K=K, Q=Q, use_p0=use_p0, use_rel_features=True,
                 use_comm_tokens=self._use_comm_cross_attention,

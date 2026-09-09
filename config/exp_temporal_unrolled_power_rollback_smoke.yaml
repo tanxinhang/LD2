@@ -1,0 +1,8 @@
+# Fault injection: prove PPO + multi-frame Pareto/CVaR update is atomic.
+extends: exp_temporal_unrolled_power_smoke.yaml
+
+marl:
+  # Ordinary PPO minibatches remain below this value on seed 31415; the final
+  # combined PPO + unrolled step exceeds 1.5x and exercises atomic rollback.
+  target_kl: 0.01
+  num_episodes: 1

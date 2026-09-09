@@ -1,0 +1,9 @@
+# Active-set RF-budget tangent ablation.  A higher reserve makes the sensing
+# budget nearly binding in this tiny profile; the tangent projection is still
+# gated by the measured slack rather than forced into an inactive constraint.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  analytical_sensing_power_reserve_pd: 0.85
+  temporal_unrolled_power_rf_tangent_enabled: true
+  temporal_unrolled_power_rf_tangent_slack_tolerance: 0.05

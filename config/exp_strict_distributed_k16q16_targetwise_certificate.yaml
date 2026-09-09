@@ -1,0 +1,9 @@
+extends: exp_strict_distributed_k16q16.yaml
+
+# Development-only certificate A/B. Execution remains unchanged; the extra
+# Q upward-rounded row terms certify Q deterministic one-hot simplex prices.
+marl:
+  distributed_composable_certificate_targetwise_upper_enabled: true
+  # Must exceed the analytically possible row term b_k * a_upper[k,q].
+  # Overflow remains fail-closed in quantize_upper_log.
+  distributed_composable_certificate_max_deflection: 100000000.0

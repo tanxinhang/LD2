@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -9,7 +7,6 @@ from uav_isac.evaluation.compute_energy_calibration import (
 from uav_isac.evaluation.energy_counter_window import (
     EnergyCounterSample,
     close_energy_counter_window,
-    discover_linux_rapl_package_domains,
 )
 
 
@@ -107,32 +104,3 @@ def test_no_wrap_index_requires_rate_bound_to_exclude_hidden_wraps():
         episode_id="e", event_id="rate")
     assert impossible.censored_reason == (
         "counter_delta_exceeds_energy_rate_bound")
-
-
-def test_fake_linux_rapl_discovery_and_drop_censoring(tmp_path: Path):
-    package = tmp_path / "intel-rapl-0"
-    package.mkdir()
-    (package / "name").write_text("package-0\n", encoding="ascii")
-    (package / "max_energy_range_uj").write_text(
-        "10000000\n", encoding="ascii")
-    (package / "energy_uj").write_text("1000000\n", encoding="ascii")
-    domains = discover_linux_rapl_package_domains(tmp_path)
-    assert len(domains) == 1
-    start = domains[0].read_sample(
-        generation_id="boot-0", reading_uncertainty_j=0.001,
-        energy_rate_upper_w=20.0, monotonic_ns=1_000_000_000)
-    (package / "energy_uj").write_text("1400000\n", encoding="ascii")
-    end = domains[0].read_sample(
-        generation_id="boot-0", reading_uncertainty_j=0.001,
-        energy_rate_upper_w=20.0, monotonic_ns=1_100_000_000)
-    complete = close_energy_counter_window(
-        start, end, episode_id="e", event_id="0")
-    assert not complete.censored
-    (package / "energy_uj").write_text("100000\n", encoding="ascii")
-    dropped = domains[0].read_sample(
-        generation_id="boot-0", reading_uncertainty_j=0.001,
-        energy_rate_upper_w=20.0, monotonic_ns=1_200_000_000)
-    censored = close_energy_counter_window(
-        end, dropped, episode_id="e", event_id="1")
-    assert censored.censored
-    assert discover_linux_rapl_package_domains(tmp_path / "missing") == ()

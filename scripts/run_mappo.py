@@ -70,6 +70,9 @@ def _import_torch_with_single_windows_openmp():
 
 
 def main():
+    from uav_isac.governance import assert_operation_allowed
+    assert_operation_allowed("algorithm_optimization")
+
     # Keep heavy numerical/ML imports out of module scope.  On Windows the
     # private-LP ProcessPool uses ``spawn``, which imports this entry module as
     # ``__mp_main__`` in every worker.  Eager Torch/CUDA/trainer/environment
@@ -1282,6 +1285,7 @@ def main():
         "risk_tail_fraction": config.marl.risk_tail_fraction,
         "training_seed_replay_enabled": (
             config.marl.training_seed_replay_enabled),
+        "training_fixed_seed": config.marl.training_fixed_seed,
         "freeze_attention": getattr(config.marl, "freeze_attention", False),
         "use_per_module_lr": getattr(config.marl, "use_per_module_lr", False),
         "best_steady_P_D": float(trainer.best_score),

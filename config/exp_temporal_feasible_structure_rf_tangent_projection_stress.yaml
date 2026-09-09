@@ -1,0 +1,8 @@
+# Implementation-path stress test.  The measured resource slack in the tiny
+# geometry is about 0.33, so a 0.40 activity band intentionally exercises the
+# tangent projection; this is not a tuned production tolerance.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  temporal_unrolled_power_rf_tangent_enabled: true
+  temporal_unrolled_power_rf_tangent_slack_tolerance: 0.40

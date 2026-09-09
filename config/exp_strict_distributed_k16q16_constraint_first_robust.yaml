@@ -1,0 +1,8 @@
+# Stage-1 constraint-first controller.  No composable-certificate values are
+# placed on air.  Each private max-min power problem instead uses the executor's
+# conservative gain envelope, so the optimized objective is a robust achieved
+# deflection bound rather than a post-hoc transmitted claim.
+extends: exp_strict_distributed_k16q16_certificate_transport_off.yaml
+
+marl:
+  distributed_replicated_power_robust_gain_mix: 1.0

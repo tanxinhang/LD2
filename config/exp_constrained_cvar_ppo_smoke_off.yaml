@@ -1,0 +1,5 @@
+# Paired legacy-control profile for exp_constrained_cvar_ppo_smoke.yaml.
+extends: exp_constrained_cvar_ppo_smoke.yaml
+
+marl:
+  constrained_cvar_ppo_enabled: false

@@ -8,6 +8,7 @@ This module bridges geometry/channel/OTFS → detection performance.
 
 import numpy as np
 from dataclasses import dataclass
+from itertools import repeat, starmap
 from typing import List, Optional
 
 from uav_isac.physical.geometry import compute_all_bistatic_params
@@ -71,24 +72,32 @@ class DenseDeflection:
             raw = raw * factor
             effective = effective * factor
 
-        K, _, Q = self.valid.shape
-        return [
-            DeflectionEntry(
-                i=int(i), j=int(j), q=int(q),
-                tau=float(self.tau[i, j, q]),
-                nu=float(self.nu[i, j, q]),
-                alpha=float(self.alpha[i, j, q]),
-                d_raw=float(raw[i, j, q]),
-                g_dd=float(self.g_dd[i, j, q]),
-                chi_rep=1.0,
-                d_eff=float(effective[i, j, q]),
-            )
-            for i in range(K)
-            for j in range(K)
-            if i != j
-            for q in range(Q)
-            if self.valid[i, j, q]
-        ]
+        K, _, _ = self.valid.shape
+        selected = np.asarray(self.valid, dtype=bool).copy()
+        diagonal = np.arange(K, dtype=np.intp)
+        selected[diagonal, diagonal, :] = False
+        i, j, q = np.nonzero(selected)
+        count = int(i.size)
+        if count == 0:
+            return []
+
+        # ``np.nonzero`` follows C order, which is the historical canonical
+        # i -> j -> q ordering.  Convert columns in bulk instead of performing
+        # seven ndarray scalar lookups and conversions inside three Python
+        # loops for every valid edge.
+        columns = zip(
+            i.tolist(),
+            j.tolist(),
+            q.tolist(),
+            self.tau[selected].tolist(),
+            self.nu[selected].tolist(),
+            self.alpha[selected].tolist(),
+            raw[selected].tolist(),
+            self.g_dd[selected].tolist(),
+            repeat(1.0, count),
+            effective[selected].tolist(),
+        )
+        return list(starmap(DeflectionEntry, columns))
 
 
 def validate_cpi_schedule(

@@ -277,6 +277,51 @@ class MARLParams:
     # reserve-first per-target floor derived from that detection probability.
     analytical_sensing_power_enabled: bool = False
     analytical_sensing_power_reserve_pd: float = 0.0
+    # Fixed-structure teacher-free distributed primal--dual alternative to the
+    # centralized analytical power LP.  Default off; requires a positive
+    # analytical_sensing_power_reserve_pd to define the physical demand.
+    distributed_primal_dual_power_enabled: bool = False
+    distributed_primal_dual_power_rounds: int = 20
+    distributed_primal_dual_power_acceptance_tolerance: float = 1.0e-10
+    distributed_primal_dual_power_cost_per_watt: float = 1.0e-4
+    distributed_primal_dual_power_regularization: float = 1.0e-3
+    # Optional actor-centred proximal curvature.  Zero preserves the original
+    # bounded solver; a positive value makes the executed KKT trajectory use
+    # the same proposal centre as the differentiable unroll.
+    distributed_primal_dual_power_actor_proximal_regularization: float = 0.0
+    distributed_primal_dual_power_primal_tolerance: float = 2.0e-4
+    distributed_primal_dual_power_stationarity_tolerance: float = 2.0e-4
+    distributed_primal_dual_power_dual_tolerance: float = 2.0e-4
+    distributed_primal_dual_power_convergence_patience: int = 3
+    # Differentiable multi-frame learning-to-optimize layer.  This is a
+    # training-only outer loop around the bounded execution solver and remains
+    # opt-in so historical PPO runs/replays are unchanged.
+    temporal_unrolled_power_enabled: bool = False
+    temporal_unrolled_power_horizon: int = 4
+    temporal_unrolled_power_inner_iterations: int = 4
+    temporal_unrolled_power_warm_start_mix: float = 0.50
+    temporal_unrolled_power_detach_between_frames: bool = False
+    # Exact implementation switch for the Pareto Jacobian.  Batched VJP is
+    # algebraically identical to the scalar reference and falls back
+    # automatically for unsupported custom operators.
+    temporal_unrolled_power_batched_vjp_enabled: bool = True
+    # Optional active-set projection for the shared RF-budget equality.  The
+    # default off path retains the existing objective-only Pareto update.
+    temporal_unrolled_power_rf_tangent_enabled: bool = False
+    temporal_unrolled_power_rf_tangent_slack_tolerance: float = 1.0e-6
+    temporal_unrolled_power_rf_tangent_rank_tolerance: float = 1.0e-8
+    temporal_unrolled_power_pareto_tolerance: float = 1.0e-6
+    temporal_unrolled_power_pareto_max_iterations: int = 64
+    # Optional teacher-free discrete-structure closure.  The environment
+    # retains the actor's transmitter-side target power in the existing hard
+    # P0 feasibility solve.  The training pass differentiates over the exact
+    # bounded feasible-set convex
+    # hull and enforces p_iq <= b_i sum_j xbar_ijq.
+    temporal_feasible_structure_enabled: bool = False
+    temporal_feasible_structure_temperature: float = 0.25
+    temporal_feasible_structure_inertia: float = 0.25
+    temporal_feasible_structure_max_structures: int = 4096
+    temporal_feasible_structure_hard_forward: bool = True
     # Reuse unit-power true-geometry entries after the analytical LP and scale
     # only d_raw/d_eff by p_kq. Valid only for deterministic linear-in-power
     # sensing (no report-link draw or Swerling draw); otherwise execution
@@ -322,6 +367,7 @@ class MARLParams:
     # This proves a joint achieved-QoS lower bound; it does not claim global LP
     # optimality. Disabled by default for historical run reproducibility.
     distributed_composable_certificate_enabled: bool = False
+    distributed_composable_certificate_targetwise_upper_enabled: bool = False
     distributed_composable_certificate_bits_per_target: int = 16
     distributed_composable_certificate_frame_bits: int = 32
     distributed_composable_certificate_scale: float = 1.0e-6
@@ -908,6 +954,15 @@ class MARLParams:
     # hyperedges. The protocol is appended to the ordinary learned Token, so
     # latent content is preserved while all additional coordinates are charged.
     hyperedge_negotiation_enabled: bool = False
+    # Replaceable coefficient reconstruction service. ``numpy`` is the
+    # audited exact implementation; custom backends register a factory before
+    # EnvironmentCore construction.
+    hyperedge_acceleration_backend: str = "numpy"
+    # DenseDeflection -> DeflectionEntry compatibility boundary.
+    deflection_materialization_backend: str = "numpy"
+    # Development-only golden trace for acceleration equivalence audits.
+    acceleration_golden_trace_enabled: bool = False
+    strict_batch_observation_enabled: bool = True
     hyperedge_share_topk: int = 4
     hyperedge_distance_scale_m: float = 150.0
     hyperedge_capability_mode: str = "exponential"
@@ -1019,6 +1074,10 @@ class MARLParams:
     # Training-only prioritized replay over the geometry seed bank. Evaluation
     # splits are excluded automatically to prevent selection/test leakage.
     training_seed_replay_enabled: bool = False
+    # Engineering/reproducibility probe only: non-negative values reset every
+    # completed training episode to the same geometry seed.  Normal training
+    # keeps -1 and samples fresh seeds (or uses the prioritized seed bank).
+    training_fixed_seed: int = -1
     training_seed_bank_path: str = ""
     training_seed_uniform_mix: float = 0.20
     training_seed_priority_alpha: float = 0.70
@@ -1411,6 +1470,17 @@ class MARLParams:
     # existed only in YAML and were silently discarded by the dataclass loader.
     cvar_tau: float = 0.0
     cvar_epsilon: float = 0.05
+    # Teacher-free target-wise CVaR condition for PPO.  This is deliberately
+    # separate from the legacy reward penalty above and remains default-off.
+    constrained_cvar_ppo_enabled: bool = False
+    constrained_cvar_qos_floor: float = 0.60
+    constrained_cvar_tail_fraction: float = 0.20
+    constrained_cvar_penalty: float = 0.10
+    constrained_cvar_dual_step_size: float = 0.10
+    constrained_cvar_dual_maximum: float = 10.0
+    constrained_cvar_primal_tolerance: float = 0.01
+    constrained_cvar_power_tolerance_w: float = 1.0e-9
+    constrained_cvar_convergence_patience: int = 3
     risk_target_temperature: float = 0.10
     risk_target_floor: float = 0.60
     risk_scalar_mix: float = 0.25
@@ -1650,6 +1720,14 @@ class MasterConfig:
         _require_probability("config.marl.gae_lambda", marl.gae_lambda)
         for name in ("ppo_epochs", "num_episodes"):
             _require_nonnegative(f"config.marl.{name}", getattr(marl, name))
+        if marl.training_fixed_seed < -1:
+            raise ValueError(
+                "config.marl.training_fixed_seed must be -1 or non-negative")
+        if (marl.training_fixed_seed >= 0
+                and marl.training_seed_replay_enabled):
+            raise ValueError(
+                "training_fixed_seed cannot be combined with "
+                "training_seed_replay_enabled")
         for name in (
                 "rollout_steps", "minibatch_size", "num_envs",
                 "assignment_hold_frames", "actor_decision_interval",
@@ -1664,6 +1742,152 @@ class MasterConfig:
         _require_choice(
             "config.marl.detection_fusion_mode", marl.detection_fusion_mode,
             {"legacy_global", "central_oracle", "local_only", "u2u_distributed"})
+
+        _require_probability(
+            "config.marl.constrained_cvar_qos_floor",
+            marl.constrained_cvar_qos_floor, strict=True)
+        _require_probability(
+            "config.marl.constrained_cvar_tail_fraction",
+            marl.constrained_cvar_tail_fraction, strict=True)
+        _require_positive(
+            "config.marl.constrained_cvar_penalty",
+            marl.constrained_cvar_penalty)
+        _require_nonnegative(
+            "config.marl.constrained_cvar_dual_step_size",
+            marl.constrained_cvar_dual_step_size)
+        _require_nonnegative(
+            "config.marl.constrained_cvar_dual_maximum",
+            marl.constrained_cvar_dual_maximum)
+        _require_nonnegative(
+            "config.marl.constrained_cvar_primal_tolerance",
+            marl.constrained_cvar_primal_tolerance)
+        _require_nonnegative(
+            "config.marl.constrained_cvar_power_tolerance_w",
+            marl.constrained_cvar_power_tolerance_w)
+        _require_positive(
+            "config.marl.constrained_cvar_convergence_patience",
+            marl.constrained_cvar_convergence_patience)
+        if marl.constrained_cvar_ppo_enabled and marl.cvar_tau > 0.0:
+            raise ValueError(
+                "constrained_cvar_ppo_enabled cannot be combined with the "
+                "legacy cvar_tau reward penalty")
+        if (marl.constrained_cvar_ppo_enabled
+                and marl.target_kl is not None
+                and marl.target_kl <= 0.0):
+            raise ValueError(
+                "constrained_cvar_ppo_enabled requires a positive target_kl "
+                "for transactional actor rollback")
+
+        # Fixed-structure distributed primal--dual power control is an
+        # explicitly bounded execution path.  Validate its numerical knobs
+        # here so malformed YAML cannot reach the inner solver and silently
+        # weaken the RF-budget guarantee.  The mode remains opt-in and all
+        # defaults preserve the historical analytical/learned power paths.
+        _require_probability(
+            "config.marl.analytical_sensing_power_reserve_pd",
+            marl.analytical_sensing_power_reserve_pd)
+        _require_positive(
+            "config.marl.distributed_primal_dual_power_rounds",
+            marl.distributed_primal_dual_power_rounds)
+        _require_nonnegative(
+            "config.marl.distributed_primal_dual_power_acceptance_tolerance",
+            marl.distributed_primal_dual_power_acceptance_tolerance)
+        _require_positive(
+            "config.marl.distributed_primal_dual_power_cost_per_watt",
+            marl.distributed_primal_dual_power_cost_per_watt)
+        _require_nonnegative(
+            "config.marl.distributed_primal_dual_power_regularization",
+            marl.distributed_primal_dual_power_regularization)
+        _require_nonnegative(
+            "config.marl.distributed_primal_dual_power_actor_proximal_"
+            "regularization",
+            marl.distributed_primal_dual_power_actor_proximal_regularization)
+        for name in (
+                "distributed_primal_dual_power_primal_tolerance",
+                "distributed_primal_dual_power_stationarity_tolerance",
+                "distributed_primal_dual_power_dual_tolerance"):
+            _require_nonnegative(f"config.marl.{name}", getattr(marl, name))
+        _require_positive(
+            "config.marl.distributed_primal_dual_power_convergence_patience",
+            marl.distributed_primal_dual_power_convergence_patience)
+        if marl.distributed_primal_dual_power_enabled:
+            if not marl.analytical_sensing_power_enabled:
+                raise ValueError(
+                    "distributed_primal_dual_power_enabled requires "
+                    "analytical_sensing_power_enabled")
+            if not marl.joint_isac_power_enabled:
+                raise ValueError(
+                    "distributed_primal_dual_power_enabled requires "
+                    "joint_isac_power_enabled")
+            if marl.analytical_sensing_power_reserve_pd <= 0.0:
+                raise ValueError(
+                    "distributed_primal_dual_power_enabled requires a "
+                    "positive analytical_sensing_power_reserve_pd")
+        if (marl.distributed_primal_dual_power_enabled
+                and marl.distributed_replicated_power_enabled):
+            raise ValueError(
+                "distributed_primal_dual_power_enabled cannot be combined "
+                "with distributed_replicated_power_enabled")
+        _require_positive(
+            "config.marl.temporal_unrolled_power_horizon",
+            marl.temporal_unrolled_power_horizon)
+        _require_positive(
+            "config.marl.temporal_unrolled_power_inner_iterations",
+            marl.temporal_unrolled_power_inner_iterations)
+        _require_probability(
+            "config.marl.temporal_unrolled_power_warm_start_mix",
+            marl.temporal_unrolled_power_warm_start_mix)
+        _require_nonnegative(
+            "config.marl.temporal_unrolled_power_pareto_tolerance",
+            marl.temporal_unrolled_power_pareto_tolerance)
+        _require_nonnegative(
+            "config.marl.temporal_unrolled_power_rf_tangent_slack_tolerance",
+            marl.temporal_unrolled_power_rf_tangent_slack_tolerance)
+        _require_nonnegative(
+            "config.marl.temporal_unrolled_power_rf_tangent_rank_tolerance",
+            marl.temporal_unrolled_power_rf_tangent_rank_tolerance)
+        _require_positive(
+            "config.marl.temporal_unrolled_power_pareto_max_iterations",
+            marl.temporal_unrolled_power_pareto_max_iterations)
+        _require_positive(
+            "config.marl.temporal_feasible_structure_temperature",
+            marl.temporal_feasible_structure_temperature)
+        _require_nonnegative(
+            "config.marl.temporal_feasible_structure_inertia",
+            marl.temporal_feasible_structure_inertia)
+        _require_positive(
+            "config.marl.temporal_feasible_structure_max_structures",
+            marl.temporal_feasible_structure_max_structures)
+        if marl.temporal_unrolled_power_enabled:
+            if marl.temporal_unrolled_power_horizon < 2:
+                raise ValueError(
+                    "temporal_unrolled_power_enabled requires horizon >= 2")
+            if not marl.distributed_primal_dual_power_enabled:
+                raise ValueError(
+                    "temporal_unrolled_power_enabled requires "
+                    "distributed_primal_dual_power_enabled")
+            if not marl.constrained_cvar_ppo_enabled:
+                raise ValueError(
+                    "temporal_unrolled_power_enabled requires "
+                    "constrained_cvar_ppo_enabled")
+            if marl.target_kl is None or marl.target_kl <= 0.0:
+                raise ValueError(
+                    "temporal_unrolled_power_enabled requires a positive "
+                    "target_kl for transactional rollback")
+        if marl.temporal_feasible_structure_enabled:
+            if not marl.temporal_unrolled_power_enabled:
+                raise ValueError(
+                    "temporal_feasible_structure_enabled requires "
+                    "temporal_unrolled_power_enabled")
+            if marl.target_allocation_teacher_enabled:
+                raise ValueError(
+                    "temporal feasible structure is teacher-free and cannot "
+                    "be combined with target_allocation_teacher_enabled")
+            if marl.analytical_structure_ranking_enabled:
+                raise ValueError(
+                    "temporal feasible structure requires executed P0 ranking "
+                    "to retain actor sensing power; disable "
+                    "analytical_structure_ranking_enabled")
 
         if marl.distributed_no_truth_fail_closed:
             if not marl.tracking_enabled:

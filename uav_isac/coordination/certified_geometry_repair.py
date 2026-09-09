@@ -51,7 +51,7 @@ from uav_isac.coordination.owner_proposal_transport import (
     quantize_nonnegative_float16_lower,
     quantize_nonnegative_float16_upper,
 )
-from uav_isac.environment.communication import InterUAVCommunicationModel
+from uav_isac.domain.communication import CommunicationTransport
 from uav_isac.physical.detection import (
     compute_detection_probabilities,
     minimum_deflection_for_detection_probability,
@@ -882,7 +882,7 @@ def certified_trust_region_geometry_repair(
     communication_power_w: np.ndarray,
     battery_j: np.ndarray,
     *,
-    communication_model: InterUAVCommunicationModel,
+    communication_model: CommunicationTransport,
     control_period_s: float,
     p_fa: float,
     qos_floor: float,

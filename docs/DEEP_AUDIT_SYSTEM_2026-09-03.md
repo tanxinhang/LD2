@@ -46,7 +46,7 @@
 ### N3【恶化】R3 工作树与 HEAD 的裂口扩大
 
 - git dirty：39M/15D/70??（08-29）→ **91M/14D/122??，共 227 项**（09-03）。
-- **HEAD 提交日期实测为 2026-08-26**（56e8e2c，Author Date 一手确认）——即 08-26 之后的**全部**修复与重构（严格加载器 +597 行、CI 双平台矩阵、constraints-ci.txt、R1/R2/R10-R15 修复、R14/R15 新模块与测试）均未入库，积压已超一周；这些工作当前只存在于工作树与 `results/*/source_snapshot.zip` 中，一次误操作即可能丢失。
+- **HEAD 提交日期实测为 2026-08-26**（56e8e2c，Author Date 一手确认）——即 08-26 之后的**全部**修复与重构（严格加载器 +597 行、CI 门禁、constraints-ci.txt、R1/R2/R10-R15 修复、R14/R15 新模块与测试）均未入库，积压已超一周；这些工作当前只存在于工作树与 `results/*/source_snapshot.zip` 中，一次误操作即可能丢失。
 - 未跟踪 uav_isac 源码模块 8 → **12** 个（新增 `physical/movement_potential.py`、`physical/reachable_deflection.py`、`utils/checkpoint_loading.py`、`utils/sentinels.py`）。
 - 未跟踪测试 12 → **23** 个（sentinel/qos_gate/reuse_theorem/physics_closure 等全部修复验证测试都在未跟踪之列）。
 - **关键悖论**：R1/R2/R10-R15 的修复证据（测试）本身就是未跟踪文件——从 HEAD 检出既缺模块、也缺"修复存在"的证明。
@@ -78,7 +78,7 @@
 | R1 | manifest+pilot 无法构造训练 actor | manifest:92 `target_allocation_enabled: true`；pilot `comm_payload_mode=target_tokens`；按 run_mappo 接线三前置齐备 | ✅ 已修复 |
 | R2 | PPO KL 爆炸→NaN | `agents/trainer.py:51 stable_ppo_ratio_and_approx_kl`（expm1 稳定式）、:4114/:4128 minibatch 拒绝、:4885 事务回滚 | ✅ 已修复 |
 | R3 | 重构未提交 HEAD≠当前 | dirty 227 项；未跟踪源码 12 / 测试 23；manifest 仍未跟踪 | ❌ **恶化** |
-| R4 | CI 硬读未跟踪 CSV | `test_assert_gate_thresholds.py` 全部 tmp_path 合成夹具，0 results/ 依赖；CI 矩阵还扩展为 ubuntu/py3.12 + windows/py3.14 | ✅ 已修复 |
+| R4 | CI 硬读未跟踪 CSV | `test_assert_gate_thresholds.py` 全部 tmp_path 合成夹具，0 results/ 依赖；Windows 参考环境运行完整门禁 | ✅ 已修复 |
 | R5 | 权重冗余 ≈9.7GB | 树未增长；份数修正为 923+680（上次 652+664 偏低） | ⚠ 未处理，口径修正 |
 | R6 | summary 覆盖 23.5% | 230/979 = 23.5% 不变 | ❌ 仍存在 |
 | R7 | 调试目录混放 | `_` 330 + smoke 171 不变 | ❌ 仍存在 |
@@ -111,7 +111,7 @@
 ### 依赖与运行时（一手重测）
 - venv：Python 3.14.6 / torch 2.12.1+cu130 / numpy 2.5.0 / scipy 1.18.0 / pytest 9.1.1，46 包，与 constraints-ci.txt 锁定一致。
 - psutil：requirements 声明但项目代码 0 处 import（仅 joblib/loky 机会性受益）——唯一残留的声明不一致，低危。
-- CI：ubuntu+py3.12 / windows+py3.14 双腿，装包带 constraints 锁，加跑 `check_system_identity.py --strict` 与 `audit_detector_normalization.py --assert-ready`；不依赖 results/。
+- CI：Windows py3.14 参考环境，装包带 constraints 锁，加跑 `check_system_identity.py --strict` 与 `audit_detector_normalization.py --assert-ready`；不依赖 results/。
 - 线程四变量断言仍在（assert_formal_gates / reproducibility / parallel_power_executor / crash_isolated）。
 
 ### 数据（results/，只读）

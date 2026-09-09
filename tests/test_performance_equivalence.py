@@ -102,3 +102,81 @@ def test_dense_belief_observation_matches_object_interface() -> None:
             belief_aoi=aoi,
         )
         np.testing.assert_array_equal(dense_obs, object_obs)
+
+
+def test_strict_target_token_batch_matches_per_agent_builder() -> None:
+    rng = np.random.default_rng(20260907)
+    k, q, token_dim = 4, 10, 5
+    builder = ObservationBuilder(
+        k,
+        q,
+        area_size=(900.0, 700.0),
+        height=20.0,
+        use_relative_features=True,
+        expose_neighbor_state=False,
+        use_comm_tokens=True,
+        comm_payload_mode='target_tokens',
+        comm_target_token_dim=token_dim,
+    )
+    states = [
+        UAVState(
+            pos=np.asarray([100.0 + 31.0 * node, 80.0 + node, 20.0]),
+            vel=np.asarray([1.0 - node, 0.5 * node, 0.0]),
+            battery=49000.0 - 100.0 * node,
+            role=node % 2,
+        )
+        for node in range(k)
+    ]
+    mean = rng.normal(size=(k, q, 4))
+    mean[:, :, :2] = 300.0 + 40.0 * mean[:, :, :2]
+    covariance = rng.uniform(0.1, 20.0, size=(k, q, 4))
+    aoi = rng.integers(0, 8, size=(k, q))
+    detection = rng.uniform(size=(k, q))
+    own_masks = {node: rng.integers(0, 2, size=q) for node in range(k)}
+    own_claims = {node: rng.uniform(size=q) for node in range(k)}
+    inboxes = {}
+    metadata = {}
+    for receiver in range(k):
+        inboxes[receiver] = {}
+        metadata[receiver] = {}
+        for sender in range(k):
+            if sender == receiver or (receiver + sender) % 3 == 0:
+                continue
+            inboxes[receiver][sender] = rng.normal(size=q * token_dim)
+            metadata[receiver][sender] = {
+                'token_mask': rng.integers(0, 2, size=q),
+                'rate_index': (receiver + sender) % 4,
+                'latency_s': 0.001 * (sender + 1),
+                'snr_db': -2.0 + sender,
+                'age_frames': receiver,
+            }
+
+    batch = builder.build_strict_local_obs_batch(
+        states,
+        prev_p_d=detection,
+        belief_mean=mean,
+        belief_cov_diag=covariance,
+        belief_aoi=aoi,
+        comm_msgs=inboxes,
+        comm_metadata=metadata,
+        own_token_masks=own_masks,
+        own_target_claims=own_claims,
+    )
+
+    expected = np.stack([
+        builder.build_local_obs(
+            node,
+            states,
+            None,
+            detection[node],
+            comm_msgs=inboxes[node],
+            comm_metadata=metadata[node],
+            own_token_mask=own_masks[node],
+            own_target_claims=own_claims[node],
+            belief_mean=mean,
+            belief_cov_diag=covariance,
+            belief_aoi=aoi,
+        )
+        for node in range(k)
+    ])
+    np.testing.assert_array_equal(batch, expected)

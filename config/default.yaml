@@ -79,6 +79,35 @@ p0_solver:
 
 marl:
   hidden_layers: [256, 256]    # actor/critic MLP architecture
+  # Fixed-structure distributed primal--dual sensing-power block. Default off.
+  distributed_primal_dual_power_enabled: false
+  distributed_primal_dual_power_rounds: 20
+  distributed_primal_dual_power_acceptance_tolerance: 1.0e-10
+  distributed_primal_dual_power_cost_per_watt: 1.0e-4
+  distributed_primal_dual_power_regularization: 1.0e-3
+  distributed_primal_dual_power_actor_proximal_regularization: 0.0
+  distributed_primal_dual_power_primal_tolerance: 2.0e-4
+  distributed_primal_dual_power_stationarity_tolerance: 2.0e-4
+  distributed_primal_dual_power_dual_tolerance: 2.0e-4
+  distributed_primal_dual_power_convergence_patience: 3
+  # Training-only multi-frame differentiable unroll.  Disabled preserves the
+  # historical execution and PPO update path exactly.
+  temporal_unrolled_power_enabled: false
+  temporal_unrolled_power_horizon: 4
+  temporal_unrolled_power_inner_iterations: 4
+  temporal_unrolled_power_warm_start_mix: 0.50
+  temporal_unrolled_power_detach_between_frames: false
+  temporal_unrolled_power_batched_vjp_enabled: true
+  temporal_unrolled_power_rf_tangent_enabled: false
+  temporal_unrolled_power_rf_tangent_slack_tolerance: 1.0e-6
+  temporal_unrolled_power_rf_tangent_rank_tolerance: 1.0e-8
+  temporal_unrolled_power_pareto_tolerance: 1.0e-6
+  temporal_unrolled_power_pareto_max_iterations: 64
+  temporal_feasible_structure_enabled: false
+  temporal_feasible_structure_temperature: 0.25
+  temporal_feasible_structure_inertia: 0.25
+  temporal_feasible_structure_max_structures: 4096
+  temporal_feasible_structure_hard_forward: true
   # Simulator-only private-LP process parallelism. It does not enable
   # simultaneous radio transmission and remains off for historical replay.
   distributed_replicated_power_process_parallel_enabled: false
@@ -90,6 +119,7 @@ marl:
   distributed_replicated_power_deadline_incumbent_relative_tolerance: 0.05
   distributed_replicated_power_max_consecutive_process_failures: 3
   distributed_replicated_power_certificate_shadow_global_lp_enabled: false
+  distributed_composable_certificate_targetwise_upper_enabled: false
   movement_decision_interval: 1 # hold only movement; communication/resources still update each frame
   distributed_id_movement_enabled: false
   distributed_id_movement_standoff_m: 0.0
@@ -161,6 +191,10 @@ marl:
   # [tx capability, rx capability, local QoS deficit] stream is appended to
   # physically transmitted target tokens and charged at the selected rate.
   hyperedge_negotiation_enabled: false
+  hyperedge_acceleration_backend: numpy
+  deflection_materialization_backend: numpy
+  acceleration_golden_trace_enabled: false
+  strict_batch_observation_enabled: true
   hyperedge_share_topk: 4
   hyperedge_distance_scale_m: 150.0
   hyperedge_capability_mode: exponential
@@ -459,6 +493,17 @@ marl:
   lagrangian_lr: 0.002         # lowered: avoids monotonic 位 climb -> non-stationary returns
   lagrangian_max: 1.0          # cap so 位 can't dominate the reward
   target_kl: 0.02              # 0.03 -> 0.02: tighter per-rollout policy drift bound
+  # Teacher-free target-wise CVaR PPO condition. Default OFF preserves the
+  # legacy trainer exactly; experiments must opt in explicitly.
+  constrained_cvar_ppo_enabled: false
+  constrained_cvar_qos_floor: 0.60
+  constrained_cvar_tail_fraction: 0.20
+  constrained_cvar_penalty: 0.10
+  constrained_cvar_dual_step_size: 0.10
+  constrained_cvar_dual_maximum: 10.0
+  constrained_cvar_primal_tolerance: 0.01
+  constrained_cvar_power_tolerance_w: 1.0e-9
+  constrained_cvar_convergence_patience: 3
   num_episodes: 1000           # max episodes (hard cap; early-stop usually stops sooner)
   num_envs: 8                  # parallel envs (tuned; stable MAPPO)
   early_stop: true             # stop at convergence (plateau on deterministic eval)
@@ -473,6 +518,7 @@ marl:
   checkpoint_confirmation_enabled: false
   checkpoint_confirmation_split: confirmation
   training_seed_replay_enabled: false
+  training_fixed_seed: -1
   training_seed_bank_path: ""
   training_seed_uniform_mix: 0.20
   training_seed_priority_alpha: 0.70

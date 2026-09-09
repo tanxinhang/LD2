@@ -1,0 +1,7 @@
+# Opt-in causal-closure ablation.  The actor proposal remains projected onto
+# the hard local RF feasible set, and the same proximal curvature is used by
+# the differentiable unroll and the execution-time bounded primal-dual solve.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  distributed_primal_dual_power_actor_proximal_regularization: 1.0e-3
