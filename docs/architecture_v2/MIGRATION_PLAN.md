@@ -44,6 +44,11 @@
 属于 governance；三个旧脚本是受阶段门禁控制的 adapter backend；其余入口统一标记为
 legacy retained，不再视为活动入口。
 
+科研系统不以删除历史探针数量作为 M3 完成条件。当前活动面由
+`research_programs.yaml` 和 canonical CLI 决定；163 个 `legacy_retained` 入口保持不可从
+canonical CLI 到达，用于负结果、消融和历史复现。三个稳定数值执行器以 managed adapter
+保留，输出路径由 V2 强制注入到单一 run namespace，并由 completion 哈希闭合。
+
 ## M4 数据迁移
 
 先生成清单和校验和，再按 `DATA_LIFECYCLE.md` 分类。迁移使用 copy-verify-switch-delete：

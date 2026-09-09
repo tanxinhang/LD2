@@ -58,6 +58,9 @@ results/
 !/artifacts/audits/
 /artifacts/audits/*
 !/artifacts/audits/formal_gates_post_classified_cleanup.json
+!/artifacts/legacy/
+/artifacts/legacy/*
+!/artifacts/legacy/entrypoints.v4.jsonl
 /.repro_install_v2/
 
 # Root-level audit/probe scratch scripts and logs (see DEEP_AUDIT 2026-09-04 N2).

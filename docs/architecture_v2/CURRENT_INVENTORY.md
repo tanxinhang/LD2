@@ -84,10 +84,11 @@ M0 已建立项目阶段门禁。默认 K4/Q2 与正式 K16/Q16 短帧语义指�
 
 ## 尚未完成的研究型收口
 
-截至本次复核，V2 foundation 可以视为完成，但原计划中的 M3 及运行契约仍有实质性债务：
-175 个可执行入口中有 163 个仍标记为 `legacy_retained`；正式运行还同时使用 V2 artifact
-manifest 与 strict-distributed manifest 两套契约；训练和正式刷新仍经 adapter 分派旧脚本。
-因此在这些项目完成前，不把系统标记为“研究主干重构完成”，也不开放算法优化。
+M3 的活动面已经收口：175 个可执行入口中，1 个为 canonical CLI，8 个为治理工具，3 个为
+managed adapter，另外 163 个标记为 `legacy_retained` 的脚本只用于历史研究复现，不属于活动
+研究入口。训练、pilot 和正式刷新仍复用验证过的旧数值执行器，但 canonical CLI 现在强制
+为它们创建确定性 run_id、V2 `created` manifest、隔离输出目录和逐产物哈希 completion；旧
+脚本不能再把新结果写回 `results/`。因此保留这些适配器不等于保留旧实验编排主路径。
 
 M4 的保留边界已经明确：`results/` 整体是只读的 pre-V2 历史研究库。此前 5044 个
 `unclassified` 文件现标记为 `legacy_unmanifested`，表示可以保留和人工复现，但没有 V2

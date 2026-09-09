@@ -78,7 +78,7 @@ def build_entrypoint_inventory(repository_root: Path | str) -> Tuple[EntrypointR
             elif relative in GOVERNANCE:
                 status, owner, operation = "governance", "architecture", "migration"
             elif relative in BACKENDS:
-                status, owner, operation = "adapter_backend", "legacy_runtime", BACKENDS[relative]
+                status, owner, operation = "managed_adapter", "legacy_runtime", BACKENDS[relative]
             else:
                 status, owner, operation = (
                     "legacy_retained",

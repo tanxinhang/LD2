@@ -13,7 +13,7 @@ from .configuration import (
     load_resolved_configuration,
 )
 from .repository_identity import RepositoryIdentity, build_repository_identity
-from .legacy_process import LegacyPythonProcessRunner
+from .legacy_process import LegacyPythonProcessRunner, ManagedLegacyPythonProcessRunner
 
 __all__ = [
     "HoldPositionPolicy",
@@ -27,4 +27,5 @@ __all__ = [
     "RepositoryIdentity",
     "build_repository_identity",
     "LegacyPythonProcessRunner",
+    "ManagedLegacyPythonProcessRunner",
 ]

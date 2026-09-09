@@ -13,7 +13,7 @@ from uav_isac.adapters import (
     build_environment_from_resolved,
     build_repository_identity,
     FileSystemArtifactStore,
-    LegacyPythonProcessRunner,
+    ManagedLegacyPythonProcessRunner,
     load_resolved_configuration,
     load_registered_configuration,
 )
@@ -174,7 +174,7 @@ def _refactor_status_command() -> int:
 def _dispatch_command(name: str, operation: str, arguments: list[str]) -> int:
     assert_operation_allowed(operation)
     forwarded = tuple(arguments[1:] if arguments[:1] == ["--"] else arguments)
-    return CommandDispatcher(LegacyPythonProcessRunner()).dispatch(CommandSpec(
+    return CommandDispatcher(ManagedLegacyPythonProcessRunner()).dispatch(CommandSpec(
         operation=operation,
         entrypoint=name,
         arguments=forwarded,
