@@ -85,3 +85,22 @@ enumerating `16^16` assignments. The next gate is to feed causal local-belief
 covariance horizons and these candidates into shadow logging, compare predicted
 rankings with actually executed next-stage outcomes, and only then preregister
 an authority experiment.
+
+The fixed swap neighborhood is only a control, not the intended optimizer: it
+does not know geometry or bistatic/power coupling. A second proposal layer in
+`uav_isac/prediction/markov_graph_assignment.py` builds a target-wise KNN
+UAV--target adjacency graph, retains every incumbent edge, and gives each graph
+edge a count-preserving two-exchange value from the full expected-physics and
+max-min-power solve. A global bipartite matching composes those edge messages;
+because coupled exchange values are not additive, the joint proposal receives
+one final full physical solve and is rejected if it does not strictly improve
+on the incumbent. Thus graph sparsification can change ranking but cannot force
+a proxy-degrading shadow action.
+
+This physics-weighted KNN layer is deliberately an offline shadow oracle: even
+after KNN pruning, solving the full covariance-integrated physics problem for
+every edge is too expensive for online K16 control. Its accepted/rejected
+two-exchange outcomes will provide rollout-grounded supervision for a sparse
+message-passing edge residual. That later GNN will learn actual counterfactual
+return residuals, not imitate the old controller, and its single composed
+proposal will retain the exact final physical rejection gate.
