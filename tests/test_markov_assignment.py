@@ -4,6 +4,7 @@ import pytest
 from uav_isac.prediction.markov_assignment import (
     assignment_switch_distance,
     solve_markov_assignment_path,
+    solve_markov_assignment_scenario_tree,
 )
 
 
@@ -55,3 +56,49 @@ def test_invalid_switch_penalty_is_rejected(penalty):
         solve_markov_assignment_path(
             np.asarray([[0, 1]]), np.asarray([[1.0]]), np.asarray([0, 1]),
             switch_penalty=penalty)
+
+
+def test_scenario_tree_cost_depends_on_preceding_geometry_path():
+    candidates = np.asarray([[0], [1]])
+
+    def transition(state, assignment, _step):
+        return state + float(assignment[0])
+
+    def stage_cost(state, _assignment, _step):
+        return float((3.0 - state[0]) ** 2)
+
+    plan = solve_markov_assignment_scenario_tree(
+        candidates,
+        incumbent_assignment=np.asarray([0]),
+        initial_state=np.asarray([0.0]),
+        horizon_steps=3,
+        transition=transition,
+        stage_cost=stage_cost,
+        switch_penalty=0.1,
+        beam_width=8,
+    )
+    assert plan.action_indices == (1, 1, 1)
+    np.testing.assert_allclose([state[0] for state in plan.states], [1, 2, 3])
+    assert plan.stage_cost == pytest.approx(5.0)
+    assert plan.switching_cost == pytest.approx(0.1)
+
+
+def test_scenario_tree_is_deterministic_and_fails_on_invalid_callback_state():
+    candidates = np.asarray([[0, 1], [1, 0]])
+    kwargs = dict(
+        candidate_assignments=candidates,
+        incumbent_assignment=candidates[0],
+        initial_state=np.zeros(2),
+        horizon_steps=2,
+        transition=lambda state, _assignment, _step: state,
+        stage_cost=lambda _state, _assignment, _step: 1.0,
+        switch_penalty=0.0,
+        beam_width=4,
+    )
+    first = solve_markov_assignment_scenario_tree(**kwargs)
+    second = solve_markov_assignment_scenario_tree(**kwargs)
+    assert first.action_indices == second.action_indices == (0, 0)
+
+    kwargs["transition"] = lambda _state, _assignment, _step: np.asarray([np.nan, 0.0])
+    with pytest.raises(ValueError, match="transition"):
+        solve_markov_assignment_scenario_tree(**kwargs)

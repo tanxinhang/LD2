@@ -30,8 +30,10 @@ from .markov_kinematics import (
 )
 from .markov_assignment import (
     MarkovAssignmentPlan,
+    MarkovScenarioPlan,
     assignment_switch_distance,
     solve_markov_assignment_path,
+    solve_markov_assignment_scenario_tree,
 )
 
 __all__ = [
@@ -60,6 +62,8 @@ __all__ = [
     "predict_cv_markov_horizon",
     "predict_reflecting_cv_mean",
     "MarkovAssignmentPlan",
+    "MarkovScenarioPlan",
     "assignment_switch_distance",
     "solve_markov_assignment_path",
+    "solve_markov_assignment_scenario_tree",
 ]

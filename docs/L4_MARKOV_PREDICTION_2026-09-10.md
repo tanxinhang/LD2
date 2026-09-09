@@ -49,3 +49,12 @@ normalized endpoint churn. The dynamic-programming kernel is deterministic and
 tested, but it has no live action authority yet. No performance claim is made
 until a shadow evaluator demonstrates that its predicted assignment ranking
 agrees with executed closed-loop Deflection.
+
+The optimizer now also contains an action-conditioned scenario-tree beam
+search. Unlike the first exogenous-cost DP, every branch carries its own
+continuous state, so future UAV geometry depends on the complete preceding
+assignment path. Transition and stage-cost callbacks are required to be finite
+and deterministic. This closes the state-aliasing error that would otherwise
+score different assignment histories at the same fictitious geometry. The
+remaining scientific task is to provide a deterministic expected-Swerling
+physical callback without consuming the live simulator RNG.

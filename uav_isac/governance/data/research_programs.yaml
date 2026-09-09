@@ -9,7 +9,7 @@ programs:
     profile: config/exp_research_l4_markov_prediction_h10.yaml
     evidence: docs/L4_MARKOV_PREDICTION_2026-09-10.md
     formal_eligible: false
-    next_gate: Build a causal shadow evaluator whose per-stage costs re-solve predicted structure and power, then test ranking agreement before granting action authority.
+    next_gate: Connect the action-conditioned scenario tree to deterministic expected-Swerling structure and power solves, then test shadow ranking agreement before granting action authority.
 
   - name: l4_markov_prediction
     question: Does causal one-second CV-Markov target prediction improve L4 distributed bistatic assignment without clean-regime regression?
