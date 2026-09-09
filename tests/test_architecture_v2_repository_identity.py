@@ -1,3 +1,5 @@
+import subprocess
+
 from uav_isac.adapters import build_repository_identity
 
 
@@ -8,5 +10,10 @@ def test_repository_identity_is_repeatable_and_covers_dirty_source():
     assert first == second
     assert len(first.commit) == 40
     assert len(first.sha256) == 64
-    assert first.dirty
-
+    expected_dirty = bool(subprocess.run(
+        ["git", "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip())
+    assert first.dirty is expected_dirty
