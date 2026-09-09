@@ -12,7 +12,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KNOWN_ENTRYPOINTS = {
     "train": "scripts/run_mappo.py",
     "pilot": "tools/run_strict_distributed_pilot.py",
-    "refresh-results": "tools/run_strict_distributed_sweep.py",
+    "refresh-results": "tools/run_strict_distributed_bank.py",
 }
 
 
@@ -32,4 +32,3 @@ class LegacyPythonProcessRunner:
             check=False,
         )
         return int(completed.returncode)
-

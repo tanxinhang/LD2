@@ -102,7 +102,7 @@ def _check_data_catalog():
 
 
 def _check_entrypoints():
-    source = REPOSITORY_ROOT / "artifacts/legacy/entrypoints.v2.jsonl"
+    source = REPOSITORY_ROOT / "artifacts/legacy/entrypoints.v3.jsonl"
     rows = [json.loads(line) for line in source.read_text("utf-8").splitlines()]
     assert sum(row["status"] == "canonical" for row in rows) == 1
     assert sum(row["status"] == "adapter_backend" for row in rows) == 3

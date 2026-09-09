@@ -60,6 +60,8 @@ legacy retained，不再视为活动入口。
 
 冻结代码提交、依赖锁、正式 profiles 和 seed banks；先小规模 dry-run，再执行全量更新。
 新结果进入独立 V2 命名空间，审计完成前不覆盖旧发布结果。
+canonical `refresh-results` 唯一映射到冻结 seed-bank runner；多规模/运动 sweep 保留为
+研究诊断入口，不再承担正式全面刷新语义。
 
 ## 完成定义
 

@@ -169,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("train", "run the canonical training backend when optimization is enabled"),
         ("pilot", "run one strict migration-audit pilot"),
-        ("refresh-results", "run the full result sweep after audit approval"),
+        ("refresh-results", "run the frozen result bank after audit approval"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("arguments", nargs=argparse.REMAINDER)

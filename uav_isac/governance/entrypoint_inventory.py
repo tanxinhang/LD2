@@ -17,11 +17,12 @@ GOVERNANCE = {
     "tools/check_project_phase.py",
     "tools/hash_legacy_data_catalog_v2.py",
     "tools/audit_architecture_migration_v2.py",
+    "tools/cleanup_verified_duplicate_logs_v2.py",
 }
 BACKENDS = {
     "scripts/run_mappo.py": "algorithm_optimization",
     "tools/run_strict_distributed_pilot.py": "migration_audit",
-    "tools/run_strict_distributed_sweep.py": "full_result_refresh",
+    "tools/run_strict_distributed_bank.py": "full_result_refresh",
 }
 
 
