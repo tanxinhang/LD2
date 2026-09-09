@@ -23,7 +23,6 @@ def test_inventory_classifies_without_deleting(tmp_path):
         "legacy": 1,
         "referenced": 1,
         "scratch_candidate": 1,
-        "unclassified": 1,
+        "legacy_unmanifested": 1,
     }
     assert (results / "trial_smoke.log").exists()
-

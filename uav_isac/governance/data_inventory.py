@@ -78,7 +78,11 @@ def _lifecycle(relative: str, references: str) -> str:
     lowered = normalized.lower()
     if any(marker in lowered for marker in SCRATCH_MARKERS):
         return "scratch_candidate"
-    return "unclassified"
+    # `results/` is the explicitly quarantined pre-V2 store. Files that are
+    # neither cited nor obvious scratch are retained as historical research
+    # inputs, but lack a V2 run manifest and therefore cannot support a new
+    # claim. This is a lifecycle decision, not deletion authorization.
+    return "legacy_unmanifested"
 
 
 def build_data_inventory(
@@ -89,7 +93,8 @@ def build_data_inventory(
     """Classify result files without modifying them.
 
     `scratch_candidate` is only a review label. It never grants deletion
-    authority and deliberately errs toward `unclassified`.
+    authority. `legacy_unmanifested` is read-only historical material and may
+    not be promoted into a new result without an explicit V2 manifest.
     """
 
     repository = Path(repository_root).resolve()
@@ -150,4 +155,3 @@ def build_data_files(
                 lifecycle=_lifecycle(relative, references),
             ))
     return tuple(sorted(records, key=lambda item: item.path))
-

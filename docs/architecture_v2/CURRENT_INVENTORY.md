@@ -84,8 +84,12 @@ M0 已建立项目阶段门禁。默认 K4/Q2 与正式 K16/Q16 短帧语义指�
 
 ## 尚未完成的研究型收口
 
-截至本次复核，V2 foundation 可以视为完成，但原计划中的 M3/M4 仍有实质性债务：175 个
-可执行入口中有 163 个仍标记为 `legacy_retained`；结果树中 5044 个文件、约
-13,171,820,854 bytes 仍是 `unclassified`；正式运行还同时使用 V2 artifact manifest 与
-strict-distributed manifest 两套契约；训练和正式刷新仍经 adapter 分派旧脚本。因此在这些
-项目完成前，不把系统标记为“研究主干重构完成”，也不开放算法优化。
+截至本次复核，V2 foundation 可以视为完成，但原计划中的 M3 及运行契约仍有实质性债务：
+175 个可执行入口中有 163 个仍标记为 `legacy_retained`；正式运行还同时使用 V2 artifact
+manifest 与 strict-distributed manifest 两套契约；训练和正式刷新仍经 adapter 分派旧脚本。
+因此在这些项目完成前，不把系统标记为“研究主干重构完成”，也不开放算法优化。
+
+M4 的保留边界已经明确：`results/` 整体是只读的 pre-V2 历史研究库。此前 5044 个
+`unclassified` 文件现标记为 `legacy_unmanifested`，表示可以保留和人工复现，但没有 V2
+manifest，不能直接支持新论文结论。新运行只能写入 `artifacts/runs/<run_id>/`，并以不可变
+manifest 和 completion 哈希闭合。该分类不授权删除任何历史资产。

@@ -11,6 +11,10 @@
 | scratch | smoke、崩溃探针、重复 console log | 有 TTL，可清理 |
 | legacy | 缺 manifest 或旧物理语义的数据 | 只读隔离，不参与新结论 |
 
+根目录 `results/` 整体属于 pre-V2 隔离区：其中未被引用、又不满足 scratch 特征的文件统一
+标记为 `legacy_unmanifested`。这个标签表示“保留但不可用于新结论”，不是“不知道是什么”，
+也不自动产生删除权限。所有新的研究运行只能写入 `artifacts/runs/`。
+
 ## 2. 新产物布局
 
 ```text
