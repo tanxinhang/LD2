@@ -310,6 +310,10 @@ class MARLParams:
     temporal_unrolled_power_rf_tangent_enabled: bool = False
     temporal_unrolled_power_rf_tangent_slack_tolerance: float = 1.0e-6
     temporal_unrolled_power_rf_tangent_rank_tolerance: float = 1.0e-8
+    # When a temporal CVaR residual exceeds its physical tolerance, use the
+    # normalized constraint gradient alone until feasibility is restored.
+    # Default off preserves the historical Pareto-plus-dual update.
+    temporal_unrolled_power_feasibility_first_enabled: bool = False
     temporal_unrolled_power_pareto_tolerance: float = 1.0e-6
     temporal_unrolled_power_pareto_max_iterations: int = 64
     # Optional teacher-free discrete-structure closure.  The environment

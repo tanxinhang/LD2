@@ -58,6 +58,9 @@ results/
 !/artifacts/audits/
 /artifacts/audits/*
 !/artifacts/audits/formal_gates_post_classified_cleanup.json
+!/artifacts/research/
+/artifacts/research/*
+!/artifacts/research/actor_proximal_ablation_v1.json
 !/artifacts/legacy/
 /artifacts/legacy/*
 !/artifacts/legacy/entrypoints.v4.jsonl

@@ -604,3 +604,46 @@ mode `single`, rank `1`, norm ratio `0.5634`, RF excess `0`, CVaR residual
 diagnostics, but does not claim a detection gain: the underlying active
 resource manifold still leaves essentially no tangential descent in this
 geometry.
+
+### Stage-10 actor-proximal multi-seed ablation (2026-09-09)
+
+The Stage-7 signal was expanded without changing code identity. Five
+independent training seeds (`31415--31419`) were run for both `rho=0` and the
+stress value `rho=0.1`; every trained policy was evaluated on the same ten
+holdout seeds (`30001--30010`). The training seed, rather than each nested
+evaluation episode, is the independent statistical unit. Every V2 completion
+hash and resolved proximal coefficient is checked by
+`tools/summarize_actor_proximal_ablation.py`; the compact result is stored in
+`artifacts/research/actor_proximal_ablation_v1.json`.
+
+| Training seed | steady delta | weak3 delta | worst delta |
+|---:|---:|---:|---:|
+| 31415 | +0.0007218 | +0.0007218 | +0.0010892 |
+| 31416 | +0.0000000 | +0.0000000 | +0.0000000 |
+| 31417 | +0.0000013 | +0.0000013 | +0.0000025 |
+| 31418 | +0.0000000 | +0.0000000 | +0.0000000 |
+| 31419 | -0.0000000 | -0.0000000 | -0.0000000 |
+
+Across training seeds, the mean worst-target delta is `+0.0002183`, its median
+is effectively zero, and its equivalence-censored cluster-bootstrap 95%
+interval is `[0, +0.0006540]`. At the `1e-8` numerical-equivalence boundary,
+two clusters are positive and three are ties (one-sided exact sign
+`p=0.25`). Only seed `31415` exceeds the explicitly post-hoc practical
+threshold of `+0.0001`. Pooling the 50 nested evaluation outcomes would
+incorrectly inflate the sample size and is deliberately not used.
+
+All evaluation runs retain QoS feasibility `1.0` and exactly zero measured RF
+budget excess. Attempted KL remains below the transactional `0.03` bound.
+The short training audit is not uniformly CVaR-feasible, however: the strong
+arm reaches residual `0.06762` on seed `31416`, above the `0.01` tolerance.
+Consequently `rho=0.1` fails both the practical generalization rule and the
+candidate safety rule. It remains an opt-in diagnostic and is not promoted
+to the default algorithm. This is a useful negative result: a fixed proximal
+coefficient closes the actor--solver path on one favorable seed but does not
+solve the underlying causal mismatch generally.
+
+The next algorithm experiment should therefore target a binding constraint
+mechanism, not tune `rho` on this ceiling-prone smoke. Before execution it
+must freeze a harder non-saturated scenario bank, a CVaR-feasibility rule, a
+minimum relevant tail-effect size, and independent training seeds. Candidate
+selection and confirmation should use disjoint seed banks.

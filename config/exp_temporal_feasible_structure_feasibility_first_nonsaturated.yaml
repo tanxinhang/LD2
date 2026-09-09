@@ -1,0 +1,6 @@
+# Candidate arm for the preregistered non-saturated experiment.  This differs
+# from its paired control by exactly one algorithm switch.
+extends: exp_temporal_feasible_structure_nonsaturated.yaml
+
+marl:
+  temporal_unrolled_power_feasibility_first_enabled: true

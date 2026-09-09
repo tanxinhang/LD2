@@ -1,0 +1,41 @@
+schema_version: research-preregistration/v1
+name: temporal_cvar_feasibility_first_nonsaturated_v1
+status: frozen_before_execution
+question: Does scale-invariant feasibility restoration improve tail detection and CVaR control in a non-saturated regime?
+scope:
+  scenario: K2/Q2/T32
+  training_updates: 3
+  sensing_cap_w_per_uav: 0.15
+  control_profile: config/exp_temporal_feasible_structure_nonsaturated.yaml
+  candidate_profile: config/exp_temporal_feasible_structure_feasibility_first_nonsaturated.yaml
+arms:
+  control:
+    temporal_unrolled_power_feasibility_first_enabled: false
+  candidate:
+    temporal_unrolled_power_feasibility_first_enabled: true
+  allowed_difference: temporal_unrolled_power_feasibility_first_enabled
+seeds:
+  training: [41001, 41002, 41003, 41004, 41005]
+  evaluation: [33001, 33002, 33003, 33004, 33005, 33006, 33007, 33008, 33009, 33010, 33011, 33012, 33013, 33014, 33015, 33016, 33017, 33018, 33019, 33020]
+  exclusion_note: Neither bank was used in the 31415/32001-32010 regime calibration.
+statistics:
+  independent_unit: training_seed
+  paired_unit: common_evaluation_seed_nested_within_training_seed
+  primary_endpoint: candidate_minus_control_mean_eval_episode_worst_values
+  secondary_endpoints: [steady, weak3, positive_CVaR_residual_AUC]
+  numerical_equivalence_tolerance: 1.0e-8
+  bootstrap_samples: 100000
+  bootstrap_seed: 9311
+promotion_gate:
+  minimum_primary_mean_delta: 0.005
+  primary_cluster_bootstrap_lcb_strictly_positive: true
+  minimum_clusters_above_0_001: 4
+  candidate_eval_qos_feasible_rate_not_lower: true
+  candidate_positive_CVaR_residual_AUC_not_higher_in_minimum_clusters: 4
+  candidate_mean_positive_CVaR_residual_AUC_delta_max: 0.0
+safety_gate:
+  eval_RF_budget_violation_w_max: 1.0e-12
+  training_RF_roundoff_w_max: 1.0e-7
+  attempted_KL_max: 0.03
+  actor_update_rejections_max: 0
+decision_rule: Promote only if every promotion and safety condition passes; otherwise retain as opt-in negative or inconclusive evidence.

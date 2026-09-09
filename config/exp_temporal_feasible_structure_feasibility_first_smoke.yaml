@@ -1,0 +1,8 @@
+# Exploratory active-set ablation.  When the calibrated temporal CVaR
+# residual exceeds its physical tolerance, suspend Pareto preference trading
+# and take a scale-invariant feasibility-restoration step.  Execution physics
+# and the default profile remain unchanged.
+extends: exp_temporal_feasible_structure_smoke.yaml
+
+marl:
+  temporal_unrolled_power_feasibility_first_enabled: true

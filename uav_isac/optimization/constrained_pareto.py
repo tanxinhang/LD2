@@ -56,6 +56,7 @@ class AssignedParetoGradient:
     projection_mode: str = "identity"
     projection_rank: int = 0
     projection_norm_ratio: torch.Tensor | None = None
+    update_mode: str = "pareto_plus_constraint"
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,7 @@ def assign_constrained_pareto_gradients(
     | tuple[torch.Tensor, ...] = (),
     normalize_objective_gradients: bool = True,
     tangent_projection_rank_tolerance: float = 1.0e-8,
+    feasibility_first: bool = False,
     batched_vjp: bool = True,
     tolerance: float = 1.0e-6,
     max_iterations: int = 128,
@@ -289,7 +291,10 @@ def assign_constrained_pareto_gradients(
     communication bits and latency live in different physical units. Constraint
     gradients are never included in the Pareto weight solve: they enter through
     their projected dual variables and therefore cannot be traded away by an
-    objective coefficient.
+    objective coefficient.  An opt-in feasibility-first restoration step uses
+    the normalized constraint gradient alone.  It is intended only while a
+    physical inequality is violated, and removes arbitrary penalty-scale
+    dependence from the restoration direction.
     """
     losses = tuple(objective_losses)
     tangent_losses = tuple(tangent_constraint_losses)
@@ -305,6 +310,8 @@ def assign_constrained_pareto_gradients(
         or not bool(torch.isfinite(constraint_loss.detach()))
     ):
         raise ValueError("constraint loss must be a finite scalar")
+    if feasibility_first and constraint_loss is None:
+        raise ValueError("feasibility-first mode requires a constraint loss")
     if (not math.isfinite(float(tangent_projection_rank_tolerance))
             or float(tangent_projection_rank_tolerance) < 0.0):
         raise ValueError(
@@ -417,7 +424,16 @@ def assign_constrained_pareto_gradients(
             (torch.zeros_like(parameter) if value is None else value).reshape(-1)
             for parameter, value in zip(trainable, constraint_values)
         ]).detach()
-    applied = pareto.gradient + constraint_flat
+    constraint_norm = torch.linalg.vector_norm(constraint_flat)
+    if feasibility_first:
+        if float(constraint_norm) <= float(torch.finfo(constraint_flat.dtype).eps):
+            raise ValueError(
+                "feasibility-first mode requires a non-zero constraint gradient")
+        applied = constraint_flat / constraint_norm
+        update_mode = "feasibility_first"
+    else:
+        applied = pareto.gradient + constraint_flat
+        update_mode = "pareto_plus_constraint"
     offset = 0
     for parameter in trainable:
         count = parameter.numel()
@@ -426,7 +442,7 @@ def assign_constrained_pareto_gradients(
         offset += count
     return AssignedParetoGradient(
         pareto=pareto,
-        constraint_gradient_norm=torch.linalg.vector_norm(constraint_flat),
+        constraint_gradient_norm=constraint_norm,
         applied_gradient_norm=torch.linalg.vector_norm(applied),
         objective_gradient_norms=raw_norms,
         objective_gradient_cosine=cosine,
@@ -435,6 +451,7 @@ def assign_constrained_pareto_gradients(
         projection_mode=projection_mode,
         projection_rank=projection_rank,
         projection_norm_ratio=projection_norm_ratio,
+        update_mode=update_mode,
     )
 
 
