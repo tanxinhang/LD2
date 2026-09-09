@@ -16,6 +16,7 @@ from uav_isac.coordination.maxmin_power import (
 )
 from uav_isac.coordination.maxmin_power import (
     _dual_upper_is_sound,
+    _fill_budget,
     _primal_dual_tolerance,
 )
 
@@ -30,6 +31,19 @@ def test_primal_dual_certificate_tolerance_scales_with_physical_objective():
     assert tolerance == pytest.approx(dual * 1.0e-7)
     assert _dual_upper_is_sound(primal, dual)
     assert not _dual_upper_is_sound(primal, primal * (1.0 - 2.0e-7))
+
+
+def test_fill_budget_projects_solver_scale_residual_but_rejects_material_excess():
+    budget = np.asarray([0.0251])
+    gain = np.asarray([[2.0, 1.0]])
+    solver_residual = np.asarray([[0.01, 0.0151 * (1.0 + 3.0e-9)]])
+
+    projected = _fill_budget(solver_residual, gain, budget)
+
+    assert np.sum(projected[0]) <= budget[0]
+    np.testing.assert_allclose(np.sum(projected[0]), budget[0], rtol=0.0, atol=1e-15)
+    with pytest.raises(RuntimeError, match="budget-infeasible"):
+        _fill_budget(np.asarray([[0.01, 0.0151 * (1.0 + 3.0e-6)]]), gain, budget)
 
 
 def test_inertia_blend_preserves_each_local_power_simplex():

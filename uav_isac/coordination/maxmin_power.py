@@ -22,6 +22,7 @@ from scipy.optimize import linprog, minimize
 # small solver tolerance.  A looser upper bound remains mathematically sound;
 # its actual gap must be propagated instead of rejected or reported as zero.
 _PRIMAL_DUAL_RELATIVE_TOLERANCE = 1.0e-7
+_LP_FEASIBILITY_RELATIVE_TOLERANCE = 1.0e-8
 
 
 def _primal_dual_tolerance(primal: float, dual: float) -> float:
@@ -225,7 +226,7 @@ def _fill_budget(
             "fixed-structure max-min LP returned non-finite power")
     for transmitter in range(raw.shape[0]):
         negative_tolerance = max(
-            1.0e-9 * float(budget[transmitter]),
+            _LP_FEASIBILITY_RELATIVE_TOLERANCE * float(budget[transmitter]),
             64.0 * float(np.spacing(budget[transmitter])),
         )
         if float(np.min(raw[transmitter])) < -negative_tolerance:
@@ -237,7 +238,7 @@ def _fill_budget(
         slack = float(budget[transmitter] - np.sum(result[transmitter]))
         if slack < 0.0:
             tolerance = max(
-                1.0e-9 * float(budget[transmitter]),
+                _LP_FEASIBILITY_RELATIVE_TOLERANCE * float(budget[transmitter]),
                 64.0 * float(np.spacing(budget[transmitter])),
             )
             if slack < -tolerance:
