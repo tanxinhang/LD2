@@ -34,7 +34,10 @@ from uav_isac.governance.entrypoint_inventory import build_entrypoint_inventory
 
 def _check_phase():
     phase = load_project_phase()
-    assert phase.phase in {"architecture_audit", "reproduction", "result_refresh"}
+    assert phase.phase in {
+        "architecture_audit", "reproduction", "result_refresh",
+        "algorithm_research",
+    }
     expected = (
         "migration_freeze_declared",
         "baseline_characterized",
@@ -42,9 +45,13 @@ def _check_phase():
         "architecture_audited",
         "reproduction_passed",
         "result_refresh_approved",
+        "research_runtime_managed",
+        "research_data_lifecycle_closed",
+        "research_evidence_portable",
+        "algorithm_optimization_approved",
     )
     assert phase.required_gate_order == expected
-    if phase.phase == "result_refresh":
+    if phase.phase == "algorithm_research":
         assert phase.completed_gates == expected
     else:
         assert phase.completed_gates == expected[:len(phase.completed_gates)]

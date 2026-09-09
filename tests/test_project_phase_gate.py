@@ -9,15 +9,15 @@ from uav_isac.governance.project_phase import (
 )
 
 
-def test_repository_is_ready_for_audited_result_refresh():
+def test_repository_is_ready_for_preregistered_algorithm_research():
     phase = load_project_phase()
 
-    assert phase.phase == "result_refresh"
+    assert phase.phase == "algorithm_research"
     assert not phase.allows("architecture_migration")
     assert phase.allows("characterization_tests")
-    assert not phase.allows("algorithm_optimization")
-    assert phase.allows("full_result_refresh")
-    assert phase.allows("destructive_data_cleanup")
+    assert phase.allows("algorithm_optimization")
+    assert not phase.allows("full_result_refresh")
+    assert not phase.allows("destructive_data_cleanup")
 
 
 def test_unknown_operation_fails_closed():

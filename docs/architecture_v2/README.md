@@ -1,8 +1,8 @@
 # 软件架构 V2 控制页
 
-当前状态：`result_refresh`。V2 迁移壳层、架构审计、隔离复现和首轮正式结果刷新已经通过；
-算法优化仍冻结。这里的“通过”表示旧系统已被可审计地包入 V2 边界，不表示 legacy 核心、
-研究入口和历史数据已经完成最终收敛。
+当前状态：`algorithm_research`。V2 架构、科研运行契约、历史数据边界、便携正式证据和三个
+managed numerical adapter 已通过完成审计。算法研究只允许通过活动研究注册表和 V2 run
+namespace 开展；正式结果刷新与破坏性数据清理重新关闭，避免研究阶段污染冻结证据。
 
 本目录只维护四份活动文档：
 
@@ -26,8 +26,8 @@ pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli verify-baseline
 ```
 
 统一入口还提供 `train`、`pilot` 和 `refresh-results` 子命令。它们在分派旧后端前检查项目
-阶段。当前允许 `pilot`、`refresh-results` 和 characterization；`train` 仍被机器门禁禁止，
-直到研究主路径、运行 manifest 和数据生命周期完成收口并通过新的算法优化批准门。
+阶段。当前允许 `train`、`pilot` 和 characterization；`refresh-results` 关闭。候选机制必须
+先完成消融和多 seed 配对检验，不能直接覆盖冻结正式基线。
 
 安装项目后可直接使用 `uav-isac`；源码树中等价入口为
 `python -m uav_isac.interfaces.cli`。依赖下限和包资源由根目录 `pyproject.toml` 声明，精确

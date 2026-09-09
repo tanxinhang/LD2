@@ -96,6 +96,7 @@ _EVIDENCE_NEUTRAL_RELEASE_PATHS = {
     "uav_isac/governance/research_programs.py",
     "uav_isac/governance/research_readiness.py",
     "uav_isac/governance/data/research_programs.yaml",
+    "uav_isac/governance/data/project_phase.yaml",
     "uav_isac/interfaces/cli.py",
 }
 

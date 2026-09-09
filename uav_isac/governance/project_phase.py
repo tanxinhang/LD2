@@ -19,6 +19,7 @@ KNOWN_PHASES = {
     "architecture_audit",
     "reproduction",
     "result_refresh",
+    "algorithm_research",
 }
 
 # A phase may only be advertised after the corresponding scientific workflow
@@ -29,6 +30,7 @@ PHASE_REQUIRED_GATE = {
     "architecture_audit": "architecture_migrated",
     "reproduction": "architecture_audited",
     "result_refresh": "result_refresh_approved",
+    "algorithm_research": "algorithm_optimization_approved",
 }
 
 
