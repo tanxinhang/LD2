@@ -42,6 +42,7 @@ from uav_isac.environment.belief import (
     generalized_covariance_intersection,
 )
 from uav_isac.environment.observation import ObservationBuilder
+from uav_isac.prediction.markov_kinematics import predict_reflecting_cv_mean
 from uav_isac.environment.action import ActionSpace
 from uav_isac.environment.reward import (
     RewardComputer,
@@ -825,6 +826,8 @@ class EnvironmentCore:
             ma, 'distributed_greedy_matching_movement_enabled', False))
         self._distributed_greedy_matching_hold_frames = max(1, int(getattr(
             ma, 'distributed_greedy_matching_hold_frames', 150)))
+        self._distributed_greedy_matching_prediction_frames = max(0, int(
+            getattr(ma, 'distributed_greedy_matching_prediction_frames', 0)))
         self._distributed_movement_anchor_broadcast_enabled = bool(getattr(
             ma, 'distributed_movement_anchor_broadcast_enabled', False))
         self._distributed_movement_anchor_broadcast_period_frames = max(
@@ -8887,15 +8890,27 @@ class EnvironmentCore:
             'movement_gain_schedule_strategy_hold_rate': 0.0,
             'movement_gain_schedule_no_improvement_rate': 0.0,
             'movement_gain_schedule_far_range_rate': 0.0,
+            'movement_target_prediction_frames': float(
+                self._distributed_greedy_matching_prediction_frames),
         }
         if self.Q <= 0:
             return {}
         out = {}
         standoff = float(self._distributed_id_movement_standoff_m)
         for viewer in range(self.K):
-            target_position_3d, _ = (
+            target_position_3d, target_velocity_3d = (
                 self._movement_target_state_for_viewer(viewer))
             target_xy = target_position_3d[:, :2]
+            if self._distributed_greedy_matching_prediction_frames > 0:
+                target_xy, _ = predict_reflecting_cv_mean(
+                    target_xy,
+                    target_velocity_3d[:, :2],
+                    elapsed_s=(
+                        self._distributed_greedy_matching_prediction_frames
+                        * float(self.cfg.scenario.dt)),
+                    area_size_m=tuple(
+                        float(v) for v in self.cfg.scenario.region_size),
+                )
             held_target = int(self._distributed_movement_target[viewer])
             held = bool(
                 0 <= held_target < self.Q

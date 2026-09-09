@@ -22,6 +22,12 @@ from .constrained_objective import (
     project_power_to_row_budget,
 )
 from .gradient_surgery import physical_anchor_pcgrad
+from .markov_kinematics import (
+    GaussianMarkovHorizon,
+    cv_markov_matrices,
+    predict_cv_markov_horizon,
+    predict_reflecting_cv_mean,
+)
 
 __all__ = [
     "append_causal_feature_residual",
@@ -44,4 +50,8 @@ __all__ = [
     "detection_probability_from_deflection",
     "project_power_to_row_budget",
     "physical_anchor_pcgrad",
+    "GaussianMarkovHorizon",
+    "cv_markov_matrices",
+    "predict_cv_markov_horizon",
+    "predict_reflecting_cv_mean",
 ]

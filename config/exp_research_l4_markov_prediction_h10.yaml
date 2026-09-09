@@ -1,0 +1,6 @@
+# L4 boundary screen: one-second causal CV-Markov target prediction.
+extends: exp_research_interference_l4_noise_loaded.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 20
+  distributed_greedy_matching_prediction_frames: 10

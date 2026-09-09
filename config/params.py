@@ -532,6 +532,9 @@ class MARLParams:
     distributed_id_movement_standoff_m: float = 0.0
     distributed_greedy_matching_movement_enabled: bool = False
     distributed_greedy_matching_hold_frames: int = 150
+    # Causal CV-Markov mean lookahead for distributed movement assignment.
+    # Zero preserves current-position matching and every frozen baseline.
+    distributed_greedy_matching_prediction_frames: int = 0
     # Low-rate, ACK-free second-level movement beacon. At the configured
     # period each node multiplexes one absolute local target-belief anchor into
     # the already charged three-dimensional near-field header.

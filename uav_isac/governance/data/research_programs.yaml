@@ -2,6 +2,15 @@
 # not promoted into this registry merely because their scripts still exist.
 schema_version: 1
 programs:
+  - name: l4_markov_prediction
+    question: Does causal one-second CV-Markov target prediction improve L4 distributed bistatic assignment without clean-regime regression?
+    state: candidate
+    implementation: uav_isac/prediction/markov_kinematics.py
+    profile: config/exp_research_l4_markov_prediction_h10.yaml
+    evidence: artifacts/research/l4_markov_prediction_h10_v1.json
+    formal_eligible: false
+    next_gate: Run the preregistered eight-seed paired L4 confirmation and preserve the L0 and resource guards.
+
   - name: l4_short_assignment_commitment
     question: Does a shorter distributed assignment commitment improve worst-target detection under the L4 disturbance protocol at unchanged resources?
     state: candidate

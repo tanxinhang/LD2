@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "status": "preregistered_development_confirmation_pending",
+  "formal_eligible": false,
+  "hypothesis": "A one-second causal CV-Markov mean prediction improves distributed bistatic assignment under L4 without the clean-regime regression of short fixed commitment.",
+  "candidate_profile": "config/exp_research_l4_markov_prediction_h10.yaml",
+  "control_profile": "config/exp_research_interference_l4_noise_loaded.yaml",
+  "mechanism": {
+    "state_model": "linear Gaussian CV Markov process",
+    "prediction_frames": 10,
+    "prediction_seconds": 1.0,
+    "assignment_hold_frames": 20,
+    "learned_model": false,
+    "future_truth_used": false,
+    "additional_messages": false
+  },
+  "selection_calibration": {
+    "seeds": [11114, 10069, 11149, 10749],
+    "selected_run": "pilot-57fbd055f5f9b2e8cdec",
+    "baseline_run": "pilot-3914d7973c8347948cc6",
+    "rejected_prediction_frames": {
+      "20": "pilot-03ee73d429acc54ce6fe",
+      "40": "pilot-d5af10f40dbba504bb00"
+    }
+  },
+  "confirmation_protocol": {
+    "selection_seed": 20260910,
+    "seed_source": "config/stratified_seeds_1130_k16q16_blind.json",
+    "exclusions": "formal test split, quarantined/development-excluded seeds, and all prior L4 calibration/holdout seeds",
+    "strata": {"easy": 3, "medium": 2, "hard": 3},
+    "seeds": [10008, 10550, 11547, 11963, 10186, 10028, 10257, 11513],
+    "frames": 150,
+    "carrier_period": 3,
+    "paired": true,
+    "acceptance": {
+      "SCORE": "candidate L4 worst mean delta must be positive",
+      "WEAK3": "candidate L4 weak3 mean delta must be non-negative",
+      "TAIL": "candidate L4 worst minimum must not decrease",
+      "QOS": "candidate L4 QoS rate must not decrease",
+      "L0_GUARD": "four-seed L0 worst mean delta must be at least -0.01",
+      "RESOURCE": "bits/frame, delivery rate and sensing-power cap must remain unchanged"
+    }
+  },
+  "confirmation_results": null
+}

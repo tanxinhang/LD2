@@ -125,6 +125,7 @@ marl:
   distributed_id_movement_standoff_m: 0.0
   distributed_greedy_matching_movement_enabled: false
   distributed_greedy_matching_hold_frames: 150
+  distributed_greedy_matching_prediction_frames: 0
   distributed_bottleneck_matching_movement_enabled: false
   distributed_coordination_use_local_belief_targets: false
   # Post-G2 strict no-truth fail-closed gate (audit advice/001 P0).  When true,

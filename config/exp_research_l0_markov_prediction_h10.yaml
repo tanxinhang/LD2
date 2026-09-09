@@ -1,0 +1,6 @@
+# Clean-regime regression guard for one-second CV-Markov prediction.
+extends: exp_strict_distributed_k16q16.yaml
+
+marl:
+  distributed_greedy_matching_hold_frames: 20
+  distributed_greedy_matching_prediction_frames: 10
