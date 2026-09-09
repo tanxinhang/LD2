@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 from typing import Mapping, Tuple
 
 import yaml
@@ -122,3 +123,25 @@ def assert_operation_allowed(
             f"see {phase.source}"
         )
     return phase
+
+
+def assert_managed_executor(entrypoint: str) -> Path:
+    """Require a canonical CLI-created run namespace for an old executor."""
+    operation = {
+        "train": "algorithm_optimization",
+        "pilot": "migration_audit",
+        "refresh-results": "full_result_refresh",
+    }.get(entrypoint)
+    if operation is None:
+        raise OperationBlockedError(f"unknown managed executor: {entrypoint!r}")
+    assert_operation_allowed(operation)
+    run_id = os.environ.get("UAV_ISAC_MANAGED_RUN_ID", "")
+    root_value = os.environ.get("UAV_ISAC_MANAGED_RUN_ROOT", "")
+    if not run_id or not root_value or any(char in run_id for char in "/\\"):
+        raise OperationBlockedError(
+            f"executor {entrypoint!r} must be launched by the canonical V2 CLI")
+    run_root = Path(root_value).resolve()
+    expected = Path(__file__).resolve().parents[2] / "artifacts" / "runs" / run_id
+    if run_root != expected.resolve() or not (run_root / "manifest.json").is_file():
+        raise OperationBlockedError("managed executor run namespace is invalid")
+    return run_root

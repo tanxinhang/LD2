@@ -958,8 +958,8 @@ def run(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from uav_isac.governance import assert_operation_allowed
-    assert_operation_allowed("migration_audit")
+    from uav_isac.governance import assert_managed_executor
+    assert_managed_executor("pilot")
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

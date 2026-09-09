@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -134,10 +135,16 @@ class ManagedLegacyPythonProcessRunner:
             seeds=seeds,
             inputs={"config": resolved.source, "executor": relative},
         ))
+        environment = os.environ.copy()
+        environment.update({
+            "UAV_ISAC_MANAGED_RUN_ID": run_id,
+            "UAV_ISAC_MANAGED_RUN_ROOT": str(run_directory),
+        })
         completed = subprocess.run(
             [sys.executable, str(script), *managed_arguments],
             cwd=self._repository,
             check=False,
+            env=environment,
         )
         artifacts = {}
         for path in sorted(run_directory.rglob("*")):

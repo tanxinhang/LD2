@@ -436,6 +436,8 @@ def run_bank(
 
 
 def main() -> None:
+    from uav_isac.governance import assert_managed_executor
+    assert_managed_executor("refresh-results")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", default="config/exp_strict_distributed_k16q16.yaml")

@@ -4,6 +4,7 @@ from .project_phase import (
     OperationBlockedError,
     ProjectPhase,
     assert_operation_allowed,
+    assert_managed_executor,
     load_project_phase,
 )
 from .research_programs import ResearchProgram, load_research_programs
@@ -17,6 +18,7 @@ __all__ = [
     "OperationBlockedError",
     "ProjectPhase",
     "assert_operation_allowed",
+    "assert_managed_executor",
     "load_project_phase",
     "audit_architecture",
     "load_architecture_rules",

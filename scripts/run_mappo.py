@@ -70,8 +70,8 @@ def _import_torch_with_single_windows_openmp():
 
 
 def main():
-    from uav_isac.governance import assert_operation_allowed
-    assert_operation_allowed("algorithm_optimization")
+    from uav_isac.governance import assert_managed_executor
+    assert_managed_executor("train")
 
     # Keep heavy numerical/ML imports out of module scope.  On Windows the
     # private-LP ProcessPool uses ``spawn``, which imports this entry module as
