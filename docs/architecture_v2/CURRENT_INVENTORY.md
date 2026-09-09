@@ -8,8 +8,8 @@
 | `tools/` Python 脚本 | 154 |
 | `tests/` Python 文件 | 219 |
 | `config/` YAML | 383 |
-| `results/` 文件 | 6770（清理并完成刷新后） |
-| `results/` 总量 | 15,485,299,077 bytes（清理并完成刷新后） |
+| `results/` 文件 | 6763（深度清理后） |
+| `results/` 总量 | 15,483,932,320 bytes（深度清理后） |
 | `env_core.py` | 13316 行 |
 | `trainer.py` | 9192 行 |
 
@@ -55,6 +55,21 @@ SHA-256 为 `f5581a54be678431c359a717c8e1e2b56087fc67075c4867a1a73119b6e6e79b`�
 `formal_evidence/registry.json`，并由当前 post-G2 正式门禁重新计算为 PASS。V2 发布索引与不可变
 副本位于 `artifacts/published/` 和 `artifacts/runs/formal-k16q16-blind100-080016a-7f566dd5/`。
 刷新后的 results 再盘点为 6770 文件、15,485,299,077 bytes，并全部完成 SHA-256 catalog。
+
+2026-09-09 发布后深度审计再次验证架构边界、依赖、黄金语义基线、严格系统身份、正式
+post-G2 证据和 Git 对象完整性。随后精确清理 49 个目标、3384 个文件、102,241,676 bytes：
+包括可重建的 Python/pytest/build/egg-info/codegraph 缓存、失败的隔离安装副本、未引用旧探针，
+以及已由正式 `FORMAL_COMPLETE` envelope 取代的 7 个中间结果。被文档引用的
+`.arts/algorithm_audit`、活动虚拟环境、成功的隔离复现、正式结果、checkpoint、trace、frozen
+证据及未分类数据均保留。深度清理后 results 为 6763 文件、15,483,932,320 bytes，已重新生成
+全文件 SHA-256 catalog；剩余重复项仍为 2280 个、8,756,091,454 bytes，继续保持
+`deletion_authorized=false`，不会仅凭重复或目录名继续删除。
+
+清理后的结果树治理审计仍识别出 1044 个一级结果目录，其中 38 个不含
+`summary.json`、`paired_eval.csv` 或 `run_manifest.json`，331 个为下划线前缀目录，现存
+`summary.json` 有 88 种顶层 schema。这些目录可能包含历史复现证据，当前统一视为待分类的
+legacy debt，不据名称或结构缺失自动删除。审计工具的 `--json-output` 路径另有 tuple-key
+序列化缺陷；本次通过只读兼容导出生成审计报告，暂不修改正式发布绑定的源代码。
 
 M0 已建立项目阶段门禁。默认 K4/Q2 与正式 K16/Q16 短帧语义指纹均已连续重放稳定；墙钟
 求解、执行器预热和模拟器耗时字段被显式排除并保留给性能审计。因此
