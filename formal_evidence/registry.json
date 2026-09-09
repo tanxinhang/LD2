@@ -4,13 +4,13 @@
   "entries": [
     {
       "name": "K16/Q16 architecture V2 post-G2 blind100 refresh",
-      "csv": "_architecture_v2_refresh/paired_eval_080016a.csv",
+      "csv": "_architecture_v2_refresh/paired_eval_3c58b3c.csv",
       "quarantined": false,
       "enforced": true,
-      "note": "Canonical strict bank, 100 frozen test seeds, single-worker formal refresh at commit 080016ac0b2964dc88f2a88971efd08aad20d3d4.",
-      "artifact_sha256": "f5581a54be678431c359a717c8e1e2b56087fc67075c4867a1a73119b6e6e79b",
-      "run_manifest": "_architecture_v2_refresh/k16q16_blind100_080016a.json",
-      "run_manifest_sha256": "7f566dd52b9b1349470c82945bd4252f6bdda1faa937586ae62355847a5a35d4"
+      "note": "Canonical strict bank, 100 frozen test seeds, single-worker formal refresh after classified cleanup and K4/Q2 seed-identity repair at commit 3c58b3c7bea9598158f58c875971e7285d0dae65.",
+      "artifact_sha256": "e94b6837d586a855ce69c3bcccc63bdc25920da0f6e3c7fa0ac91335d38a50d1",
+      "run_manifest": "_architecture_v2_refresh/k16q16_blind100_3c58b3c.json",
+      "run_manifest_sha256": "edd019b237da4700d4cfbb07141241fb4287deb69ba99cb62d251d587ffb0420"
     }
   ]
 }
