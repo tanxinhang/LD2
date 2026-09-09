@@ -19,7 +19,7 @@ from uav_isac.adapters import (
 )
 from uav_isac.application import CommandDispatcher, CommandSpec, EpisodeRunner
 from uav_isac.domain import EpisodeSpec
-from uav_isac.domain import RunManifest
+from uav_isac.domain import RunCompletion, RunManifest
 from uav_isac.governance import (
     assert_operation_allowed,
     audit_architecture,
@@ -27,6 +27,7 @@ from uav_isac.governance import (
     load_characterization_baselines,
     load_runtime_profiles,
     semantic_fingerprint,
+    load_research_programs,
 )
 
 
@@ -88,7 +89,7 @@ def _characterize_command(
         store.create_run(RunManifest(
             run_id=run_id,
             run_type="characterization",
-            state="completed",
+            state="created",
             created_at=datetime.now(timezone.utc).isoformat(),
             command=(
                 "python", "-m", "uav_isac.interfaces.cli", "characterize",
@@ -99,8 +100,15 @@ def _characterize_command(
             inputs={"config": resolved.source},
         ))
         artifact = store.write_json(run_id, "derived/summary.json", summary)
+        completion = store.complete_run(RunCompletion(
+            run_id=run_id,
+            state="completed",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            artifacts={artifact.relative_path: artifact.sha256},
+        ))
         summary["run_id"] = run_id
         summary["artifact_sha256"] = artifact.sha256
+        summary["completion_sha256"] = completion.sha256
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -134,6 +142,24 @@ def _profiles_command() -> int:
     return 0
 
 
+def _research_programs_command() -> int:
+    """Expose the small active research surface, not every retained probe."""
+    print(json.dumps([
+        {
+            "name": item.name,
+            "question": item.question,
+            "state": item.state,
+            "implementation": item.implementation,
+            "profile": item.profile,
+            "evidence": item.evidence,
+            "formal_eligible": item.formal_eligible,
+            "next_gate": item.next_gate,
+        }
+        for item in load_research_programs()
+    ], indent=2))
+    return 0
+
+
 def _dispatch_command(name: str, operation: str, arguments: list[str]) -> int:
     assert_operation_allowed(operation)
     forwarded = tuple(arguments[1:] if arguments[:1] == ["--"] else arguments)
@@ -150,6 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("phase", help="show the current project phase")
     commands.add_parser("audit", help="audit V2 dependency boundaries")
     commands.add_parser("profiles", help="list registered V2 runtime profiles")
+    commands.add_parser(
+        "research-programs",
+        help="list active hypotheses, baselines, evidence, and next gates",
+    )
     commands.add_parser(
         "verify-baseline",
         help="replay every registered semantic characterization",
@@ -184,6 +214,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _audit_command()
     if args.command == "profiles":
         return _profiles_command()
+    if args.command == "research-programs":
+        return _research_programs_command()
     if args.command == "verify-baseline":
         return _verify_baseline_command()
     if args.command == "characterize":

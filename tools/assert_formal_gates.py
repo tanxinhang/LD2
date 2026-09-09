@@ -409,7 +409,17 @@ FORMAL_RESULTS: List[FormalResult] = (
 
 def _result_path(raw_path: str) -> Path:
     path = Path(raw_path)
-    return path if path.is_absolute() else RESULTS_ROOT / path
+    if path.is_absolute():
+        return path
+    # Current evidence is a compact, versioned artifact bundle. Historical
+    # registrations remain relative to results/ for backward reproduction.
+    if path.parts and path.parts[0] == "artifacts":
+        resolved = (ROOT / path).resolve()
+        artifact_root = (ROOT / "artifacts").resolve()
+        if not resolved.is_relative_to(artifact_root):
+            raise ValueError("formal artifact path escapes artifacts/")
+        return resolved
+    return RESULTS_ROOT / path
 
 
 def _sha256_file(path: Path) -> str:

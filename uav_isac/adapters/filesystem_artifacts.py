@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from uav_isac.domain.artifacts import ArtifactRecord, RunManifest
+from uav_isac.domain.artifacts import ArtifactRecord, RunCompletion, RunManifest
 
 
 class FileSystemArtifactStore:
@@ -68,6 +68,8 @@ class FileSystemArtifactStore:
             raise FileExistsError(f"refusing to overwrite artifact: {path}") from exc
 
     def create_run(self, manifest: RunManifest) -> ArtifactRecord:
+        if manifest.state != "created":
+            raise ValueError("a new run manifest must start in created state")
         run_directory = self._run_directory(manifest.run_id)
         run_directory.mkdir(parents=True, exist_ok=False)
         relative_path = "manifest.json"
@@ -89,3 +91,20 @@ class FileSystemArtifactStore:
         self._write_new(path, data)
         return self._record(run_id, relative_path, data)
 
+    def complete_run(self, completion: RunCompletion) -> ArtifactRecord:
+        """Write a terminal record only after verifying every bound artifact."""
+        run_directory = self._run_directory(completion.run_id)
+        if not (run_directory / "manifest.json").is_file():
+            raise FileNotFoundError(f"run has no manifest: {completion.run_id}")
+        for relative_path, expected_sha256 in completion.artifacts.items():
+            path = self._artifact_path(completion.run_id, relative_path)
+            if not path.is_file():
+                raise FileNotFoundError(f"completion artifact is missing: {path}")
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual != expected_sha256:
+                raise ValueError(
+                    f"completion artifact hash mismatch: {relative_path}")
+        data = self._encode(dataclasses.asdict(completion))
+        relative_path = "completion.json"
+        self._write_new(run_directory / relative_path, data)
+        return self._record(completion.run_id, relative_path, data)

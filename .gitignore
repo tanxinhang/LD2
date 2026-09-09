@@ -41,6 +41,23 @@ results/
 # Architecture V2 run artifacts. Keep the layout contract, never generated data.
 /artifacts/*
 !/artifacts/README.md
+# The compact, content-addressed current formal release is source evidence,
+# not scratch output.  Only this explicitly named release is versioned.
+!/artifacts/published/
+/artifacts/published/*
+!/artifacts/published/architecture_v2_k16q16_blind100_3c58b3c.yaml
+!/artifacts/runs/
+/artifacts/runs/*
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/
+/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/*
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/manifest.json
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/raw/
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/raw/completed_result.json
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/derived/
+!/artifacts/runs/formal-k16q16-blind100-3c58b3c-edd019b2/derived/paired_eval.csv
+!/artifacts/audits/
+/artifacts/audits/*
+!/artifacts/audits/formal_gates_post_classified_cleanup.json
 /.repro_install_v2/
 
 # Root-level audit/probe scratch scripts and logs (see DEEP_AUDIT 2026-09-04 N2).

@@ -1,0 +1,25 @@
+{
+  "K16/Q16 architecture V2 post-G2 blind100 refresh": {
+    "name": "K16/Q16 architecture V2 post-G2 blind100 refresh",
+    "quarantined": false,
+    "evidence_epoch": "post_g2",
+    "enforced": true,
+    "note": "Canonical strict bank, 100 frozen test seeds, single-worker formal refresh after classified cleanup and K4/Q2 seed-identity repair at commit 3c58b3c7bea9598158f58c875971e7285d0dae65.",
+    "artifact_sha256": "e94b6837d586a855ce69c3bcccc63bdc25920da0f6e3c7fa0ac91335d38a50d1",
+    "run_manifest_sha256": "edd019b237da4700d4cfbb07141241fb4287deb69ba99cb62d251d587ffb0420",
+    "git_commit": "3c58b3c7bea9598158f58c875971e7285d0dae65",
+    "release_commit": "ff58b626171176da617c68ebc4ea71b5af9886d5",
+    "source_tree_sha256": "a2e9a28359a5429604a4eb8712bf3feb586736ea4e66f58dae9c2b7dcf31cb09",
+    "config_source_sha256": "8ae243fbc1531f21ed53d6a808ea76ef5f1f6541c5e285c56b8f52f9f65bed6b",
+    "config_effective_sha256": "850f6cb4043e8accecc3faf4b9189f878ed9abc4da33d08ca360a3514feb59e4",
+    "seed_bank_sha256": "ad4a0660754c30234dd1a7488167bfc44f3210220aea1fabe4d7cbb6aa8b42a9",
+    "provenance_validated": true,
+    "episodes": 100,
+    "steady": 0.9941782595745592,
+    "weak3": 0.9732187083055669,
+    "worst": 0.9595163498765583,
+    "qos_feasible": 1.0,
+    "qos_wilson_lcb": 0.9736572792168257,
+    "status": "PASS"
+  }
+}

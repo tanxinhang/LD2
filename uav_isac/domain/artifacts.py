@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Mapping, Tuple
 
 
@@ -45,3 +46,26 @@ class ArtifactRecord:
     sha256: str
     size_bytes: int
 
+
+@dataclass(frozen=True)
+class RunCompletion:
+    """Append-only terminal record binding a run to its produced artifacts."""
+
+    run_id: str
+    state: str
+    completed_at: str
+    artifacts: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not self.run_id or any(char in self.run_id for char in "/\\"):
+            raise ValueError("run_id must be a non-empty path segment")
+        if self.state not in {"completed", "failed", "audited"}:
+            raise ValueError("completion state must be completed, failed, or audited")
+        if not self.completed_at:
+            raise ValueError("completed_at must be non-empty")
+        for path, digest in self.artifacts.items():
+            candidate = Path(path)
+            if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+                raise ValueError("completion artifact paths must be safe and relative")
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                raise ValueError("completion artifact hashes must be lowercase SHA-256")

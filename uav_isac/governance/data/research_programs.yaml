@@ -1,0 +1,30 @@
+# Active scientific work only. Historical probes remain reproducible but are
+# not promoted into this registry merely because their scripts still exist.
+schema_version: 1
+programs:
+  - name: strict_k16q16_baseline
+    question: Can the frozen distributed controller satisfy the preregistered K16/Q16 blind protocol?
+    state: frozen_baseline
+    implementation: tools/run_strict_distributed_bank.py
+    profile: config/exp_strict_distributed_k16q16.yaml
+    evidence: formal_evidence/registry.json
+    formal_eligible: true
+    next_gate: Preserve as the paired control for every post-refactor algorithm experiment.
+
+  - name: constrained_temporal_power
+    question: Can teacher-free constrained optimization improve executed tail detection without violating RF, CVaR, or KL constraints?
+    state: candidate
+    implementation: uav_isac/optimization/temporal_feasible_structure.py
+    profile: config/exp_temporal_feasible_structure_smoke.yaml
+    evidence: docs/CONSTRAINED_DRL_OPTIMIZATION_PROGRESS_2026-09-08.md
+    formal_eligible: false
+    next_gate: Remove the actor-to-execution mismatch, then run a preregistered multi-seed paired ablation.
+
+  - name: predictive_constraint_native
+    question: Can a scale-equivariant predictor reduce exact-solver work while retaining certified feasibility on unseen seeds and cardinalities?
+    state: shadow_incomplete
+    implementation: uav_isac/prediction/certified_gnn.py
+    profile: config/exp_strict_distributed_k16q16.yaml
+    evidence: docs/PREDICTIVE_CERTIFIED_ARCHITECTURE_2026-09-07.md
+    formal_eligible: false
+    next_gate: Wire native-physics recomputation and fallback gates before any environment authority.

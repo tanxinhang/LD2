@@ -6,6 +6,7 @@ from .project_phase import (
     assert_operation_allowed,
     load_project_phase,
 )
+from .research_programs import ResearchProgram, load_research_programs
 from .architecture import audit_architecture, load_architecture_rules
 from .fingerprint import canonical_sha256, semantic_differences, semantic_fingerprint
 from .baseline import load_characterization_baselines
@@ -24,4 +25,6 @@ __all__ = [
     "load_characterization_baselines",
     "get_runtime_profile",
     "load_runtime_profiles",
+    "ResearchProgram",
+    "load_research_programs",
 ]

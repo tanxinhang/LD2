@@ -1,0 +1,23 @@
+schema_version: 1
+release: architecture_v2_k16q16_blind100_3c58b3c
+status: audited
+run_id: formal-k16q16-blind100-3c58b3c-edd019b2
+git_commit: 3c58b3c7bea9598158f58c875971e7285d0dae65
+manifest_sha256: cc4f6db29225b3293b218dfac7460f5752e85dc6feb49b704a7efb06045ff83e
+formal_envelope: raw/completed_result.json
+formal_envelope_sha256: edd019b237da4700d4cfbb07141241fb4287deb69ba99cb62d251d587ffb0420
+paired_eval: derived/paired_eval.csv
+paired_eval_sha256: e94b6837d586a855ce69c3bcccc63bdc25920da0f6e3c7fa0ac91335d38a50d1
+formal_gate_report: artifacts/audits/formal_gates_post_classified_cleanup.json
+summary:
+  episodes: 100
+  qos_successes: 100
+  qos_rate: 1.0
+  qos_wilson_lower_95_one_sided: 0.9736572792168257
+  steady_mean: 0.9941782595745592
+  weak3_mean: 0.9732187083055669
+  worst_mean: 0.9595163498765585
+  delivery_rate_mean: 1.0
+  deadline_violation_rate_mean: 0.0
+  max_seed_closed_loop_p95_ms: 24.46951038822718
+  all_gates_passed: true

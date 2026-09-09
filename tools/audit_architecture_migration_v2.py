@@ -29,6 +29,7 @@ from uav_isac.governance import (
     load_runtime_profiles,
     semantic_fingerprint,
 )
+from uav_isac.governance.entrypoint_inventory import build_entrypoint_inventory
 
 
 def _check_phase():
@@ -42,7 +43,11 @@ def _check_phase():
         "reproduction_passed",
         "result_refresh_approved",
     )
-    assert phase.completed_gates == expected[:len(phase.completed_gates)]
+    assert phase.required_gate_order == expected
+    if phase.phase == "result_refresh":
+        assert phase.completed_gates == expected
+    else:
+        assert phase.completed_gates == expected[:len(phase.completed_gates)]
 
 
 def _check_baselines():
@@ -110,6 +115,16 @@ def _check_entrypoints():
     assert sum(row["status"] == "canonical" for row in rows) == 1
     assert sum(row["status"] == "adapter_backend" for row in rows) == 3
     assert all(row["owner"] and row["operation"] for row in rows)
+    current = [
+        {
+            "path": row.path,
+            "status": row.status,
+            "owner": row.owner,
+            "operation": row.operation,
+        }
+        for row in build_entrypoint_inventory(REPOSITORY_ROOT)
+    ]
+    assert rows == current, "entrypoint catalog is stale; regenerate entrypoints.v3.jsonl"
 
 
 def _run_full_tests():

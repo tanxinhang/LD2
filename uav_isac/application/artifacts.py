@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol
 
-from uav_isac.domain.artifacts import ArtifactRecord, RunManifest
+from uav_isac.domain.artifacts import ArtifactRecord, RunCompletion, RunManifest
 
 
 class ArtifactStore(Protocol):
     def create_run(self, manifest: RunManifest) -> ArtifactRecord:
+        ...
+
+    def complete_run(self, completion: RunCompletion) -> ArtifactRecord:
         ...
 
     def write_json(
@@ -18,4 +21,3 @@ class ArtifactStore(Protocol):
         payload: Mapping[str, Any],
     ) -> ArtifactRecord:
         ...
-

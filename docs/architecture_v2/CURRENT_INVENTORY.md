@@ -4,12 +4,12 @@
 
 | 区域 | 快照 |
 |---|---:|
-| `uav_isac/` Python 模块 | 158 |
-| `tools/` Python 脚本 | 154 |
-| `tests/` Python 文件 | 219 |
+| `uav_isac/` Python 模块 | 190 |
+| `tools/` Python 脚本 | 162 |
+| `tests/` Python 文件 | 232 |
 | `config/` YAML | 383 |
-| `results/` 文件 | 6761（复现分层后） |
-| `results/` 总量 | 15,483,932,320 bytes（深度清理后） |
+| `results/` 文件 | 6763（本轮只读复核） |
+| `results/` 总量 | 15,484,782,200 bytes（本轮只读复核） |
 | `env_core.py` | 13316 行 |
 | `trainer.py` | 9192 行 |
 
@@ -81,3 +81,11 @@ M0 已建立项目阶段门禁。默认 K4/Q2 与正式 K16/Q16 短帧语义指�
 求解、执行器预热和模拟器耗时字段被显式排除并保留给性能审计。因此
 `baseline_characterized` 已过门。架构迁移、审计与隔离安装复现均已通过，当前仅开放结果
 刷新与受控数据清理；算法优化继续冻结。迁移后以测试全绿而不是固定测试数量为准。
+
+## 尚未完成的研究型收口
+
+截至本次复核，V2 foundation 可以视为完成，但原计划中的 M3/M4 仍有实质性债务：175 个
+可执行入口中有 163 个仍标记为 `legacy_retained`；结果树中 5044 个文件、约
+13,171,820,854 bytes 仍是 `unclassified`；正式运行还同时使用 V2 artifact manifest 与
+strict-distributed manifest 两套契约；训练和正式刷新仍经 adapter 分派旧脚本。因此在这些
+项目完成前，不把系统标记为“研究主干重构完成”，也不开放算法优化。

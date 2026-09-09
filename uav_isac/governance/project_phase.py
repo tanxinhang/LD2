@@ -21,6 +21,16 @@ KNOWN_PHASES = {
     "result_refresh",
 }
 
+# A phase may only be advertised after the corresponding scientific workflow
+# gates have been completed.  Keeping this mapping in code prevents a phase
+# label from drifting ahead of its reproducibility evidence.
+PHASE_REQUIRED_GATE = {
+    "architecture_migration": "migration_freeze_declared",
+    "architecture_audit": "architecture_migrated",
+    "reproduction": "architecture_audited",
+    "result_refresh": "result_refresh_approved",
+}
+
 
 class OperationBlockedError(RuntimeError):
     """Raised when an operation is disabled by the current project phase."""
@@ -76,6 +86,17 @@ def load_project_phase(path: Path | str = DEFAULT_PHASE_FILE) -> ProjectPhase:
     completed_positions = [required.index(gate) for gate in completed]
     if completed_positions != list(range(len(completed_positions))):
         raise ValueError("completed_gates must be a contiguous prefix of gate order")
+
+    phase_gate = PHASE_REQUIRED_GATE[phase]
+    if phase_gate not in required:
+        raise ValueError(
+            f"required_gate_order omits the gate required by phase {phase!r}: "
+            f"{phase_gate!r}"
+        )
+    if phase_gate not in completed:
+        raise ValueError(
+            f"phase {phase!r} requires completed gate {phase_gate!r}"
+        )
 
     return ProjectPhase(
         phase=phase,
