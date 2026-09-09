@@ -46,3 +46,8 @@ SHA-256 校验前不得改变。
 
 V2 全量刷新写入新 run_id，旧结果保持只读。只有审计通过的 run_id 才能进入
 `published/`；文档引用逻辑名称和哈希，不引用“latest”目录。
+
+当前正式证据的小型发布包进入版本控制。发布后的文档、研究注册表、artifact 存储和验证器
+调整不强迫重跑昂贵实验，但验证器使用精确路径白名单确认这些变化不进入数值仿真/控制器
+闭包；任何 `config/physical/environment/agents/coordination/optimization/prediction` 相关源码变化
+仍立即使旧正式证据失效，必须重新运行冻结协议。

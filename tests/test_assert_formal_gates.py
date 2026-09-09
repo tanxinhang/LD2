@@ -328,6 +328,17 @@ def test_epoch_filter_keeps_historical_results_auditable():
     assert results_for_epoch("all") == FORMAL_RESULTS
 
 
+def test_evidence_neutral_release_allowlist_excludes_scientific_runtime():
+    neutral = formal_gate_module._EVIDENCE_NEUTRAL_RELEASE_PATHS
+
+    assert "uav_isac/governance/research_programs.py" in neutral
+    assert "uav_isac/domain/artifacts.py" in neutral
+    assert "uav_isac/legacy/environment_core.py" not in neutral
+    assert "uav_isac/agents/networks.py" not in neutral
+    assert "uav_isac/physical/deflection.py" not in neutral
+    assert "config/exp_strict_distributed_k16q16.yaml" not in neutral
+
+
 def test_post_g2_label_alone_cannot_reclassify_a_historical_csv():
     historical = next(
         item for item in FORMAL_RESULTS if "D1.9 bottleneck" in item.name)

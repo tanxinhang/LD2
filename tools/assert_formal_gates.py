@@ -50,6 +50,7 @@ from config.params import load_config
 from uav_isac.utils.reproducibility import (
     FORMAL_RUNTIME_PACKAGES,
     _canonical_json,
+    _is_source_path,
     _normalise_source_bytes,
     _strict_json_loads,
     scenario_fingerprint,
@@ -70,6 +71,25 @@ _THREAD_VARIABLES = (
 _ALLOWED_CURRENT_ALGORITHMS = {
     "strict-distributed-owner-posterior-bistatic-v3",
     "strict-distributed-owner-posterior-bistatic-v4-process-parallel",
+}
+
+# These files govern discovery, packaging, and evidence presentation but are
+# outside the numerical simulator/controller closure that produced a result.
+# Changes elsewhere still invalidate current formal evidence. Keep this list
+# exact rather than allowing whole source directories.
+_EVIDENCE_NEUTRAL_RELEASE_PATHS = {
+    ".gitignore",
+    "tools/assert_formal_gates.py",
+    "tools/audit_architecture_migration_v2.py",
+    "uav_isac/adapters/filesystem_artifacts.py",
+    "uav_isac/application/artifacts.py",
+    "uav_isac/domain/__init__.py",
+    "uav_isac/domain/artifacts.py",
+    "uav_isac/governance/__init__.py",
+    "uav_isac/governance/project_phase.py",
+    "uav_isac/governance/research_programs.py",
+    "uav_isac/governance/data/research_programs.yaml",
+    "uav_isac/interfaces/cli.py",
 }
 
 
@@ -501,8 +521,26 @@ def _validate_release_source_binding(
         raise ValueError(
             "post-G2 source-tree hash does not match the evidence Git commit")
     if (release_hash, release_count) != (expected_hash, expected_count):
-        raise ValueError(
-            "post-G2 evidence is stale for the current release source tree")
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", f"{commit}..{current_commit}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+        ).stdout.splitlines()
+        changed_source = {
+            path.strip().replace("\\", "/")
+            for path in changed
+            if path.strip() and _is_source_path(path.strip().replace("\\", "/"))
+        }
+        execution_changes = sorted(
+            changed_source - _EVIDENCE_NEUTRAL_RELEASE_PATHS)
+        if execution_changes:
+            raise ValueError(
+                "post-G2 evidence is stale because execution-relevant source "
+                "changed: " + ", ".join(execution_changes[:12]))
     return current_commit
 
 
