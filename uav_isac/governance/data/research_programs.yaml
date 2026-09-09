@@ -4,7 +4,7 @@ schema_version: 1
 programs:
   - name: l4_markov_assignment_dp
     question: Can a finite-state Markov assignment path with physical future-stage costs improve L4 tail detection without assignment churn?
-    state: shadow_kernel_ready
+    state: shadow_incomplete
     implementation: uav_isac/prediction/markov_physical_assignment.py
     profile: config/exp_research_l4_markov_prediction_h10.yaml
     evidence: docs/L4_MARKOV_PREDICTION_2026-09-10.md
