@@ -3,6 +3,7 @@ import pytest
 
 from uav_isac.prediction.markov_assignment import (
     assignment_switch_distance,
+    build_target_priority_swap_neighborhood,
     solve_markov_assignment_path,
     solve_markov_assignment_scenario_tree,
 )
@@ -10,6 +11,47 @@ from uav_isac.prediction.markov_assignment import (
 
 def test_switch_distance_is_normalized_hamming_distance():
     assert assignment_switch_distance([0, 1, 2, 3], [0, 2, 1, 3]) == 0.5
+
+
+def test_priority_swap_neighborhood_is_bounded_and_count_preserving():
+    incumbent = np.array([0, 1, 2, 3])
+    candidates = build_target_priority_swap_neighborhood(
+        incumbent, num_targets=4, target_priority=np.array([2, 0]),
+        max_candidates=5)
+    np.testing.assert_array_equal(candidates[0], incumbent)
+    assert candidates.shape == (5, 4)
+    for candidate in candidates:
+        np.testing.assert_array_equal(
+            np.bincount(candidate, minlength=4), np.ones(4, dtype=np.int64))
+    # The first non-incumbent candidates all reassign priority target 2.
+    assert all(np.argmax(candidate == 2) != 2 for candidate in candidates[1:4])
+
+
+def test_priority_swap_neighborhood_is_deterministic_and_deduplicated():
+    kwargs = dict(
+        incumbent_assignment=np.array([0, 0, 1, 2, 2]),
+        num_targets=3,
+        target_priority=np.array([2]),
+        max_candidates=20,
+    )
+    first = build_target_priority_swap_neighborhood(**kwargs)
+    second = build_target_priority_swap_neighborhood(**kwargs)
+    np.testing.assert_array_equal(first, second)
+    assert np.unique(first, axis=0).shape[0] == first.shape[0]
+    baseline_counts = np.bincount(first[0], minlength=3)
+    for candidate in first:
+        np.testing.assert_array_equal(
+            np.bincount(candidate, minlength=3), baseline_counts)
+
+
+def test_k16_q16_priority_neighborhood_respects_research_compute_cap():
+    incumbent = np.arange(16, dtype=np.int64)
+    candidates = build_target_priority_swap_neighborhood(
+        incumbent, num_targets=16,
+        target_priority=np.array([15, 7, 3]), max_candidates=32)
+    assert candidates.shape == (32, 16)
+    np.testing.assert_array_equal(candidates[0], incumbent)
+    assert np.unique(candidates, axis=0).shape[0] == 32
 
 
 def test_zero_penalty_selects_each_stage_minimum():

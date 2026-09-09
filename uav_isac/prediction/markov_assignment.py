@@ -51,6 +51,67 @@ def assignment_switch_distance(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.mean(lhs != rhs))
 
 
+def build_target_priority_swap_neighborhood(
+    incumbent_assignment: np.ndarray,
+    *,
+    num_targets: int,
+    target_priority: np.ndarray | None = None,
+    max_candidates: int = 32,
+) -> np.ndarray:
+    """Build a bounded, count-preserving neighborhood around an assignment.
+
+    The incumbent is always candidate zero.  For each target in priority
+    order, endpoints currently responsible for it are swapped with every other
+    endpoint in stable index order.  A swap changes which UAV approaches a
+    weak/uncertain target while preserving the exact number of responsibilities
+    assigned to every target.  This avoids both exponential enumeration and
+    the missing-target artifacts created by single-entry replacement.
+    """
+
+    incumbent = np.asarray(incumbent_assignment, dtype=np.int64).reshape(-1)
+    targets = int(num_targets)
+    limit = int(max_candidates)
+    if incumbent.size == 0 or targets != num_targets or targets < 1:
+        raise ValueError("incumbent and num_targets must be non-empty and valid")
+    if np.any(incumbent < 0) or np.any(incumbent >= targets):
+        raise ValueError("incumbent contains an invalid target index")
+    if limit != max_candidates or limit < 1:
+        raise ValueError("max_candidates must be a positive integer")
+    if target_priority is None:
+        priority = np.arange(targets, dtype=np.int64)
+    else:
+        priority = np.asarray(target_priority, dtype=np.int64).reshape(-1)
+        if (
+            priority.size == 0 or np.any(priority < 0)
+            or np.any(priority >= targets)
+            or np.unique(priority).size != priority.size
+        ):
+            raise ValueError("target_priority must contain unique valid indices")
+        missing = np.setdiff1d(
+            np.arange(targets, dtype=np.int64), priority, assume_unique=True)
+        priority = np.concatenate((priority, missing))
+
+    candidates = [incumbent.copy()]
+    seen = {tuple(int(value) for value in incumbent)}
+    for target in priority:
+        owners = np.flatnonzero(incumbent == int(target))
+        for owner in owners:
+            for partner in range(incumbent.size):
+                if partner == owner or incumbent[partner] == incumbent[owner]:
+                    continue
+                candidate = incumbent.copy()
+                candidate[owner], candidate[partner] = (
+                    candidate[partner], candidate[owner])
+                key = tuple(int(value) for value in candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(candidate)
+                if len(candidates) >= limit:
+                    return np.stack(candidates)
+    return np.stack(candidates)
+
+
 def solve_markov_assignment_path(
     candidate_assignments: np.ndarray,
     stage_costs: np.ndarray,

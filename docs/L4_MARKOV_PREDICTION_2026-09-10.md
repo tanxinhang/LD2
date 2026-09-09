@@ -77,6 +77,11 @@ power solve.
 This is still a shadow kernel, not an online-authority result. The reporting
 structure is frozen over the planning horizon, target covariance horizons must
 come from causal local beliefs, and no closed-loop L4 gain is claimed yet. The
-next gate is to construct bounded candidate assignment neighborhoods from the
-existing causal movement assignments, log shadow rankings against the actually
-executed next-stage outcome, and only then preregister an authority experiment.
+candidate generator now constructs a deterministic target-priority swap
+neighborhood around the existing causal movement assignment. Every swap
+preserves the complete per-target responsibility histogram; the incumbent is
+always candidate zero and K16/Q16 is capped at 32 candidates instead of
+enumerating `16^16` assignments. The next gate is to feed causal local-belief
+covariance horizons and these candidates into shadow logging, compare predicted
+rankings with actually executed next-stage outcomes, and only then preregister
+an authority experiment.
