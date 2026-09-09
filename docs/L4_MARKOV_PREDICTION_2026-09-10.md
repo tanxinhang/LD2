@@ -122,3 +122,31 @@ receiver report reliability reduced its mean graph-search time from 1.91 s to
 0.55 s without changing any score. The exact sequence, including the rejected
 variant, is recorded in
 `artifacts/research/markov_graph_assignment_mechanism_v1.json`.
+
+## Fixed-lag inverse-estimation screen
+
+The forward Markov model and the noisy inverse problem are now separated in
+code. `uav_isac/environment/fixed_lag_smoother.py` provides an exact
+centralized Kalman/RTS fixed-lag reference with missing-observation support,
+time-varying measurement covariance, Joseph covariance updates and explicit
+smoothed process residuals. It is not connected to action authority. The last
+smoothed state is deliberately tested to equal the last filtered state: a
+causal window cannot manufacture a future measurement, so its online value is
+the denoised history and evidence about temporal model mismatch.
+
+A 256-seed synthetic mechanism screen found that smoothing reduced historical
+position MSE to 0.338 of filtering under the current L4-style independent
+white-acceleration model. However, extrapolating its recent residual
+acceleration changed the H10 endpoint error by -0.0017 m (95% bootstrap
+interval `[-0.0056, 0.0021]`, win rate 0.469). This is a No-Go for adding
+residual acceleration to the current L4 controller: `Target._step_cv` samples
+acceleration independently each frame, so there is no latent acceleration
+memory to predict.
+
+Under an explicitly labelled AR(1), coefficient-0.9 persistent-acceleration
+control, the same causal estimator improved endpoint error by 0.0170 m
+(`95% CI [0.0117, 0.0222]`, win rate 0.656). That positive control verifies the
+mechanism but is not evidence for the current simulator. ADMM decomposition or
+a switching Markov model is therefore gated on first defining and detecting a
+scientifically justified persistent motion regime. Full results are recorded
+in `artifacts/research/fixed_lag_smoother_mechanism_v1.json`.

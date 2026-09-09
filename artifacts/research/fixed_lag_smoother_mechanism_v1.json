@@ -1,0 +1,42 @@
+{
+  "current_l4_acceleration_model": "white",
+  "decision": "retain_smoother_as_history_diagnostic; gate residual forecasting by measured temporal persistence",
+  "persistent": {
+    "cv_forecast_error": 5.431519987356108,
+    "filtered_history_mse": 60.93891842945308,
+    "residual_forecast_error": 5.414506741289707,
+    "residual_forecast_mean_improvement": 0.017013246066401026,
+    "residual_forecast_mean_improvement_ci95": [
+      0.011703266647718256,
+      0.022160180658585972
+    ],
+    "residual_forecast_win_rate": 0.65625,
+    "smoothed_history_mse": 20.487129898700786,
+    "smoothing_history_mean_improvement": 40.451788530752296,
+    "smoothing_history_mean_improvement_ci95": [
+      35.64369001774661,
+      45.31035691047258
+    ],
+    "smoothing_history_mse_ratio": 0.3361912292949216
+  },
+  "scope": "mechanism_screen_not_model_selection_evidence",
+  "seed_count": 256,
+  "white": {
+    "cv_forecast_error": 4.554946513376619,
+    "filtered_history_mse": 61.5930509194975,
+    "residual_forecast_error": 4.556646793969531,
+    "residual_forecast_mean_improvement": -0.0017002805929120148,
+    "residual_forecast_mean_improvement_ci95": [
+      -0.005554606623152893,
+      0.0020847540071318805
+    ],
+    "residual_forecast_win_rate": 0.46875,
+    "smoothed_history_mse": 20.801363423075045,
+    "smoothing_history_mean_improvement": 40.791687496422455,
+    "smoothing_history_mean_improvement_ci95": [
+      36.639331046002624,
+      45.306540801526225
+    ],
+    "smoothing_history_mse_ratio": 0.33772256955192165
+  }
+}
