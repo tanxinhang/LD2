@@ -1,5 +1,16 @@
 {
   "schema_version": "formal-evidence-registry/v1",
   "evidence_epoch": "post_g2",
-  "entries": []
+  "entries": [
+    {
+      "name": "K16/Q16 architecture V2 post-G2 blind100 refresh",
+      "csv": "_architecture_v2_refresh/paired_eval_080016a.csv",
+      "quarantined": false,
+      "enforced": true,
+      "note": "Canonical strict bank, 100 frozen test seeds, single-worker formal refresh at commit 080016ac0b2964dc88f2a88971efd08aad20d3d4.",
+      "artifact_sha256": "f5581a54be678431c359a717c8e1e2b56087fc67075c4867a1a73119b6e6e79b",
+      "run_manifest": "_architecture_v2_refresh/k16q16_blind100_080016a.json",
+      "run_manifest_sha256": "7f566dd52b9b1349470c82945bd4252f6bdda1faa937586ae62355847a5a35d4"
+    }
+  ]
 }
