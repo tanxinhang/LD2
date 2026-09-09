@@ -101,7 +101,6 @@ marl:
   temporal_unrolled_power_rf_tangent_enabled: false
   temporal_unrolled_power_rf_tangent_slack_tolerance: 1.0e-6
   temporal_unrolled_power_rf_tangent_rank_tolerance: 1.0e-8
-  temporal_unrolled_power_feasibility_first_enabled: false
   temporal_unrolled_power_pareto_tolerance: 1.0e-6
   temporal_unrolled_power_pareto_max_iterations: 64
   temporal_feasible_structure_enabled: false

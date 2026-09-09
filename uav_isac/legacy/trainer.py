@@ -1598,10 +1598,6 @@ class MAPPTrainer:
         self._temporal_unrolled_power_rf_tangent_rank_tolerance = float(
             getattr(ma, 'temporal_unrolled_power_rf_tangent_rank_tolerance',
                     1.0e-8))
-        self._temporal_unrolled_power_feasibility_first_enabled = bool(
-            getattr(
-                ma, 'temporal_unrolled_power_feasibility_first_enabled',
-                False))
         self._temporal_unrolled_power_pareto_tolerance = float(getattr(
             ma, 'temporal_unrolled_power_pareto_tolerance', 1.0e-6))
         self._temporal_unrolled_power_pareto_max_iterations = int(getattr(
@@ -4031,9 +4027,6 @@ class MAPPTrainer:
             'temporal_unrolled_power_rf_projection_mode': 0.0,
             'temporal_unrolled_power_rf_projection_rank': 0.0,
             'temporal_unrolled_power_rf_projection_norm_ratio': 1.0,
-            'temporal_unrolled_power_feasibility_first_enabled': float(
-                self._temporal_unrolled_power_feasibility_first_enabled),
-            'temporal_unrolled_power_feasibility_first_active': 0.0,
             'temporal_feasible_structure_enabled': float(
                 self._temporal_feasible_structure_enabled),
             # Straight-through/discrete gradients are not claimed.  This flag
@@ -4365,10 +4358,6 @@ class MAPPTrainer:
             self._constrained_cvar_multipliers,
             penalty=self._constrained_cvar_penalty,
         )
-        feasibility_first_active = bool(
-            self._temporal_unrolled_power_feasibility_first_enabled
-            and float(torch.clamp(cvar_residual.detach(), min=0.0).max())
-            > self._constrained_cvar_primal_tolerance)
         resource_balance = torch.stack(resource_balance_residuals).mean()
         resource_active = bool(
             self._temporal_unrolled_power_rf_tangent_enabled
@@ -4385,7 +4374,6 @@ class MAPPTrainer:
             normalize_objective_gradients=True,
             tangent_projection_rank_tolerance=(
                 self._temporal_unrolled_power_rf_tangent_rank_tolerance),
-            feasibility_first=feasibility_first_active,
             batched_vjp=self._temporal_unrolled_power_batched_vjp_enabled,
             tolerance=self._temporal_unrolled_power_pareto_tolerance,
             max_iterations=(
@@ -4429,8 +4417,6 @@ class MAPPTrainer:
             'temporal_unrolled_power_rf_projection_norm_ratio': float(
                 assigned.projection_norm_ratio.detach().item()
                 if assigned.projection_norm_ratio is not None else 1.0),
-            'temporal_unrolled_power_feasibility_first_active': float(
-                feasibility_first_active),
             'temporal_unrolled_power_cvar_residual_max': float(
                 cvar_residual.detach().max().item()),
             'temporal_unrolled_power_raw_cvar_residual_max': float(

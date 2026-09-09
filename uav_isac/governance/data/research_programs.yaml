@@ -16,9 +16,9 @@ programs:
     state: candidate
     implementation: uav_isac/optimization/temporal_feasible_structure.py
     profile: config/exp_temporal_feasible_structure_smoke.yaml
-    evidence: artifacts/research/actor_proximal_ablation_v1.json
+    evidence: artifacts/research/feasibility_first_confirmation_v1.json
     formal_eligible: false
-    next_gate: Preregister a non-saturated disjoint-bank experiment for a binding CVaR/QoS mechanism; keep fixed actor-proximal rho opt-in after its multi-seed promotion failure.
+    next_gate: Replace the saturated temporal max-tail CVaR signal and demonstrate surrogate-to-executed monotonicity on calibration seeds before preregistering another confirmation.
 
   - name: predictive_constraint_native
     question: Can a scale-equivariant predictor reduce exact-solver work while retaining certified feasibility on unseen seeds and cardinalities?

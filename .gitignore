@@ -61,6 +61,7 @@ results/
 !/artifacts/research/
 /artifacts/research/*
 !/artifacts/research/actor_proximal_ablation_v1.json
+!/artifacts/research/feasibility_first_confirmation_v1.json
 !/artifacts/legacy/
 /artifacts/legacy/*
 !/artifacts/legacy/entrypoints.v4.jsonl

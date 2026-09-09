@@ -83,6 +83,8 @@ _EVIDENCE_NEUTRAL_RELEASE_PATHS = {
     "tools/audit_architecture_migration_v2.py",
     "tools/audit_data_lifecycle_v2.py",
     "tools/build_legacy_data_catalog_v2.py",
+    "tools/summarize_actor_proximal_ablation.py",
+    "tools/summarize_feasibility_first_confirmation.py",
     "scripts/run_mappo.py",
     "tools/run_strict_distributed_pilot.py",
     "tools/run_strict_distributed_bank.py",

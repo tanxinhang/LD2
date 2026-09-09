@@ -216,28 +216,6 @@ def test_constraint_gradient_is_not_traded_against_pareto_objectives():
     assert float(assigned.applied_gradient_norm) == pytest.approx(2.0)
 
 
-def test_feasibility_first_uses_scale_invariant_constraint_direction():
-    parameter = torch.nn.Parameter(torch.tensor([0.0, 0.0]))
-    objective = -parameter[0]
-    constraint = 7.0 * (parameter[0] + parameter[1])
-    assigned = assign_constrained_pareto_gradients(
-        (objective,), [parameter], constraint_loss=constraint,
-        feasibility_first=True)
-    expected = torch.tensor([1.0, 1.0]) / torch.sqrt(torch.tensor(2.0))
-    torch.testing.assert_close(parameter.grad, expected)
-    assert assigned.update_mode == "feasibility_first"
-    assert float(assigned.applied_gradient_norm) == pytest.approx(1.0)
-
-
-def test_feasibility_first_rejects_zero_constraint_gradient():
-    parameter = torch.nn.Parameter(torch.tensor([0.0]))
-    with pytest.raises(ValueError, match="non-zero constraint gradient"):
-        assign_constrained_pareto_gradients(
-            (parameter.sum(),), [parameter],
-            constraint_loss=parameter.sum() * 0.0,
-            feasibility_first=True)
-
-
 def test_objective_gradient_normalization_removes_physical_unit_scale():
     parameter = torch.nn.Parameter(torch.tensor([1.0, 1.0]))
     detection = parameter[0]
