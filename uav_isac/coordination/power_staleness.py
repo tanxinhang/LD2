@@ -67,7 +67,7 @@ between crossings; a crossing therefore forces an immediate re-solve.
 # NOT part of the deployment execution path (env_core / trainer) and its
 # results must not be described as deployed behaviour. It exists to keep
 # a specific research question reproducible; see
-# docs/ARCHITECTURE_V2_RESULTS.md for the associated gate.
+# docs/EXPERIMENT_LOG.md for the associated gate.
 # ----------------------------------------------------------------------
 
 from __future__ import annotations

@@ -580,6 +580,17 @@ class EnvironmentCore:
                 'sensing power')
         self._distributed_replicated_power_enabled = bool(getattr(
             ma, 'distributed_replicated_power_enabled', False))
+        self._distributed_replicated_power_common_model_certificate = bool(
+            getattr(
+                ma,
+                'distributed_replicated_power_common_model_certificate',
+                False,
+            ))
+        self._distributed_common_model_packet_reconstruction = bool(getattr(
+            ma,
+            'distributed_common_model_packet_reconstruction_enabled',
+            False,
+        ))
         if (self._distributed_primal_dual_power_enabled
                 and self._distributed_replicated_power_enabled):
             raise ValueError(
@@ -988,6 +999,12 @@ class EnvironmentCore:
         self._distributed_movement_safety_margin_per_age_m = max(
             0.0, float(getattr(
                 ma, 'distributed_movement_safety_margin_per_age_m', 0.0)))
+        self._distributed_movement_preexecution_swept_certificate = bool(
+            getattr(
+                ma,
+                'distributed_movement_preexecution_swept_certificate',
+                False,
+            ))
         self._distributed_movement_local_assignment_cache_enabled = bool(
             getattr(
                 ma,
@@ -3230,6 +3247,63 @@ class EnvironmentCore:
         self._last_isac_metrics['decision_sufficient_saved_bits'] = float(
             saved_bits)
 
+    def _common_owner_posterior_for_viewer(
+        self,
+        viewer: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return one physically shared owner-posterior model, if complete.
+
+        Every value comes from the immutable quantized packet sent by the
+        unique target owner. The owner consumes the same looped-back packet as
+        its peers. Missing, conflicting, future, or stale packets reject the
+        common model instead of exposing local belief or simulator truth.
+        """
+        if (
+            not self._distributed_common_model_packet_reconstruction
+            or not self._owner_posterior_enabled
+            or not self._hyperedge_selected_set
+        ):
+            return None
+        owners = np.full(self.Q, -1, dtype=np.int64)
+        for _transmitter, receiver, target in self._hyperedge_selected_set:
+            j, q = int(receiver), int(target)
+            if owners[q] not in (-1, j):
+                return None
+            owners[q] = j
+        if np.any(owners < 0):
+            return None
+        state_dim = int(self._owner_posterior_state_dim)
+        mean = np.zeros((self.Q, state_dim), dtype=np.float64)
+        covariance = np.zeros(
+            (self.Q, state_dim, state_dim), dtype=np.float64)
+        for q, raw_owner in enumerate(owners):
+            owner = int(raw_owner)
+            frame = int(self._owner_posterior_received_frame[
+                int(viewer), owner, q])
+            age = int(self.t - frame)
+            if (
+                frame < 0
+                or age < 0
+                or age > self._owner_posterior_max_age
+            ):
+                return None
+            mean[q] = self._owner_posterior_received_mean[
+                int(viewer), owner, q]
+            covariance[q] = self._owner_posterior_received_cov[
+                int(viewer), owner, q]
+            if state_dim >= 4 and age > 0:
+                mean[q, :2] += (
+                    mean[q, 2:4]
+                    * age
+                    * float(self.cfg.scenario.dt)
+                )
+        if (
+            np.any(~np.isfinite(mean))
+            or np.any(~np.isfinite(covariance))
+        ):
+            return None
+        return mean, covariance
+
     def _coordination_target_state_for_viewer(
         self,
         viewer: int,
@@ -3250,6 +3324,18 @@ class EnvironmentCore:
         if not 0 <= viewer < self.K:
             raise ValueError('viewer is outside the UAV index set')
         if self._distributed_coordination_use_local_belief_targets:
+            common = self._common_owner_posterior_for_viewer(viewer)
+            if common is not None:
+                shared_mean, _shared_covariance = common
+                position = np.column_stack([
+                    shared_mean[:, :2],
+                    np.zeros(self.Q, dtype=np.float64),
+                ])
+                velocity = np.column_stack([
+                    shared_mean[:, 2:4],
+                    np.zeros(self.Q, dtype=np.float64),
+                ])
+                return position, velocity
             if self.belief_mgr is None:
                 raise RuntimeError(
                     'local target belief is unavailable during coordination')
@@ -5159,6 +5245,16 @@ class EnvironmentCore:
                     quantized, mask)
                 self._hyperedge_local_offer[
                     int(sender), active] = decoded[active]
+                if self._distributed_common_model_packet_reconstruction:
+                    # Sender loopback consumes the immutable on-air payload,
+                    # exactly like every peer, instead of an unquantized
+                    # private state copy.
+                    self._hyperedge_received_offer[
+                        int(sender), int(sender), active] = decoded[active]
+                    self._hyperedge_received_last_seen[
+                        int(sender), int(sender), active] = int(
+                            self._pending_hyperedge_protocol_frame.get(
+                                int(sender), self.t))
         quantized_composable_certificate: Dict[int, np.ndarray] = {}
         quantized_composable_targetwise_upper: Dict[int, np.ndarray] = {}
         if self._composable_certificate_enabled:
@@ -5287,6 +5383,21 @@ class EnvironmentCore:
                 for value in packet.values():
                     np.asarray(value).setflags(write=False)
                 quantized_owner_posterior[sender] = packet
+                if self._distributed_common_model_packet_reconstruction:
+                    # Local loopback is a zero-airtime delivery of the exact
+                    # immutable payload already placed on air.  Do not enqueue
+                    # it through the fusion mailbox: the owner must reconstruct
+                    # the public LP model from its packet without treating its
+                    # own posterior as a second independent measurement.
+                    targets = packet['targets']
+                    self._owner_posterior_received_mean[
+                        sender, sender, targets] = packet['means']
+                    self._owner_posterior_received_cov[
+                        sender, sender, targets] = packet['covariances']
+                    self._owner_posterior_received_aoi[
+                        sender, sender, targets] = packet['aoi']
+                    self._owner_posterior_received_frame[
+                        sender, sender, targets] = packet['frames']
                 sender_bits = int(entry_bits * active_targets.size)
                 owner_posterior_payload_bits += sender_bits
                 exact_extra_payload_bits[sender] = (
@@ -5673,8 +5784,7 @@ class EnvironmentCore:
 
         for sender, energy_j in stats.per_sender_energy_j.items():
             if 0 <= sender < len(self.uavs):
-                self.uavs[sender].battery = max(
-                    0.0, self.uavs[sender].battery - float(energy_j))
+                self.uavs[sender].deduct_energy(float(energy_j))
 
         if self._joint_isac_power_enabled:
             # Sensing allocation is held for the full simulator frame; packet
@@ -5684,12 +5794,15 @@ class EnvironmentCore:
             # budget, in which case accounting is recomputed from this state.
             self._isac_sensing_battery_before = np.asarray(
                 [uav.battery for uav in self.uavs], dtype=np.float64)
+            self._isac_sensing_deficit_before = np.asarray(
+                [uav.max_energy_deficit_j for uav in self.uavs],
+                dtype=np.float64,
+            )
             for k in range(self.K):
                 sensing_energy = float(
                     np.sum(self._current_sensing_power_w[k])
                     * self._sensing_slot_duration_s())
-                self.uavs[k].battery = max(
-                    0.0, self.uavs[k].battery - sensing_energy)
+                self.uavs[k].deduct_energy(sensing_energy)
             allocated = self._current_comm_power_w + np.sum(
                 self._current_sensing_power_w, axis=1)
             self._last_isac_metrics = {
@@ -6049,8 +6162,12 @@ class EnvironmentCore:
             public_nearfield = np.zeros(
                 (self.K, self.Q, 3), dtype=np.float64)
 
-            visible[viewer] = True
-            if self._hyperedge_pair_score_mode == 'budget_reconstructable':
+            if not self._distributed_common_model_packet_reconstruction:
+                visible[viewer] = True
+            if (
+                self._hyperedge_pair_score_mode == 'budget_reconstructable'
+                and not self._distributed_common_model_packet_reconstruction
+            ):
                 # A UAV has causal, exact access to its own post-action
                 # proprioceptive state; using the previous submitted beacon
                 # here would manufacture a one-frame self delay.
@@ -6237,8 +6354,12 @@ class EnvironmentCore:
                     self._distributed_target_position_uncertainty_sigma > 0.0
                     and self.belief_mgr is not None
                 ):
+                    common = self._common_owner_posterior_for_viewer(viewer)
                     viewer_covariance = np.asarray(
-                        self.belief_mgr.cov[viewer], dtype=np.float64)
+                        common[1] if common is not None
+                        else self.belief_mgr.cov[viewer],
+                        dtype=np.float64,
+                    )
                     position_covariance = 0.5 * (
                         viewer_covariance[:, :2, :2]
                         + np.swapaxes(
@@ -7246,12 +7367,18 @@ class EnvironmentCore:
             raise AssertionError("analytical sensing allocation exceeds RF cap")
 
         before = getattr(self, '_isac_sensing_battery_before', None)
+        deficit_before = getattr(self, '_isac_sensing_deficit_before', None)
         if before is not None:
             before = np.asarray(before, dtype=np.float64).reshape(-1)
+            deficit_before = np.asarray(
+                deficit_before, dtype=np.float64).reshape(-1)
             if before.shape == (self.K,):
                 for k, uav in enumerate(self.uavs):
-                    uav.battery = max(
-                        0.0, float(before[k] - used[k] * self._sensing_slot_duration_s()))
+                    uav.set_battery_after_deduction(
+                        before[k],
+                        used[k] * self._sensing_slot_duration_s(),
+                        deficit_before[k],
+                    )
 
         allocated = self._current_comm_power_w + used
         self._last_isac_metrics.update({
@@ -10000,11 +10127,14 @@ class EnvironmentCore:
         movement_compute_time_s = float(
             time.perf_counter() - movement_compute_started)
 
-        # 1. Apply UAV actions
+        # 1. Assemble and certify the complete fleet command before mutating
+        # any UAV state.  The public-view projectors remain the distributed
+        # first line of defence; this physical execution kernel is a final
+        # fail-closed monitor and never reads target truth.
         uav_positions = np.zeros((self.K, 3), dtype=np.float64)
         uav_velocities = np.zeros((self.K, 3), dtype=np.float64)
         roles = np.zeros(self.K, dtype=np.int32)
-
+        proposed_delta = np.zeros((self.K, 2), dtype=np.float64)
         for k in range(self.K):
             delta_p = analytical_delta[k] if k in analytical_delta \
                 else actions[k].delta_p
@@ -10012,8 +10142,50 @@ class EnvironmentCore:
             if delta_p.shape != (2,) or not np.all(np.isfinite(delta_p)):
                 raise RuntimeError(
                     f"movement controller produced an invalid delta_p for UAV {k}")
+            max_step = float(self.uavs[k].v_max * self.uavs[k].dt)
+            norm = float(np.linalg.norm(delta_p))
+            proposed_delta[k] = (
+                delta_p * (max_step / norm)
+                if norm > max_step and norm > 0.0 else delta_p
+            )
+        swept_minimum = float('inf')
+        swept_fail_closed = False
+        if (
+            self._distributed_movement_preexecution_swept_certificate
+            and self.K >= 2
+        ):
+            current_xy = prev_uav_positions[:, :2]
+            for i in range(self.K):
+                for j in range(i + 1, self.K):
+                    relative = current_xy[i] - current_xy[j]
+                    relative_delta = proposed_delta[i] - proposed_delta[j]
+                    denominator = float(relative_delta @ relative_delta)
+                    tau = (
+                        float(np.clip(
+                            -(relative @ relative_delta) / denominator,
+                            0.0,
+                            1.0,
+                        ))
+                        if denominator > 0.0 else 0.0
+                    )
+                    swept_minimum = min(
+                        swept_minimum,
+                        float(np.linalg.norm(relative + tau * relative_delta)),
+                    )
+            if swept_minimum < float(self.cfg.uav.d_safe) - 1.0e-9:
+                proposed_delta.fill(0.0)
+                swept_fail_closed = True
+        if self._distributed_movement_preexecution_swept_certificate:
+            self._last_movement_safety_metrics.update({
+                'movement_preexecution_swept_certificate_enabled': 1.0,
+                'movement_preexecution_swept_minimum_m': swept_minimum,
+                'movement_preexecution_swept_fail_closed': float(
+                    swept_fail_closed),
+            })
+
+        for k in range(self.K):
             self.uavs[k].apply_action(
-                delta_p, actions[k].role,
+                proposed_delta[k], actions[k].role,
                 account_radio_energy=not self._joint_isac_power_enabled)
             uav_positions[k] = self.uavs[k].pos
             uav_velocities[k] = self.uavs[k].vel
@@ -10897,6 +11069,8 @@ class EnvironmentCore:
                             deadline_safe_row_gain),
                         history_reserve_deflection_cap=(
                             self._distributed_replicated_power_history_reserve_deflection),
+                        require_common_model_certificate=(
+                            self._distributed_replicated_power_common_model_certificate),
                     )
                     replicated_solve_time_s = float(
                         time.perf_counter() - replicated_solve_started)
@@ -11124,6 +11298,10 @@ class EnvironmentCore:
                                 replicated_power.local_compute_time_s))),
                         'distributed_replicated_power_common_view': float(
                             replicated_power.common_view),
+                        'distributed_replicated_power_common_model_certificate': float(
+                            replicated_power.common_model_certificate),
+                        'distributed_replicated_power_common_model_fallback_fraction': float(
+                            replicated_power.common_model_fallback_fraction),
                         'distributed_replicated_power_unique_local_problems': (
                             float(
                                 replicated_power.unique_local_problem_count)),
@@ -11497,7 +11675,7 @@ class EnvironmentCore:
                         # waveform is billed on the OTFS clock
                         # ``T_sense = n_cpi*N*T_sym`` in ``cpi_frame`` mode;
                         # legacy ``dt_frame`` keeps ``P_sense*dt``.
-                        self.uavs[k].battery -= (
+                        self.uavs[k].deduct_energy(
                             self.cfg.uav.P_sense * sensing_slot_s)
                     elif derived[k] == 1:
                         # RX is a passive listener of the same broadcast.  In
@@ -11506,10 +11684,8 @@ class EnvironmentCore:
                         # legacy ``dt_frame`` keeps the historical
                         # ``P_report*dt`` charge for reproducibility.
                         if self.cfg.scenario.sensing_energy_mode == 'dt_frame':
-                            self.uavs[k].battery -= (
+                            self.uavs[k].deduct_energy(
                                 self.cfg.uav.P_report * sensing_slot_s)
-                    if self.uavs[k].battery < 0.0:
-                        self.uavs[k].battery = 0.0
 
         # ── Layer 4: Event-triggered active probing ──
         # Probe only when a target's accumulated risk score exceeds threshold.
@@ -11720,10 +11896,7 @@ class EnvironmentCore:
             for sender, energy_j in enumerate(
                     evidence_transport.energy_j_by_sender):
                 if energy_j > 0.0:
-                    self.uavs[sender].battery = max(
-                        0.0,
-                        self.uavs[sender].battery - float(energy_j),
-                    )
+                    self.uavs[sender].deduct_energy(float(energy_j))
         else:
             detection_D_q = select_detection_deflection(
                 self._detection_fusion_mode,

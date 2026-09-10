@@ -4,7 +4,7 @@ This module implements the reward-side counterpart of the fixed-structure
 max-min power LP in ``uav_isac/coordination/maxmin_power.py``.  Its purpose is
 to make the *learning* reward curvature-consistent with the *coordination*
 objective, closing the convexity misalignment documented in
-``docs/KNOWN_ISSUES.md`` (B8).
+``docs/CURRENT_SYSTEM_MODEL.md`` (B8).
 
 Theory
 ------

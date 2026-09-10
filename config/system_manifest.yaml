@@ -71,6 +71,18 @@ marl:
   joint_isac_power_enabled: true
   distributed_coordination_use_local_belief_targets: true
   distributed_no_truth_fail_closed: true
+  # Movement authority is conditional on the public-view pairwise safety
+  # projection.  Execute the projected row even when it is an explicit hold;
+  # otherwise an omitted override can release the unverified actor command.
+  distributed_movement_safety_projection_enabled: true
+  # At vmax=25 m/s and dt=0.1 s, one age frame permits 2.5 m uncertainty
+  # per endpoint, hence 5 m for a pair.
+  distributed_movement_safety_margin_per_age_m: 5.0
+  distributed_movement_preexecution_swept_certificate: true
+  distributed_movement_execute_projected_public_action: true
+  distributed_movement_local_assignment_cache_enabled: true
+  distributed_movement_stale_fail_closed: true
+  distributed_movement_independently_composable_safety: true
   # Scalar score-order quantization primitives exist, but the current learned
   # target-token decoder has no certified Lipschitz/action-margin bound.  A
   # distance-score margin therefore cannot prove that dropping or coarsening

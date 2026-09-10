@@ -56,6 +56,9 @@ class CommunicationStepStats:
     mean_packet_error_probability: float = 0.0
     max_packet_error_probability: float = 0.0
     per_sender_energy_j: Dict[int, float] = field(default_factory=dict)
+    # A broadcast has one transmitter clock.  Receiver-specific decoding
+    # outcomes never create additional airtime or energy charges.
+    per_sender_airtime_s: Dict[int, float] = field(default_factory=dict)
     per_sender_bits: Dict[int, float] = field(default_factory=dict)
     per_sender_power_w: Dict[int, float] = field(default_factory=dict)
     per_sender_attempted_links: Dict[int, int] = field(default_factory=dict)
@@ -787,6 +790,7 @@ class InterUAVCommunicationModel:
                         stats.reliability_failed_links += 1
 
             sender_energy = sender_power_w * sender_airtime
+            stats.per_sender_airtime_s[sender] = float(sender_airtime)
             stats.per_sender_energy_j[sender] = float(sender_energy)
             stats.total_energy_j += float(sender_energy)
 

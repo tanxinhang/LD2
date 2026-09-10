@@ -1,6 +1,6 @@
 """Covertness-constrained power allocation primitives (advice 012 / T3).
 
-Extracted from the T3 oracle (tools/audit_horizon_joint_oracle.py) into the
+Extracted from the T3 oracle (docs/CURRENT_SYSTEM_MODEL.md) into the
 coordination layer so the detection-capability constraint can be reused by
 the live power path, not only by the offline oracle audit.
 

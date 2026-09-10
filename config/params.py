@@ -336,6 +336,12 @@ class MARLParams:
     # gap or ACK certificate is exchanged. Common views recover the
     # deterministic LP optimum; partial views preserve the local RF budget.
     distributed_replicated_power_enabled: bool = False
+    # Permit row-stitching only when every node holds a byte-identical gain
+    # model; divergent views execute a row-local composable fallback.
+    distributed_replicated_power_common_model_certificate: bool = False
+    # Reconstruct the LP model exclusively from immutable on-air endpoint
+    # packets and unique-owner posterior packets, including sender loopback.
+    distributed_common_model_packet_reconstruction_enabled: bool = False
     distributed_replicated_power_inertia: float = 0.0
     # Optional causal two-stage envelope for the private LP.  With a valid
     # previous local full-plan cache, target q receives the feasible reserve
@@ -681,6 +687,9 @@ class MARLParams:
     distributed_movement_safety_margin_m: float = 0.0
     # Additional two-endpoint motion uncertainty per public-cache age frame.
     distributed_movement_safety_margin_per_age_m: float = 0.0
+    # Final simulator-side fail-closed certificate on the assembled fleet
+    # command.  This is checked before any UAV state is mutated.
+    distributed_movement_preexecution_swept_certificate: bool = False
     # ACK-free self-stabilizing movement. Every viewer stores only the full
     # assignment reconstructed from its own delivered public-state cache.
     distributed_movement_local_assignment_cache_enabled: bool = False
@@ -1036,12 +1045,12 @@ class MARLParams:
     # P0 information source (B6). False (default) = ORACLE inner scheduler: P0 ranks
     # candidates on TRUE target geometry (upper bound). True = DEPLOYABLE: P0 ranks on
     # the fused belief estimate, while the realized deflection/P_D of the selected
-    # pairs still uses TRUE geometry (the physical echo). See docs/KNOWN_ISSUES.md B6.
+    # pairs still uses TRUE geometry (the physical echo). See docs/CURRENT_SYSTEM_MODEL.md B6.
     p0_uses_belief: bool = False
     # Belief–P_D coupling (B7). False (default) = optimistic (selected pair always
     # updates belief). True = Bernoulli detection gating: target q's belief updates
     # only if a detection event delta_q ~ Bernoulli(P_D_q) fires; else predict-only
-    # and AoI keeps growing. See docs/KNOWN_ISSUES.md B7.
+    # and AoI keeps growing. See docs/CURRENT_SYSTEM_MODEL.md B7.
     belief_detection_sampling: bool = False
     # Deterministic expected-information alternative to Bernoulli gating.
     # A detection probability p contributes expected measurement information

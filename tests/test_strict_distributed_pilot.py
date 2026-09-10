@@ -122,6 +122,15 @@ def test_risk_mix_changes_algorithm_identity_without_renaming_baseline():
         baseline + "-nominal-robust-riskmix-0p25")
 
 
+def test_packet_reconstructed_common_model_changes_algorithm_identity():
+    cfg = load_config(PILOT)
+    with_packet_model = _algorithm_version(cfg)
+    assert "-packet-model-rendezvous" in with_packet_model
+    cfg.marl.distributed_common_model_packet_reconstruction_enabled = False
+    assert _algorithm_version(cfg) == with_packet_model.replace(
+        "-packet-model-rendezvous", "")
+
+
 def test_expected_information_changes_identity_and_excludes_random_gating():
     cfg = load_config(PILOT)
     baseline = _algorithm_version(cfg)

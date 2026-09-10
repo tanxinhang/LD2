@@ -17,6 +17,7 @@ from uav_isac.coordination.maxmin_power import (
     fixed_owner_gain_matrix,
     solve_fixed_structure_maxmin_power_lp,
 )
+from uav_isac.coordination.hyperedge import project_pairwise_safe_movement
 from uav_isac.physical.deflection import DeflectionComputer
 from uav_isac.physical.channel import expected_report_link_reliability
 from uav_isac.physical.detection import compute_detection_probabilities
@@ -220,11 +221,16 @@ class MarkovPhysicalAssignmentModel:
         moving = distance > 1.0e-12
         displacement[moving] = (
             direction[moving] / distance[moving, None] * travel[moving, None])
-        next_uav_pos = uav_pos.copy()
-        next_uav_pos[:, :2] = np.clip(
-            uav_pos[:, :2] + displacement,
-            np.zeros(2), np.asarray(self.area_size_m),
+        safe_displacement = project_pairwise_safe_movement(
+            uav_pos[:, :2],
+            displacement,
+            minimum_distance_m=self.safe_distance_m,
+            maximum_step_m=self.movement_step_m,
+            area_size_xy=self.area_size_m,
+            independently_composable=True,
         )
+        next_uav_pos = uav_pos.copy()
+        next_uav_pos[:, :2] = uav_pos[:, :2] + safe_displacement
         next_uav_vel = np.zeros_like(next_uav_pos)
         next_uav_vel[:, :2] = (next_uav_pos[:, :2] - uav_pos[:, :2]) / self.dt_s
         return self.pack_state(
@@ -318,9 +324,19 @@ class MarkovPhysicalAssignmentModel:
         """Recompute expected physics and exact fixed-structure power."""
 
         uav_pos, uav_vel, target_pos, target_vel = self.unpack_state(state)
-        distances = np.linalg.norm(
+        target_distances = np.linalg.norm(
             uav_pos[:, None, :] - target_pos[None, :, :], axis=2)
-        feasible = bool(np.min(distances) >= self.safe_distance_m - 1.0e-12)
+        if self.K > 1:
+            pairwise = np.linalg.norm(
+                uav_pos[:, None, :2] - uav_pos[None, :, :2], axis=2)
+            pairwise[np.diag_indices(self.K)] = np.inf
+            minimum_uav_distance = float(np.min(pairwise))
+        else:
+            minimum_uav_distance = float("inf")
+        feasible = bool(
+            np.min(target_distances) >= self.safe_distance_m - 1.0e-12
+            and minimum_uav_distance >= self.safe_distance_m - 1.0e-12
+        )
         if not feasible:
             zeros_q = np.zeros(self.Q, dtype=np.float64)
             return MarkovPhysicalStageEvaluation(

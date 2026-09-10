@@ -40,6 +40,43 @@ DEFAULT_CARRIER_PERIOD = 3
 MULTIFRAME_QOS_FLOORS = (0.80, 0.70, 0.75)
 
 
+def _minimum_pairwise_distance(positions_xy: np.ndarray) -> float:
+    """Return the minimum distinct-node Euclidean distance."""
+
+    positions = np.asarray(positions_xy, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 2:
+        raise ValueError("positions_xy must have shape (K,2)")
+    if positions.shape[0] < 2:
+        return float("inf")
+    delta = positions[:, None, :] - positions[None, :, :]
+    distance = np.linalg.norm(delta, axis=2)
+    distance[np.diag_indices(positions.shape[0])] = np.inf
+    return float(np.min(distance))
+
+
+def _minimum_swept_pairwise_distance(
+    before_xy: np.ndarray, after_xy: np.ndarray,
+) -> float:
+    """Return exact minimum separation along simultaneous linear segments."""
+
+    before = np.asarray(before_xy, dtype=np.float64)
+    after = np.asarray(after_xy, dtype=np.float64)
+    if before.shape != after.shape or before.ndim != 2 or before.shape[1] != 2:
+        raise ValueError("before_xy and after_xy must have identical (K,2) shapes")
+    minimum = float("inf")
+    velocity = after - before
+    for left in range(before.shape[0]):
+        for right in range(left + 1, before.shape[0]):
+            relative = before[left] - before[right]
+            relative_velocity = velocity[left] - velocity[right]
+            denominator = float(relative_velocity @ relative_velocity)
+            fraction = 0.0 if denominator <= 1.0e-18 else float(np.clip(
+                -(relative @ relative_velocity) / denominator, 0.0, 1.0))
+            separation = relative + fraction * relative_velocity
+            minimum = min(minimum, float(np.linalg.norm(separation)))
+    return minimum
+
+
 _AUDITED_RUNTIME_MODULES = (
     "uav_isac.environment.env_core",
     "uav_isac.coordination.hyperedge",
@@ -170,6 +207,24 @@ def _algorithm_version(cfg: Any) -> str:
         )
     else:
         version = "strict-distributed-composable-owner-posterior-v2"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_replicated_power_common_model_certificate",
+        False,
+    )):
+        version += "-common-model-certified"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_common_model_packet_reconstruction_enabled",
+        False,
+    )):
+        version += "-packet-model-rendezvous"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_movement_preexecution_swept_certificate",
+        False,
+    )):
+        version += "-aoi-swept-certified"
     robust_mix = float(getattr(
         cfg.marl, "distributed_replicated_power_robust_gain_mix", 0.0))
     if robust_mix > 0.0:
@@ -206,6 +261,12 @@ def validate_strict_config(cfg: Any) -> None:
         "hyperedge_protocol_only_enabled": ma.hyperedge_protocol_only_enabled,
         "distributed_replicated_power_enabled": (
             ma.distributed_replicated_power_enabled),
+        "distributed_replicated_power_common_model_certificate": (
+            ma.distributed_replicated_power_common_model_certificate),
+        "distributed_common_model_packet_reconstruction_enabled": (
+            ma.distributed_common_model_packet_reconstruction_enabled),
+        "distributed_movement_preexecution_swept_certificate": (
+            ma.distributed_movement_preexecution_swept_certificate),
         "distributed_owner_posterior_enabled": (
             ma.distributed_owner_posterior_enabled),
         "analytical_sensing_power_enabled": ma.analytical_sensing_power_enabled,
@@ -217,6 +278,14 @@ def validate_strict_config(cfg: Any) -> None:
             + ", ".join(missing))
     if bool(ma.ground_communication_enabled):
         raise ValueError("strict distributed pilot forbids ground communication")
+    required_age_margin = float(
+        2.0 * cfg.uav.v_max * cfg.scenario.dt)
+    if float(ma.distributed_movement_safety_margin_per_age_m) + 1.0e-12 < (
+        required_age_margin
+    ):
+        raise ValueError(
+            "strict distributed pilot requires two-endpoint vmax*AoI "
+            "movement safety margin")
     if str(ma.detection_fusion_mode) != "local_only":
         raise ValueError("strict distributed pilot requires local_only fusion")
     if str(ma.hyperedge_pair_score_mode) != "budget_reconstructable":
@@ -269,6 +338,8 @@ def _episode(
     belief_rmse: list[float] = []
     power_resolve_fraction: list[float] = []
     power_reuse_fraction: list[float] = []
+    power_common_model_certificate: list[float] = []
+    power_common_model_fallback: list[float] = []
     power_solve_time_ms: list[float] = []
     power_parallel_critical_path_ms: list[float] = []
     power_process_parallel_used: list[float] = []
@@ -308,6 +379,13 @@ def _episode(
     radio_critical_path_ms: list[float] = []
     closed_loop_critical_path_ms: list[float] = []
     step_seconds: list[float] = []
+    inter_uav_min_distance_m: list[float] = []
+    inter_uav_swept_min_distance_m: list[float] = []
+    preexecution_swept_min_distance_m: list[float] = []
+    preexecution_swept_fail_closed: list[float] = []
+    isac_power_budget_violation_w: list[float] = []
+    minimum_battery_j: list[float] = []
+    energy_causality_violation_j: list[float] = []
     uav_position_trace: list[np.ndarray] = []
     sensing_power_trace: list[np.ndarray] = []
     certificate_safe_gain_trace: list[np.ndarray] = []
@@ -369,6 +447,8 @@ def _episode(
                     core._distributed_replicated_power_executor.batch_timeout_s)
                 core._distributed_replicated_power_executor.batch_timeout_s = 1.0e-9
             step_started = time.perf_counter()
+            positions_before = np.asarray(
+                [uav.pos[:2] for uav in core.uavs], dtype=np.float64)
             observations, _rewards, terminated, _truncated, info = env.step(
                 actions)
             if (
@@ -378,6 +458,23 @@ def _episode(
                 core._distributed_replicated_power_executor.batch_timeout_s = (
                     injected_timeout_original)
             step_seconds.append(time.perf_counter() - step_started)
+            positions_after = np.asarray(
+                [uav.pos[:2] for uav in core.uavs], dtype=np.float64)
+            inter_uav_min_distance_m.append(
+                _minimum_pairwise_distance(positions_after))
+            inter_uav_swept_min_distance_m.append(
+                _minimum_swept_pairwise_distance(
+                    positions_before, positions_after))
+            preexecution_swept_min_distance_m.append(float(info.get(
+                "movement_preexecution_swept_minimum_m", float("inf"))))
+            preexecution_swept_fail_closed.append(float(info.get(
+                "movement_preexecution_swept_fail_closed", 0.0)))
+            isac_power_budget_violation_w.append(float(info.get(
+                "isac_max_power_budget_violation_w", 0.0)))
+            minimum_battery_j.append(float(min(
+                uav.battery for uav in core.uavs)))
+            energy_causality_violation_j.append(float(max(
+                uav.max_energy_deficit_j for uav in core.uavs)))
             detection.append(np.asarray(info["P_D_q"], dtype=np.float64))
             detection_deflection.append(np.asarray(
                 info["detection_deflection_q"], dtype=np.float64))
@@ -493,6 +590,12 @@ def _episode(
                 "distributed_replicated_power_resolve_fraction", 1.0)))
             power_reuse_fraction.append(float(info.get(
                 "distributed_replicated_power_reuse_fraction", 0.0)))
+            power_common_model_certificate.append(float(info.get(
+                "distributed_replicated_power_common_model_certificate",
+                0.0)))
+            power_common_model_fallback.append(float(info.get(
+                "distributed_replicated_power_common_model_fallback_fraction",
+                0.0)))
             power_solve_time_ms.append(1000.0 * float(info.get(
                 "distributed_replicated_power_solve_time_s", 0.0)))
             power_parallel_critical_path_ms.append(1000.0 * float(info.get(
@@ -642,9 +745,27 @@ def _episode(
         "hyperedge_coverage": float(np.mean(coverage)),
         "final_hyperedge_coverage": float(coverage[-1]),
         "movement_target_coverage": float(np.mean(movement_coverage)),
+        "inter_uav_min_distance_m": float(np.min(
+            inter_uav_min_distance_m, initial=float("inf"))),
+        "inter_uav_swept_min_distance_m": float(np.min(
+            inter_uav_swept_min_distance_m, initial=float("inf"))),
+        "preexecution_swept_min_distance_m": float(np.min(
+            preexecution_swept_min_distance_m, initial=float("inf"))),
+        "preexecution_swept_fail_closed_fraction": float(np.mean(
+            preexecution_swept_fail_closed)),
+        "isac_max_power_budget_violation_w": float(np.max(
+            isac_power_budget_violation_w, initial=0.0)),
+        "minimum_battery_j": float(np.min(
+            minimum_battery_j, initial=float("inf"))),
+        "energy_causality_violation_j": float(np.max(
+            energy_causality_violation_j, initial=0.0)),
         "belief_position_rmse_m": float(np.nanmean(belief_rmse)),
         "power_resolve_fraction": float(np.mean(power_resolve_fraction)),
         "power_reuse_fraction": float(np.mean(power_reuse_fraction)),
+        "power_common_model_certificate_fraction": float(np.mean(
+            power_common_model_certificate)),
+        "power_common_model_fallback_fraction": float(np.mean(
+            power_common_model_fallback)),
         "power_solve_time_ms": float(np.mean(power_solve_time_ms)),
         "power_parallel_critical_path_ms": float(np.mean(
             power_parallel_critical_path_ms)),

@@ -29,6 +29,12 @@ def _episode(seed: int, success: bool) -> dict:
         "closed_loop_critical_path_p95_ms": 35.0,
         "delivery_rate": 1.0,
         "deadline_violation_rate": 0.0,
+        "inter_uav_min_distance_m": 25.0,
+        "inter_uav_swept_min_distance_m": 24.0,
+        "preexecution_swept_min_distance_m": 24.0,
+        "isac_max_power_budget_violation_w": 0.0,
+        "minimum_battery_j": 1000.0,
+        "energy_causality_violation_j": 0.0,
     }
 
 

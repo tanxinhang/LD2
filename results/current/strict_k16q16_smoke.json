@@ -1,0 +1,63 @@
+{
+  "schema_version": "strict-k16q16-diagnostic-summary/v3",
+  "generated_date": "2026-09-10",
+  "scope": "two-seed 30-frame packet-model-rendezvous diagnostic smoke; not formal evidence",
+  "source_artifact": "artifacts/runs/pilot-6c77b5083922176cb920/raw/result.json",
+  "config": "config/exp_strict_distributed_k16q16.yaml",
+  "algorithm_version": "strict-distributed-composable-owner-posterior-v3-process-parallel-common-model-certified-packet-model-rendezvous-aoi-swept-certified",
+  "formal_eligible": false,
+  "formal_ineligibility_reason": "dirty workspace and insufficient confirmatory horizon/seed bank",
+  "frames": 30,
+  "tail_window": 20,
+  "seeds": [11033, 10361],
+  "summary": {
+    "qos_rate": 0.5,
+    "delivery_rate": 1.0,
+    "steady_detection_mean": 0.8377214541902368,
+    "weak3_detection_mean": 0.6847018735351338,
+    "worst_detection_mean": 0.6069683073951193,
+    "bits_per_frame": 2412.8,
+    "deadline_violation_rate": 0.0,
+    "hyperedge_coverage": 1.0,
+    "minimum_endpoint_inter_uav_distance_m": 32.621448080268394,
+    "minimum_swept_inter_uav_distance_m": 32.621448080268394,
+    "minimum_preexecution_swept_certificate_m": 32.621448080268394,
+    "preexecution_swept_fail_closed_fraction": 0.0,
+    "maximum_isac_power_budget_violation_w": 0.0,
+    "minimum_battery_j": 49669.3684155438,
+    "maximum_preclamp_energy_deficit_j": 0.0,
+    "common_model_certificate_fraction": 0.3,
+    "common_model_fallback_fraction": 0.7
+  },
+  "episodes": [
+    {
+      "seed": 11033,
+      "qos_success": false,
+      "steady": 0.7790041625923894,
+      "weak3": 0.6575898911258878,
+      "worst": 0.593347255651927,
+      "energy_causality_violation_j": 0.0,
+      "common_model_certificate_fraction": 0.3,
+      "common_model_fallback_fraction": 0.7
+    },
+    {
+      "seed": 10361,
+      "qos_success": true,
+      "steady": 0.8964387457880842,
+      "weak3": 0.7118138559443797,
+      "worst": 0.6205893591383117,
+      "energy_causality_violation_j": 0.0,
+      "common_model_certificate_fraction": 0.3,
+      "common_model_fallback_fraction": 0.7
+    }
+  ],
+  "hard_constraint_diagnostics": {
+    "inter_uav_distance_floor_m": 20.0,
+    "endpoint_distance_pass": true,
+    "swept_distance_pass": true,
+    "power_budget_pass": true,
+    "energy_causality_pass": true,
+    "delivery_pass": true,
+    "common_model_row_stitching_blocked_on_mismatch": true
+  }
+}

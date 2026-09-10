@@ -61,6 +61,6 @@ programs:
     state: shadow_incomplete
     implementation: uav_isac/prediction/certified_gnn.py
     profile: config/exp_strict_distributed_k16q16.yaml
-    evidence: docs/PREDICTIVE_CERTIFIED_ARCHITECTURE_2026-09-07.md
+    evidence: docs/EXPERIMENT_LOG.md
     formal_eligible: false
     next_gate: Wire native-physics recomputation and fallback gates before any environment authority.

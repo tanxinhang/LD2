@@ -41,7 +41,7 @@ completed_gates:
   - algorithm_optimization_approved
 
 authoritative_documents:
-  architecture: docs/architecture_v2/TARGET_ARCHITECTURE.md
-  migration: docs/architecture_v2/MIGRATION_PLAN.md
-  data_lifecycle: docs/architecture_v2/DATA_LIFECYCLE.md
-  inventory: docs/architecture_v2/CURRENT_INVENTORY.md
+  architecture: docs/CURRENT_SYSTEM_MODEL.md
+  migration: docs/CURRENT_SYSTEM_MODEL.md
+  data_lifecycle: docs/EXPERIMENT_LOG.md
+  inventory: docs/CURRENT_SYSTEM_MODEL.md

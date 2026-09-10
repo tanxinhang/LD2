@@ -134,6 +134,12 @@ def _write_current_evidence(
                 "delivery_rate_ge_0_99": True,
                 "deadline_violation_rate_le_0_01": True,
                 "every_seed_closed_loop_p95_le_100ms": True,
+                "every_seed_inter_uav_distance_ge_20m": True,
+                "every_seed_swept_inter_uav_distance_ge_20m": True,
+                "every_seed_preexecution_swept_certificate_ge_20m": True,
+                "every_seed_isac_power_budget_valid": True,
+                "every_seed_battery_nonnegative": True,
+                "every_seed_energy_causality_valid": True,
             },
         },
         "episodes": [{
@@ -142,6 +148,12 @@ def _write_current_evidence(
             "delivery_rate": 1.0,
             "deadline_violation_rate": 0.0,
             "closed_loop_critical_path_p95_ms": 20.0,
+            "inter_uav_min_distance_m": 25.0,
+            "inter_uav_swept_min_distance_m": 24.0,
+            "preexecution_swept_min_distance_m": 24.0,
+            "isac_max_power_budget_violation_w": 0.0,
+            "minimum_battery_j": 1000.0,
+            "energy_causality_violation_j": 0.0,
         } for seed in seeds],
     }
     manifest_path = tmp_path / "completed.json"
@@ -477,7 +489,7 @@ def test_render_table_lists_every_result():
 def test_d1_5_blind_registry_point_estimate_passes_lcb_disclosed():
     """D1.5 blind 100: point estimate passes the QoS gate; the LCB-enforced
     row is present and honestly reports FAIL (0.636 < 0.70), matching the
-    documented statistical-power limitation (docs/KNOWN_ISSUES.md)."""
+    documented statistical-power limitation (docs/CURRENT_SYSTEM_MODEL.md)."""
     point = [r for r in FORMAL_RESULTS
              if "D1.5 blind (100 seeds)" in r.name and not r.require_lcb]
     lcb = [r for r in FORMAL_RESULTS
@@ -494,7 +506,7 @@ def test_d1_5_blind_registry_point_estimate_passes_lcb_disclosed():
 def test_d1_9_blind_registry_passes_point_and_lcb():
     """D1.9 bottleneck-lookahead blind 100: both the point-estimate and the
     LCB-enforced rows must PASS (QoS 0.950 / LCB 0.888 >= 0.70), closing the
-    D1.5 statistical-power gap (docs/OPTIMIZATION_LOG.md D1.9)."""
+    D1.5 statistical-power gap (docs/EXPERIMENT_LOG.md D1.9)."""
     point = [r for r in FORMAL_RESULTS
              if "D1.9 bottleneck-lookahead blind (100 seeds)" in r.name
              and not r.require_lcb]
@@ -514,7 +526,7 @@ def test_d1_10_indep_blind_registry_passes_point_and_lcb():
     """D1.10-A independent-env blind 100: both rows PASS under the
     statistically correct per-seed independent sampling (QoS 0.940 / LCB
     0.875 >= 0.70), confirming the certification is protocol-robust
-    (docs/OPTIMIZATION_LOG.md D1.10)."""
+    (docs/EXPERIMENT_LOG.md D1.10)."""
     point = [r for r in FORMAL_RESULTS
              if "D1.10 indep-env blind (100 seeds" in r.name
              and not r.require_lcb]

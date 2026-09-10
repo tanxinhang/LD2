@@ -295,12 +295,33 @@ def test_active_message_is_quantized_delivered_and_charged():
 
     assert stats.total_bits == 64 + 16 * 4
     assert stats.total_energy_j > 0.0
+    assert stats.total_energy_j == pytest.approx(
+        stats.per_sender_power_w[0] * stats.per_sender_airtime_s[0])
     assert stats.attempted_links == 1
     assert stats.delivered_links == 1
     assert stats.mean_latency_s > 0.0
     assert len(deliveries) == 1
     assert deliveries[0].sender == 0 and deliveries[0].receiver == 1
     assert not np.array_equal(deliveries[0].message, message)
+
+
+def test_broadcast_uses_one_common_sender_airtime_not_per_receiver_sum():
+    model = _transport()
+    positions = np.asarray([
+        [0.0, 0.0, 20.0],
+        [40.0, 0.0, 20.0],
+        [100.0, 0.0, 20.0],
+    ])
+
+    _deliveries, stats = model.transmit(
+        {0: np.ones(16)}, {0: 1}, positions)
+
+    airtime = stats.per_sender_airtime_s[0]
+    assert 0.0 < airtime <= model.deadline_s
+    assert stats.per_sender_energy_j[0] == pytest.approx(
+        model.tx_power_w * airtime)
+    assert stats.total_energy_j == pytest.approx(
+        stats.per_sender_energy_j[0])
 
 
 def test_missed_deadline_still_consumes_bits_and_energy():

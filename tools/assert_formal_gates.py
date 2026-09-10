@@ -71,6 +71,12 @@ _THREAD_VARIABLES = (
 _ALLOWED_CURRENT_ALGORITHMS = {
     "strict-distributed-owner-posterior-bistatic-v3",
     "strict-distributed-owner-posterior-bistatic-v4-process-parallel",
+    "strict-distributed-owner-posterior-bistatic-v3-common-model-certified",
+    "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified",
+    "strict-distributed-owner-posterior-bistatic-v3-common-model-certified-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v3-common-model-certified-packet-model-rendezvous-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-packet-model-rendezvous-aoi-swept-certified",
 }
 
 # These files govern discovery, packaging, and evidence presentation but are
@@ -922,6 +928,11 @@ def _validate_post_g2_evidence(
             "delivery_rate_min": 0.99,
             "deadline_violation_rate_max": 0.01,
             "closed_loop_p95_ms_max": 100.0,
+            "inter_uav_min_distance_m": 20.0,
+            "preexecution_swept_min_distance_m": 20.0,
+            "isac_power_budget_violation_w_max": 1.0e-9,
+            "minimum_battery_j_min": 0.0,
+            "energy_causality_violation_j_max": 0.0,
         },
     }
     mismatched_spec = [
@@ -975,6 +986,12 @@ def _validate_post_g2_evidence(
     delivery_values = []
     deadline_values = []
     closed_loop_values = []
+    inter_uav_values = []
+    swept_inter_uav_values = []
+    preexecution_swept_values = []
+    power_violation_values = []
+    minimum_battery_values = []
+    energy_deficit_values = []
     for index, episode in enumerate(episodes):
         record = _require_mapping(
             episode, f"episodes[{index}]")
@@ -986,6 +1003,12 @@ def _validate_post_g2_evidence(
             ("delivery_rate", delivery_values),
             ("deadline_violation_rate", deadline_values),
             ("closed_loop_critical_path_p95_ms", closed_loop_values),
+            ("inter_uav_min_distance_m", inter_uav_values),
+            ("inter_uav_swept_min_distance_m", swept_inter_uav_values),
+            ("preexecution_swept_min_distance_m", preexecution_swept_values),
+            ("isac_max_power_budget_violation_w", power_violation_values),
+            ("minimum_battery_j", minimum_battery_values),
+            ("energy_causality_violation_j", energy_deficit_values),
         ):
             try:
                 number = float(record[key])
@@ -1000,7 +1023,15 @@ def _validate_post_g2_evidence(
             ):
                 raise ValueError(
                     f"post-G2 episode {index} has out-of-range {key}")
-            if key == "closed_loop_critical_path_p95_ms" and number < 0.0:
+            if key in {
+                "closed_loop_critical_path_p95_ms",
+                "inter_uav_min_distance_m",
+                "inter_uav_swept_min_distance_m",
+                "preexecution_swept_min_distance_m",
+                "isac_max_power_budget_violation_w",
+                "minimum_battery_j",
+                "energy_causality_violation_j",
+            } and number < 0.0:
                 raise ValueError(
                     f"post-G2 episode {index} has negative {key}")
             destination.append(number)
@@ -1015,6 +1046,12 @@ def _validate_post_g2_evidence(
     delivery_mean = sum(delivery_values) / len(delivery_values)
     deadline_mean = sum(deadline_values) / len(deadline_values)
     worst_closed_loop = max(closed_loop_values)
+    minimum_inter_uav = min(inter_uav_values)
+    minimum_swept_inter_uav = min(swept_inter_uav_values)
+    minimum_preexecution_swept = min(preexecution_swept_values)
+    maximum_power_violation = max(power_violation_values)
+    minimum_battery = min(minimum_battery_values)
+    maximum_energy_deficit = max(energy_deficit_values)
     strict_failures = []
     if qos_lcb < 0.80:
         strict_failures.append(f"QoS one-sided Wilson LCB {qos_lcb:.4f} < 0.80")
@@ -1030,6 +1067,26 @@ def _validate_post_g2_evidence(
     if worst_closed_loop > 100.0:
         strict_failures.append(
             f"per-seed closed-loop P95 {worst_closed_loop:.4f} ms > 100 ms")
+    if minimum_inter_uav < 20.0 - 1.0e-8:
+        strict_failures.append(
+            f"endpoint UAV separation {minimum_inter_uav:.6f} m < 20 m")
+    if minimum_swept_inter_uav < 20.0 - 1.0e-8:
+        strict_failures.append(
+            f"continuous UAV separation {minimum_swept_inter_uav:.6f} m < 20 m")
+    if minimum_preexecution_swept < 20.0 - 1.0e-8:
+        strict_failures.append(
+            "pre-execution swept certificate "
+            f"{minimum_preexecution_swept:.6f} m < 20 m")
+    if maximum_power_violation > 1.0e-9:
+        strict_failures.append(
+            f"ISAC power-budget violation {maximum_power_violation:.3e} W > 1e-9 W")
+    if minimum_battery < 0.0:
+        strict_failures.append(
+            f"minimum battery {minimum_battery:.6f} J < 0 J")
+    if maximum_energy_deficit > 0.0:
+        strict_failures.append(
+            "pre-clamp energy-causality deficit "
+            f"{maximum_energy_deficit:.6f} J > 0 J")
     if strict_failures:
         raise ValueError(
             "post-G2 strict-bank gate failed: " + "; ".join(strict_failures))
@@ -1040,6 +1097,12 @@ def _validate_post_g2_evidence(
         "delivery_rate_ge_0_99",
         "deadline_violation_rate_le_0_01",
         "every_seed_closed_loop_p95_le_100ms",
+        "every_seed_inter_uav_distance_ge_20m",
+        "every_seed_swept_inter_uav_distance_ge_20m",
+        "every_seed_preexecution_swept_certificate_ge_20m",
+        "every_seed_isac_power_budget_valid",
+        "every_seed_battery_nonnegative",
+        "every_seed_energy_causality_valid",
     )
     if any(gates.get(name) is not True for name in required_gates):
         raise ValueError(

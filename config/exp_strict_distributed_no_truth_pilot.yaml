@@ -85,6 +85,10 @@ marl:
   hyperedge_robust_quantization_enabled: true
   hyperedge_safety_fallback_enabled: false
   distributed_replicated_power_enabled: true
+  # Independent local LP rows may be assembled only from byte-identical
+  # coefficient views; otherwise execute the composable row-safe fallback.
+  distributed_replicated_power_common_model_certificate: true
+  distributed_common_model_packet_reconstruction_enabled: true
   # Compose the executed private rows at deterministic target responsibility
   # nodes. Reports are downward-quantized lower contributions and their exact
   # payload is billed to the same physical U2U carrier.

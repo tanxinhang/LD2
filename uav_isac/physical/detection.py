@@ -130,7 +130,7 @@ def compute_target_utilities(
 
     U_q = -log(1 - P_D^q)
 
-    WARNING (see docs/KNOWN_ISSUES.md B8): this is monotone INCREASING but
+    WARNING (see docs/CURRENT_SYSTEM_MODEL.md §6.3): this is monotone INCREASING but
     NOT concave in D_q (it is convex in P_D, and empirically U''(D)>0 over
     ~99.6% of the relevant range). It therefore does NOT make the inner P0
     objective submodular; the P0 greedy has no (1-1/e) guarantee and must be

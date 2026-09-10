@@ -12,6 +12,7 @@ from uav_isac.coordination.maxmin_power import (
     optimal_maxmin_dual_prices,
     relaxed_same_geometry_target_ceiling,
     replicated_local_row_maxmin_power,
+    sparse_harmonic_row_power,
     solve_fixed_structure_maxmin_power_lp,
 )
 from uav_isac.coordination.maxmin_power import (
@@ -339,6 +340,33 @@ def test_replicated_local_rows_remain_budget_feasible_with_cache_loss():
     assert np.all(result.power_w >= 0.0)
     np.testing.assert_allclose(
         np.sum(result.power_w, axis=1), executed_budget, atol=1.0e-12)
+
+
+def test_common_model_certificate_prevents_unsafe_row_stitching():
+    views = np.repeat(np.asarray([
+        [2.0, 0.4],
+        [0.3, 1.5],
+    ])[None, :, :], 2, axis=0)
+    views[1, 0] = np.asarray([0.1, 4.0])
+    budget = np.asarray([0.8, 0.7])
+    safe_gain = np.asarray([
+        [1.0, 2.0],
+        [4.0, 1.0],
+    ])
+
+    result = replicated_local_row_maxmin_power(
+        views,
+        budget,
+        deadline_safe_row_gain_per_watt=safe_gain,
+        require_common_model_certificate=True,
+    )
+
+    assert not result.common_model_certificate
+    assert result.common_model_fallback_fraction == 1.0
+    assert result.unique_local_problem_count == 0
+    assert not np.any(result.local_cache_valid)
+    expected = sparse_harmonic_row_power(safe_gain, budget)
+    np.testing.assert_allclose(result.power_w, expected, atol=1.0e-12)
 
 
 def test_replicated_local_power_reuses_only_each_valid_private_certificate():

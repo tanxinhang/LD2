@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_isac.physical.deflection import DeflectionComputer
+from config.params import load_config
 from uav_isac.prediction.markov_assignment import (
     build_target_priority_swap_neighborhood,
 )
@@ -40,8 +41,10 @@ def benchmark(
     *, seed: int, cases: int, cardinality: int, neighbors: int,
     blind_candidates: int, position_std_m: float = 0.0,
     velocity_std_mps: float = 0.0, uncertainty_penalty_std: float = 0.0,
+    config_path: str = "config/exp_research_interference_l4_noise_loaded.yaml",
 ) -> dict:
     rng = np.random.default_rng(int(seed))
+    cfg = load_config(config_path)
     K = Q = int(cardinality)
     if K < 4 or K % 2:
         raise ValueError("cardinality must be an even integer at least four")
@@ -55,7 +58,7 @@ def benchmark(
         for target in range(Q)
     )
     budget = np.concatenate((
-        np.full(half, 0.0251), np.zeros(half),
+        np.full(half, float(cfg.uav.P_sense_max)), np.zeros(half),
     ))
     position_std = float(position_std_m)
     velocity_std = float(velocity_std_mps)
@@ -76,27 +79,41 @@ def benchmark(
     rows = []
     for case in range(int(cases)):
         dc = DeflectionComputer(
-            fc=2.8e10, delta_f=1.5625e4, T_sym=6.4e-5, M=64, N=16,
-            kT=4.0e-21, B=1.0e6, NF_dB=8.0,
-            P_sense=0.0251, P_report=0.25, ric_K=6.0,
-            rcs=1.0, g_min=0.5,
+            fc=cfg.otfs.fc, delta_f=cfg.otfs.delta_f,
+            T_sym=cfg.otfs.T_sym, M=cfg.otfs.M, N=cfg.otfs.N,
+            kT=cfg.channel.kT, B=cfg.otfs.B, NF_dB=cfg.channel.NF,
+            P_sense=cfg.uav.P_sense, P_report=cfg.uav.P_report,
+            ric_K=cfg.channel.ric_K, rcs=cfg.target.rcs,
+            g_min=cfg.detection.g_min,
             rng=np.random.default_rng(int(seed) + 10000 + case),
-            g_tx_dBi=16.0, g_rx_dBi=16.0,
-            use_los_prob=True, use_swerling=True, use_report_link=True,
-            dd_gain_mode="continuous", sync_delay_error_bins=0.2,
-            sync_doppler_error_bins=-0.2,
+            g_tx_dBi=cfg.otfs.g_tx_dBi, g_rx_dBi=cfg.otfs.g_rx_dBi,
+            use_los_prob=cfg.channel.use_los_prob,
+            use_swerling=cfg.channel.use_swerling, use_report_link=True,
+            dd_gain_mode=cfg.detection.dd_gain_mode,
+            sync_delay_error_bins=cfg.channel.sync_delay_error_bins,
+            sync_doppler_error_bins=cfg.channel.sync_doppler_error_bins,
         )
+        area_x, area_y = (float(value) for value in cfg.scenario.region_size)
+        height = float(cfg.scenario.height)
         model = MarkovPhysicalAssignmentModel(
-            dc, selected, budget, roles, np.array([500.0, 500.0, 0.0]),
-            num_targets=Q, dt_s=0.1, movement_step_m=2.5,
-            area_size_m=(1000.0, 1000.0), false_alarm_probability=0.01,
-            safe_distance_m=20.0, weak_count=min(3, Q), weak_weight=0.25,
+            dc, selected, budget, roles,
+            np.array([area_x / 2.0, area_y / 2.0, 0.0]),
+            num_targets=Q, dt_s=float(cfg.scenario.dt),
+            movement_step_m=float(cfg.uav.v_max * cfg.scenario.dt),
+            area_size_m=(area_x, area_y),
+            false_alarm_probability=float(cfg.detection.P_FA),
+            safe_distance_m=float(cfg.uav.d_safe),
+            weak_count=min(3, Q), weak_weight=0.25,
             target_covariance_horizon=covariance_horizon,
             uncertainty_penalty_std=uncertainty_penalty,
         )
-        uav_pos = rng.uniform(80.0, 920.0, size=(K, 3))
-        uav_pos[:, 2] = 100.0
-        target_pos = rng.uniform(100.0, 900.0, size=(Q, 3))
+        uav_pos = rng.uniform(
+            [0.08 * area_x, 0.08 * area_y, height],
+            [0.92 * area_x, 0.92 * area_y, height], size=(K, 3))
+        uav_pos[:, 2] = height
+        target_pos = rng.uniform(
+            [0.10 * area_x, 0.10 * area_y, 0.0],
+            [0.90 * area_x, 0.90 * area_y, 0.0], size=(Q, 3))
         target_pos[:, 2] = 0.0
         target_vel = rng.normal(0.0, 8.0, size=(Q, 3))
         target_vel[:, 2] = 0.0
@@ -161,6 +178,7 @@ def benchmark(
         "cases": int(cases),
         "K": K,
         "Q": Q,
+        "config": str(config_path),
         "knn_neighbors": int(neighbors),
         "blind_candidate_cap": int(blind_candidates),
         "position_std_m": position_std,
@@ -207,6 +225,9 @@ def main() -> int:
     parser.add_argument("--position-std-m", type=float, default=0.0)
     parser.add_argument("--velocity-std-mps", type=float, default=0.0)
     parser.add_argument("--uncertainty-penalty-std", type=float, default=0.0)
+    parser.add_argument(
+        "--config",
+        default="config/exp_research_interference_l4_noise_loaded.yaml")
     parser.add_argument("--output", type=str)
     args = parser.parse_args()
     result = benchmark(
@@ -214,7 +235,8 @@ def main() -> int:
         neighbors=args.neighbors, blind_candidates=args.blind_candidates,
         position_std_m=args.position_std_m,
         velocity_std_mps=args.velocity_std_mps,
-        uncertainty_penalty_std=args.uncertainty_penalty_std)
+        uncertainty_penalty_std=args.uncertainty_penalty_std,
+        config_path=args.config)
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

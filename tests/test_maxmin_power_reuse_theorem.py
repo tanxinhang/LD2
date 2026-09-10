@@ -1,6 +1,6 @@
 """O8 / T5 property tests: reuse / warm-start is a CERTIFICATE, not a heuristic.
 
-T5 (roadmap docs/ALGORITHM_PERFORMANCE_ROADMAP_2026-08-29.md §3):
+T5 (roadmap docs/CURRENT_SYSTEM_MODEL.md §3):
   1. Constructive feasibility: the held allocation is normalized row-wise and
      rescaled to the CURRENT budget (maxmin_power.py:592-600), so a reused
      solution is non-negative with per-row sum == public budget -- feasibility

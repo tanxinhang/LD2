@@ -59,6 +59,10 @@ class UAV:
         self.pos = initial_pos.astype(np.float64).copy()
         self.vel = np.zeros(3, dtype=np.float64)
         self.battery = float(B_max)
+        # Battery state is clamped for simulator stability, so the state alone
+        # cannot prove energy causality.  Preserve the largest pre-clamp
+        # shortfall as an explicit, monotone audit variable.
+        self.max_energy_deficit_j = 0.0
         self.role = 2  # idle by default
 
         # Ensure fixed altitude
@@ -112,19 +116,50 @@ class UAV:
         self.role = int(role)
 
         # Compute and deduct energy
-        flight_energy = self._compute_flight_energy(delta_p)
-        self.battery -= flight_energy
+        total_energy = self._compute_flight_energy(delta_p)
 
         if account_radio_energy:
             if self.role == 0:  # tx
-                self.battery -= self.P_sense * self.dt
+                total_energy += self.P_sense * self.dt
             elif self.role == 1:  # rx
-                self.battery -= self.P_report * self.dt
+                total_energy += self.P_report * self.dt
         # idle: no extra energy beyond flight
+        self.deduct_energy(total_energy)
 
-        # Floor battery at 0
-        if self.battery < 0.0:
-            self.battery = 0.0
+    def deduct_energy(self, energy_j: float) -> float:
+        """Deduct non-negative energy and retain the unclipped deficit.
+
+        Returns the raw battery value before the public simulator state is
+        clamped to zero.  ``max_energy_deficit_j`` therefore makes an energy
+        causality gate meaningful even though ``battery`` remains non-negative.
+        """
+        amount = float(energy_j)
+        if not np.isfinite(amount) or amount < 0.0:
+            raise ValueError("energy_j must be finite and non-negative")
+        raw_battery = float(self.battery - amount)
+        self.max_energy_deficit_j = max(
+            float(self.max_energy_deficit_j), max(-raw_battery, 0.0))
+        self.battery = max(raw_battery, 0.0)
+        return raw_battery
+
+    def set_battery_after_deduction(
+        self,
+        baseline_battery_j: float,
+        energy_j: float,
+        baseline_max_deficit_j: float | None = None,
+    ) -> float:
+        """Recompute a provisional deduction without retaining its artifact."""
+        baseline = float(baseline_battery_j)
+        if not np.isfinite(baseline) or baseline < 0.0:
+            raise ValueError("baseline battery must be finite and non-negative")
+        if baseline_max_deficit_j is not None:
+            deficit = float(baseline_max_deficit_j)
+            if not np.isfinite(deficit) or deficit < 0.0:
+                raise ValueError(
+                    "baseline maximum deficit must be finite and non-negative")
+            self.max_energy_deficit_j = deficit
+        self.battery = baseline
+        return self.deduct_energy(energy_j)
 
     def _compute_flight_energy(self, delta_p: np.ndarray) -> float:
         """Compute flight energy for this frame.
@@ -169,4 +204,5 @@ class UAV:
         self.pos[2] = self.height
         self.vel = np.zeros(3, dtype=np.float64)
         self.battery = float(self.B_max)
+        self.max_energy_deficit_j = 0.0
         self.role = 2  # idle

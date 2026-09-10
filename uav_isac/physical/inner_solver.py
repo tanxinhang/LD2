@@ -1,7 +1,7 @@
 """Heuristic marginal-utility greedy P0 inner solver.
 
 (Historically labelled "monotone submodular" — that is INCORRECT under the
-current utility; see the utility note below and docs/KNOWN_ISSUES.md B8.)
+current utility; see the utility note below and docs/CURRENT_SYSTEM_MODEL.md §6.3.)
 
 Solves the inner-layer problem: given geometry (UAV/target positions,
 roles, Deflection entries), select bistatic reporting assignments
@@ -12,7 +12,7 @@ z_ijq ∈ {0, 1} to maximize weighted detection utility subject to:
   (C3) Cardinality: |S_q| <= K_q_max   per target q
 
 Utility: U_q(D_q) = -log(1 - P_D(D_q)), monotone INCREASING but NOT concave in
-D_q (see docs/KNOWN_ISSUES.md B8: convex in P_D; U''(D)>0 over ~99.6% of range).
+D_q (see docs/CURRENT_SYSTEM_MODEL.md §6.3: convex in P_D; U''(D)>0 over ~99.6% of range).
 Hence F(S) = sum_q ω_q * U_q(Σ_{e∈S_q} d_eff_e) is NOT submodular and the greedy
 below is a HEURISTIC with no (1-1/e) guarantee. A saturating utility concave in
 D (e.g. 1-exp(-kD)) would restore submodularity.
@@ -34,7 +34,7 @@ from uav_isac.utils.math_utils import (
 
 class InnerSolver:
     """P0 inner-layer solver: heuristic marginal-utility greedy + exhaustive verifier.
-    (Not submodular under the current non-concave utility; see KNOWN_ISSUES B8.)"""
+    (Not submodular under the current non-concave utility; see CURRENT_SYSTEM_MODEL §6.3.)"""
 
     def __init__(
         self,
@@ -98,7 +98,7 @@ class InnerSolver:
         ~99.6% of the relevant range; marginal gain is increasing, not
         diminishing). So treat this as a heuristic. To recover the guarantee,
         switch to a saturating utility concave in D, e.g. 1-exp(-kD).
-        See docs/KNOWN_ISSUES.md B8.
+        See docs/CURRENT_SYSTEM_MODEL.md §6.3.
 
         Algorithm:
         1. Filter to valid entries (d_eff > 0)

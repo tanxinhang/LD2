@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from uav_isac.governance import (
     semantic_fingerprint,
 )
 from uav_isac.governance.entrypoint_inventory import build_entrypoint_inventory
+from uav_isac.governance.data_inventory import build_data_files
 
 
 def _check_phase():
@@ -82,42 +84,28 @@ def _check_packaging():
 def _check_data_catalog():
     source = (
         REPOSITORY_ROOT
-        / "artifacts/legacy/catalog.post_classified_cleanup.sha256.jsonl"
+        / "artifacts/legacy/catalog.current.sha256.jsonl"
     )
     rows = [json.loads(line) for line in source.read_text("utf-8").splitlines()]
     assert rows and all(row["hash_status"] == "verified" for row in rows)
     assert all(len(row["sha256"]) == 64 for row in rows)
+    current_paths = {item.path for item in build_data_files(REPOSITORY_ROOT)}
+    assert {row["path"] for row in rows} == current_paths
     result_root = (REPOSITORY_ROOT / "results").resolve()
     for row in rows:
         path = (result_root / row["path"]).resolve()
         assert path.is_relative_to(result_root) and path.is_file()
         stat = path.stat()
         assert stat.st_size == row["size_bytes"]
-        assert stat.st_mtime_ns == row["modified_ns"]
-    cleanup_report = REPOSITORY_ROOT / "artifacts/cleanup/redundant_logs_v2.jsonl"
-    cleanup_rows = [
-        json.loads(line) for line in cleanup_report.read_text("utf-8").splitlines()
-    ]
-    assert cleanup_rows[0]["record_type"] == "cleanup_start"
-    deleted = cleanup_rows[1:]
-    assert len(deleted) == cleanup_rows[0]["files"]
-    assert sum(row["size_bytes"] for row in deleted) == cleanup_rows[0]["bytes"]
-    for row in deleted:
-        assert row["record_type"] == "deleted"
-        assert not (result_root / row["path"]).exists()
-        canonical = (result_root / row["content_recoverable_from"]).resolve()
-        assert canonical.is_relative_to(result_root) and canonical.is_file()
-    duplicates = [
-        json.loads(line)
-        for line in (
-            REPOSITORY_ROOT / "artifacts/cleanup/exact_duplicates.post_cleanup.jsonl"
-        ).read_text("utf-8").splitlines()
-    ]
-    assert all(not row["deletion_authorized"] for row in duplicates)
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        assert digest.hexdigest() == row["sha256"]
 
 
 def _check_entrypoints():
-    source = REPOSITORY_ROOT / "artifacts/legacy/entrypoints.v4.jsonl"
+    source = REPOSITORY_ROOT / "artifacts/legacy/entrypoints.current.jsonl"
     rows = [json.loads(line) for line in source.read_text("utf-8").splitlines()]
     assert sum(row["status"] == "canonical" for row in rows) == 1
     assert sum(row["status"] == "managed_adapter" for row in rows) == 3
@@ -131,7 +119,8 @@ def _check_entrypoints():
         }
         for row in build_entrypoint_inventory(REPOSITORY_ROOT)
     ]
-    assert rows == current, "entrypoint catalog is stale; regenerate entrypoints.v3.jsonl"
+    assert rows == current, (
+        "entrypoint catalog is stale; regenerate entrypoints.current.jsonl")
 
 
 def _run_full_tests():

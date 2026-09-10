@@ -86,7 +86,7 @@ def test_versioned_seed_bank_is_disjoint_and_loaded_by_canonical_config():
     # splits.  This test only validates structure; any run producing a
     # reported performance number must use strict loads, which fail closed
     # until the banks are regenerated (see test_quarantined_seeds.py and
-    # docs/KNOWN_ISSUES.md).
+    # docs/CURRENT_SYSTEM_MODEL.md).
     selection = load_stratified_seed_split(path, "selection", strict=False)
     confirmation = load_stratified_seed_split(path, "confirmation", strict=False)
     test = load_stratified_seed_split(path, "test", strict=False)

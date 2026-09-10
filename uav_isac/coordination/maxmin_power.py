@@ -62,6 +62,7 @@ class ReplicatedLocalPowerResult:
     local_worst_deflection: np.ndarray
     local_full_coverage: np.ndarray
     common_view: bool
+    common_model_certificate: bool
     local_full_power_w: np.ndarray
     local_prices: np.ndarray
     local_cache_valid: np.ndarray
@@ -79,6 +80,7 @@ class ReplicatedLocalPowerResult:
     deadline_harmonic_fallback_fraction: float = 0.0
     deadline_composable_deflection_floor: float = 0.0
     history_reserve_used_fraction: float = 0.0
+    common_model_fallback_fraction: float = 0.0
 
 
 class IncompleteFixedOwnerStructureError(ValueError):
@@ -600,6 +602,7 @@ def replicated_local_row_maxmin_power(
     force_deadline_fallback: bool = False,
     deadline_safe_row_gain_per_watt: np.ndarray | None = None,
     history_reserve_deflection_cap: float | None = None,
+    require_common_model_certificate: bool = False,
 ) -> ReplicatedLocalPowerResult:
     """Execute only each transmitter's row from its private public-cache LP.
 
@@ -608,11 +611,14 @@ def replicated_local_row_maxmin_power(
     cache, but transmitter ``k`` executes only row ``k``. No primal/dual
     certificate or optimizer state is exchanged.
 
-    When all public views and budgets agree, deterministic local solves are
+    When all public views and budgets agree byte-for-byte, deterministic local solves are
     identical and the assembled allocation equals the ordinary centralized LP
-    optimum. Under packet loss the views may disagree; global max-min
-    optimality is then deliberately not claimed, while each executed row is
-    rescaled to its own physical budget and remains feasible.
+    optimum.  If ``require_common_model_certificate`` is true, unequal views
+    are never stitched: every transmitter instead executes a row-local safe
+    allocation, derived from ``deadline_safe_row_gain_per_watt`` when
+    available and uniform otherwise.  This keeps feasibility and the
+    composable row certificate without pretending that unrelated local LP
+    optima form a global solution.
     """
     views = np.asarray(gain_views_per_watt, dtype=np.float64)
     public_budget = np.asarray(
@@ -691,6 +697,8 @@ def replicated_local_row_maxmin_power(
             prior_share, axis=1, keepdims=True)
 
     K, _, Q = views.shape
+    common_model_certificate = bool(np.array_equal(
+        views, np.broadcast_to(views[0], views.shape)))
     history_cap = None
     if history_reserve_deflection_cap is not None:
         history_cap = float(history_reserve_deflection_cap)
@@ -759,6 +767,14 @@ def replicated_local_row_maxmin_power(
         tuple[bytes, bytes], np.ndarray | None
     ] = {}
     history_reserve_count = 0
+    common_model_fallback_count = 0
+    certified_fallback = None
+    if require_common_model_certificate and not common_model_certificate:
+        certified_fallback = (
+            sparse_harmonic_row_power(safe_row_gain, executed_budget)
+            if safe_row_gain is not None
+            else np.repeat((executed_budget / Q)[:, None], Q, axis=1)
+        )
 
     def commit_complete_solution(
         viewer: int,
@@ -785,6 +801,12 @@ def replicated_local_row_maxmin_power(
     for viewer in range(K):
         local_compute_started = perf_counter()
         local_gain = views[viewer]
+        if certified_fallback is not None:
+            power[viewer] = certified_fallback[viewer]
+            local_compute_time_s[viewer] = float(
+                perf_counter() - local_compute_started)
+            common_model_fallback_count += 1
+            continue
         ceiling = np.sum(
             local_gain * public_budget[:, None], axis=0)
         local_coverage[viewer] = bool(np.all(ceiling > 0.0))
@@ -1084,6 +1106,7 @@ def replicated_local_row_maxmin_power(
         local_worst_deflection=local_worst,
         local_full_coverage=local_coverage,
         common_view=common_view,
+        common_model_certificate=common_model_certificate,
         local_full_power_w=local_full_power,
         local_prices=local_prices,
         local_cache_valid=local_cache_valid,
@@ -1111,6 +1134,8 @@ def replicated_local_row_maxmin_power(
             if safe_row_gain is not None else 0.0),
         history_reserve_used_fraction=float(
             history_reserve_count / max(K, 1)),
+        common_model_fallback_fraction=float(
+            common_model_fallback_count / max(K, 1)),
     )
 
 

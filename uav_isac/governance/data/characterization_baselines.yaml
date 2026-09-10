@@ -10,4 +10,4 @@ baselines:
     config: config/exp_strict_distributed_k16q16.yaml
     seed: 451
     frames: 2
-    semantic_sha256: ca14dac13bafa617f5fa53ba2c3f36df5541b0a2729819563566c90f04d9837b
+    semantic_sha256: 5919764d831924d24b1ffe1185acdb72c2ef6265e21d3a2a0f599d35855d498c

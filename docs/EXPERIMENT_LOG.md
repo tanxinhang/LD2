@@ -1,2392 +1,468 @@
-# 实验日志：正式结果、历史 Gate 与失败记录
+# UAV-ISAC 实验文档：协议、指标、统计与最新结果
 
-> 本文是实验数据的唯一活动日志，采用追加式维护。每条记录必须包含配置/算法版本、
-> seed 协议、样本数、指标、Gate 判定和证据路径。算法原因写入
-> `ALGORITHM_EVOLUTION.md`，数学定义写入 `CURRENT_SYSTEM_MODEL.md`，本文不重复推导。
+更新时间：2026-09-10
+配套总报告：`docs/CURRENT_SYSTEM_MODEL.md`
+数据目录：`results/current/`
 
-## 2026-08-20 G2-0 科学口径变更（待重认证）
+## 1. 实验目标与证据等级
 
-- raw deflection 已从量纲不闭合的 `J/W` 修正为无量纲 `E_signal/E_noise`；
-- 1 W 改为上限语义，隐蔽约束可导致少发，能量按最终执行功率结算；
-- 该改动没有调整任何性能参数，但改变了检测量的绝对尺度；
-- 因而本日志既有性能数据全部标为 **pre-G2 历史数据**。它们用于追溯，不构成当前
-  代码的认证结果；下一正式记录必须是同 seed、独立 env 的 post-G2 重认证。
-- 在 pre-G2 可比链上，V3-C0 `QoS=0.910`、Wilson 下端点 `0.838` 晚于 D1.10
-  `0.940/0.875`，所以前者才是物理修复后的历史基线。
-- “Wilson LCB”统一指 `z=1.96` 的 **95% 双侧 Wilson 区间下端点**。
-- Gate 2 训练审计另修正两点：task-regret 改由 Student soft-decoded 结构计算，不再
-  复用 teacher mask；per-watt gain 的分母使用 `(1-comm_fraction)·sensing_weight`
-  的实际瓦数。旧 Gate 1 普通 CE 不使用该 regret，历史数值不因此改写。
+实验不是单纯比较平均 `P_D`，而是逐层回答五个问题：系统是否按冻结身份执行；硬约束是否在
+每条轨迹上成立；弱目标 QoS 是否在独立 episode 上稳定通过；通信和计算代价是否满足部署门槛；
+研究支线的改善是否超出随机波动。
 
-### G2-1A bridge runner validation（非正式，小样本）
+证据分为三级：
 
-- runner：`tools/run_g2_1a_bridge.py`；worker：`tools/crash_isolated_seed_eval.py`；
-- 四系统 preflight 均找到恰好 100 个唯一历史 seed，物理门禁通过；
-- 当前进度：4/4 为 2/100（seed 311、643），8/8 V3-C0 为 1/100（29），6/6
-  V3-C0 与 multi-scale CE 各 1/100（479）；无 worker crash；
-- 4/4 两 seed 聚合：steady `0.9663`、weak3 `0.9550`、worst `0.8685`、QoS `1.0`，
-  Wilson LCB `0.3424`；小 N 的低 LCB 正确反映证据不足；
-- 其他单 seed 数值沿用 G2-0.7 smoke，仅验证执行链；
-- resume 重跑耗时 0 s 且保持相同合并结果；合并器现在从 episode 数组重算标量指标，
-  不再错误复制第一个 worker 的 QoS/均值。
+| 等级 | 用途 | 必要条件 | 可否支持正式结论 |
+|---|---|---|---|
+| 单元/性质测试 | 验证公式、边界和不变量 | 固定输入、确定预期、失败关闭 | 否 |
+| diagnostic / shadow | 验证闭环接线、定位机制 | 明确配置与种子；允许 dirty tree | 否 |
+| formal confirmatory | 版本正式性能 | clean commit、冻结协议、100 test seeds、完整 provenance | 是 |
 
-状态：`G2-1A IN PROGRESS`。任何当前数值都不得写作 100-seed bridge 结论或 blind 证据。
+任何 diagnostic 数据即使数值很好，也不能升级为正式证据。正式结果如果绑定旧 commit，也不能
+用来描述当前源码。
 
-### G2-0.7 sensing-waveform power-cap smoke
+## 2. 研究问题与可检验假设
 
-约束更新：每 UAV 同时满足 `P_comm+ΣP_sense≤1 W` 与
-`ΣP_sense≤P_sense,max=0.0251 W`。G2-0.6 后、加 cap 前的 smoke 曾使用 4/8/6 UAV
-总感知功率 `3.17/7.9917/5.9989 W`，造成 8/8、6/6 指标全为 1；该结果判为
-`DISCLOSED SATURATION`，不是算法提升。
+### RQ1：严格分布式控制是否真正不读取真值？
 
-加 cap 后相同已查看 seed 的 paired smoke：
+- `H1a`：hyperedge、功率和移动决策只依赖本地 belief 与实际送达 U2U 字段。
+- 验证：truth permutation/invariance 测试、配置身份检查、缺失 belief 的 fail-closed 测试。
+- 失败条件：改变隐藏目标真值但保持可见 belief 不变时，提交结构或动作发生变化。
 
-| 系统 | seed | steady | weak3 | worst | QoS | 总感知功率/帧 |
-|---|---:|---:|---:|---:|---:|---:|
-| 4/4 frozen | 643 | 0.9700 | 0.9600 | 0.8869 | 1 | 0.1004 W |
-| 8/8 V3-C0 | 29 | 0.1289 | 0.0914 | 0.0914 | 0 | 0.2008 W |
-| 6/6 V3-C0 | 479 | 0.1709 | 0.1376 | 0.1376 | 0 | 0.1506 W |
-| 6/6 multi-scale CE | 479 | 0.3965 | 0.3965 | 0.3965 | 0 | 0.1506 W |
+### RQ2：解析功率块是否满足物理预算并正确改善 bottleneck？
 
-这些目录为 `_g2_0_7_smoke_*`。它们只证明功率 cap 被执行且任务不再全面饱和；因每行
-仅一个已查看 seed，禁止用于调参、置信声明或 blind 性能结论。4/4 配置同时从含隔离
-seed 795 的旧 bank 切换到已有的 `stratified_seeds_800_q4_v2.json`，隔离检查未绕过。
+- `H2a`：固定结构 LP 的 primal allocation 非负且每行不超过可用 sensing budget。
+- `H2b`：最弱 Deflection 等于 LP objective，dual upper bound 不低于 primal。
+- 验证：随机问题性质测试、退化零增益测试、episode 最大 RF 违反量。
+- 失败条件：功率违反 `>10^-9 W`、非有限解、错误 owner 或不完整目标覆盖。
 
-### G2-0.6 executable-CPI closure
+### RQ3：移动控制是否在端点和帧内连续轨迹上安全？
 
-- 执行语义：每个控制动作一份 OTFS 观测，`L_exec=n_CPI=1`；
-- 时间审计：`T_F=N·T_sym=0.001024 s`，`floor(dt/T_F)=97`，当前实际占用一帧；
-- 100/300/500/800 m 的 D 为 `2345.37/28.9551/3.75258/0.572599`，对应
-  `P_D=1.000000/0.989011/0.124440/0.009810`；
-- Gate：`ready_for_g2_1=true`、`blockers=[]`，`--assert-ready` 退出码 0；
-- 产物：`results/_g2_0_6_cpi_closure/audit.json`。这只是物理模型就绪判定，不是
-  episode 性能结论；下一步是旧种子 G2-1A paired bridge。
+- `H3a`：每帧投影动作满足 pairwise affine barrier。
+- `H3b`：所有同时执行的直线轨迹最小距离均不低于 20 m。
+- 验证：构造碰撞测试、随机投影性质测试、逐 episode endpoint/swept minimum。
+- 失败条件：任何 seed、任何 UAV 对低于 20 m；投影失败后仍执行未验证命令。
 
-### G2-0.5 detector normalization audit
+### RQ4：严格 K16/Q16 主线能否稳定满足 QoS？
 
-- 约定：`H0:Z~N(0,1)`，`H1:Z~N(sqrt(D),1)`，`c_det=1`；
-- 50 万样本：经验 `P_FA=0.001010`；四个 D 点的解析/经验 P_D 最大差 `<5.4e-4`；
-- 100/300/500/800 m 每腿距离的最终 D 为
-  `300206.79/3706.26/480.33/73.29`，最终 P_D 全部 `>0.9999999`；
-- `MN` 后相应 P_D 为 `1.000/0.989/0.124/0.0098`，表明全面饱和主要由默认
-  `n_CPI=128` 继续放大造成；
-- 若每个 look 是完整 OTFS frame，积分时间 `0.131072 s` 超过 `0.1 s` 控制帧；
-- Gate 判定：`DETECTOR ROC PASS / PROCESSING-GAIN NOT CERTIFIED`。停止 G2-1A/1B，
-  先做 G2-0.6 CPI/相干增益推导；不调整性能参数。
-- 可执行门禁：`--assert-ready` 返回退出码 2，阻塞项为
-  `link_budget_saturated_at_all_audit_ranges` 与 `declared_cpi_exceeds_control_frame`；
-- 产物：`results/_g2_0_5_detector_normalization/audit.json`；工具：
-  `tools/audit_detector_normalization.py`。
+- episode success：tail-50 同时满足 `steady>=0.80`、`weak3>=0.70`、`worst>=0.60`。
+- 正式假设：100 个独立 test episode 的 success rate 单侧 95% Wilson LCB `>=0.80`。
+- 当前状态：尚未在当前 clean commit 上运行，不做结论。
 
-## 最新历史 Gate 快照（2026-08-20 重放，全部 pre-G2）
+### RQ5：Markov 图候选是否优于等预算 blind 搜索？
 
-| 结果 | N | steady | weak3 | worst | QoS | Wilson LCB | 状态 |
-|---|---:|---:|---:|---:|---:|---:|---|
-| 4/4 frozen deployment | 100 | 0.9132 | 0.8848 | 0.7393 | 0.72 | 0.625 | PASS（点估计门） |
-| 8/8 D1.10 independent blind | 100 | 0.9664 | 0.9633 | 0.9633 | 0.94 | 0.875 | 历史 pre-V3 PASS |
-| 8/8 V3-C0 re-cert blind | 100 | 0.9240 | 0.9156 | 0.9150 | 0.91 | 0.838 | 最新可比 pre-G2 PASS |
-| 6/6 V3-C0 re-cert blind | 100 | — | — | — | 0.59 | 0.492 | DISCLOSED FAIL |
-| 6/6 Gate 1 multi-scale CE | 100 | 0.8633 | 0.8445 | 0.8419 | 0.78 | 0.689 | 点估计 PASS / LCB FAIL |
-| 8/8 D1.5 blind candidate | 100 | 0.8201 | 0.8079 | 0.8076 | 0.73 | 0.636 | 点估计 PASS / LCB FAIL |
+- 配对零假设：`E[improvement_graph-improvement_blind]<=0`。
+- 筛查标准：固定同一 case、incumbent、候选预算和物理评分，报告 paired delta 与 bootstrap CI。
+- 当前结果：95% CI 跨 0，不能拒绝零优势解释。
 
-状态解释：只有强制门满足才记 `PASS`；历史或探索性点估计未过 LCB 时统一显示
-`DISCLOSED FAIL`。表中破折号表示该 Gate 重放只将聚合失败作为披露项，不补造缺失指标。
+### RQ6：fixed-lag residual 是否提供 CV 之外的可预测信息？
 
-## 实验记录规范
+- 配对零假设：white acceleration 下 residual forecast 的误差不低于 CV forecast。
+- 晋级条件：独立 seeds 的平均改善 CI 完全大于 0，并在真实闭环中保留收益。
+- 当前结果：white 模型 CI 跨 0，因此 residual forecast 不晋级。
 
-新记录必须同时满足：
+### RQ7：通信、分布式拼接与能量语义是否闭合？
 
-- seed bank 预注册、split 不重叠、隔离 seed 被代码拒绝；
-- episode 数组非空、等长、有限，概率在 `[0,1]`，seed 唯一；
-- manifest 含解析后配置及 SHA-256、确定性源码快照及 SHA-256、Git commit/dirty、
-  命令行、运行时版本和所有输入检查点 SHA-256；
-- 明确区分开发、selection、calibration、validation、blind test；
-- 同时报告 steady、weak3、worst、CVaR、QoS 点估计和 Wilson LCB；
-- 通信方案必须报告 bit、时延、功率和丢包口径；感知方案必须报告 1 W 预算、DD 支撑、
-  检测地板及隐蔽性约束；
-- 负结果原样保留，不用删除实验或更换统计口径掩盖。
+- `H7a`：一次广播对任意接收者数量只产生一个发送 airtime，且 `E_i=P_i*T_tx,i`。
+- `H7b`：只有 byte-identical 公共增益模型才允许独立 LP 行拼接；否则 fallback fraction 为 1。
+- `H7c`：所有已执行扣能的截断前缺口恒为 0，而不是只观察截断后 battery 非负。
+- 验证：异距离多接收者广播、分歧视图、低电量强制透支与分析功率重算测试。
 
-## 回归与运行环境
+### RQ8：几何 Deflection 抽象何时可代表波形检测？
 
-2026-08-20 G2-1A 基础设施工作树按 Windows/MKL 稳定边界分片执行：非 belief
-`1036 passed`，belief `14 passed`，合计 `1050 passed`、无断言失败。单进程仍可能在
-`numpy.linalg.eigvalsh` 原生中止，因此不得表述为一次单进程全量通过。
+- 检查 `Delta_tau=1 us`、`Delta_nu=976.5625 Hz` 下目标对的 DD 分离与 ambiguity 主瓣重叠。
+- 比较波形 Monte Carlo 与解析 `D→P_D` ROC，报告系数相对误差、证据相关性和分层校准误差。
+- 门禁未通过前，不把几何级结果表述为真实 28 GHz 多目标可分辨性能。
 
-> 状态日期：2026-08-20（2026-08-16 更新：并入 D1.5–D1.10 blind 认证与 D1.6 6/6
-> 失效分解，替换污染数据，见 §1/§4.1/§6）。
->
-> **⚠ 本页以 4/4/6/6 结构协调器主线为主**；8/8 解析功率/几何链（D0.87–D0.95）
-> 与 D1.5–D1.10 盲测认证的完整证据见
-> [`README.md`](README.md) 与
-> [`ALGORITHM_EVOLUTION.md`](ALGORITHM_EVOLUTION.md)，本页 §6 仅收录论文可宣称边界。
-> **编号映射**：本页历史 Gate 段落使用 D0.10–D0.18，与总纲 D0.87–D0.95 为同一
-> 物理内容（D0.87≡D0.10、D0.88≡D0.11、D0.89-A/B/C≡D0.12–D0.13、D0.91≡D0.14、
-> D0.92≡D0.15、D0.93≡D0.16、D0.94≡D0.17、D0.95≡D0.18，见总纲 §1.4）；
-> 后续新 Gate 一律使用 D0.9x 单套编号。
+## 3. 冻结正式实验设计
 
-> 本文是当前代码、模型和实验结论的快速入口。演进过程和失败实验保留在
-> [ALGORITHM_EVOLUTION.md](ALGORITHM_EVOLUTION.md)，当前公式与代码映射见
-> [CURRENT_SYSTEM_MODEL.md](CURRENT_SYSTEM_MODEL.md)。若历史章节与本文表述冲突，
-> 以本文为准。
+### 3.1 系统配置
 
-## 1. 一句话结论
+正式配置为 `config/exp_strict_distributed_k16q16.yaml`，传递继承
+`config/exp_strict_distributed_no_truth_pilot.yaml` 和 `config/system_manifest.yaml`。有效配置必须
+由 loader 解析后哈希，不能只对最外层 YAML 求哈希。
 
-pre-G2 系统曾形成一个可冻结的 `4 UAV / 4 target` 分布式部署版本；它在正式
-100 种子协议上达到 `steady=0.913`、`weak3=0.885`、`worst=0.739` 和
-`QoS feasible=0.72`。**8/8 解析部署候选（L0-KKT + lex L1 + P0-L2 + 多候选/前瞻
-L3）曾在 100 全新 blind seed 上独立采样认证：QoS `0.940`、Wilson 下端点 `0.875`；
-该 D1.10 值早于 V3-C0 物理修复，不能称为当前主结果。V3-C0 的 `0.910/0.838` 是
-pre-G2 最新可比值，当前 post-G2 尚待重认证。** 6/6 原"均值达标"
-数据（worst 0.543→0.645、QoS 0.60）来自含全部 5 个隔离种子的旧 gate10 运行，
-**已作废**（§4.1 披露）；干净 bank 重跑显示 6/6 三个变体四地板全不达标
-（worst 0.29–0.34），**D1.6 分解（2026-08-16）证明其主因是旧部署配置未启用
-解析栈（configuration mismatch）——接入解析部署候选栈后 worst 恢复
-0.751–0.910、QoS 0.65–0.90**（详见 [`CURRENT_SYSTEM_MODEL.md`](CURRENT_SYSTEM_MODEL.md)
-§10 与 [`ALGORITHM_EVOLUTION.md`](ALGORITHM_EVOLUTION.md)）。因此：**4/4 版本继续冻结；6/6
-基数残差不作为部署升级（未过任何门槛）；6/6 跨尺度验证转入"解析栈配置"口径。**
+关键条件：K=16、Q=16、T=150、dt=0.1 s、tail window=50、carrier period=3、episode workers=1。
+节点内部本地 LP 可以使用 4 个进程，但不允许再并行 episode，避免嵌套进程争用导致运行时指标
+失真。
 
-## 2. 当前场景和系统边界
+### 3.2 种子与统计单位
 
-- 场景包含 `K` 架 UAV 和 `Q` 个运动目标，UAV 在二维平面运动并对目标执行双基地/
-  多基地协同感知。
-- 只建模 UAV 节点间通信，不考虑 UAV 与地面的通信。
-- 每架 UAV 的通信功率与各目标感知功率之和不超过 `1 W`；普通单调问题可选择用满
-  上限，隐蔽/暴露约束允许少发或静默。
-- 通信可发生多轮、面向多个邻居；发送功率、Token 数和精度可以自适应，传输具有
-  比特、功率、时延及丢包代价。
-- Token 内容通过训练得到并实际接入运动、感知及结构决策网络；当前结构协议还保留
-  端点/竞标等可解释字段，防止自由 Token 退化为无意义标识。
-- 环境仍使用解析链路与集中式证据融合计算最终检测概率，不生成原始 IQ 波形，也不
-  实现完整通信协议栈或飞控硬件接口。
+统计单位是完整独立 episode，不是帧、目标或 UAV。正式种子来自
+`config/stratified_seeds_1130_k16q16_blind.json` 的 ordered `test` split，共 100 个唯一种子。
+以下做法均属于伪重复或数据泄漏：
 
-当前系统的真实边界应表述为：
+- 把 150 帧当成 150 个独立样本；
+- 把同一 episode 的 16 个目标当成独立性能样本；
+- 根据 test seed 表现调参后仍称其为 blind；
+- 打乱种子顺序后与旧 manifest 拼接；
+- 用 development/quarantined seed 替换失败 seed。
+
+### 3.3 对照公平性
+
+算法对照必须固定：场景初态、目标噪声、通信随机流、OTFS/信道参数、episode horizon、tail window、
+种子顺序和候选评估预算。只有待比较模块允许变化。配对比较优先使用 common random numbers，
+并同时报告两方法绝对指标和 paired delta。
+
+### 3.4 预热和评价窗
+
+正式 episode 运行 150 帧，只用最后 50 帧形成主检测指标。这允许 tracker、结构 hold、owner
+posterior 和移动责任在前 100 帧建立状态。30 帧 smoke 的 tail-20 不具备同样稳态含义，因此
+不得与正式阈值直接比较。
+
+## 4. 指标的精确定义
+
+### 4.1 检测指标
+
+对 episode 的 tail 集合 `W`，先计算每个目标的帧均检测概率：
 
 ```text
-分布式局部观测与共享参数策略
-  + 物理 U2U Token 传递
-  + 分布式结构 Student 近似配对/资源决策
-  + 环境级集中式证据融合与检测评价
+p_bar_q = (1/|W|) * sum_{t in W} P_D,q,t
+steady = (1/Q) * sum_q p_bar_q
+weak3 = mean(three smallest p_bar_q)
+worst = min_q p_bar_q
 ```
 
-冻结的集中式结构控制器仍作为教师和参考上界，不属于部署执行路径。CTDE Critic 只在
-训练时使用全局信息，执行时每架 UAV 只使用本地观测、局部历史和已送达 Token。
-
-## 3. 当前部署架构
-
-### 3.1 分布式 Actor
-
-1. 共享的 per-target scorer 对每个目标独立估计局部感知边际价值。参数在目标间共享，
-   不等于共享目标决策，也不会破坏分布式执行。
-2. 集合/注意力编码处理变长 UAV 和目标集合；不再依赖固定长度 UAV 身份 one-hot，
-   对节点和目标置换保持等变或不变。
-3. 运动头由目标承诺和 Token 信息共同驱动；径向分量受运动学约束，切向分量用于形成
-   双基地几何基线。
-4. 通信速率和总通信资源由集合池化头输出，不依赖固定 `Q`。自适应 4--8 bit 协议在
-   稳定场景减少开销，在危机目标上保留较高精度。
-5. 感知、通信功率统一投影到每 UAV 的 1 W 上限可行域；实际用量单独记账。
-
-### 3.2 结构 Student 与集中式控制边界
-
-集中式冻结控制器提供结构目标；分布式 Student 利用本地状态和收到的 Token 近似其
-端点选择与结构解码。部署版不是“完全去中心化检测器”：决策路径分布式，但最终
-`P_D` 仍由环境级证据融合模块统一计算。这一边界必须在论文中明确。
-
-### 3.3 锚点保持的基数门控残差
-
-跨尺度候选不直接重训或覆盖 4/4 基模型，而是在冻结锚点外增加残差：
+episode QoS success 定义为三个条件的交集：
 
 ```text
-E(K,Q) = E0 + g(K,Q) * DeltaE
-D(K,Q) = D0 + g(K,Q) * DeltaD
-g(4,4) = 0,  g(6,6) = 1
+I_success = 1[steady>=0.80 and weak3>=0.70 and worst>=0.60]
 ```
 
-其中 `E0/D0` 为冻结 4/4 Student，`DeltaE/DeltaD` 只在非锚点数据上训练。
-这个设计把“4/4 不退化”从奖励期望提升为架构保证：在 4/4 上残差严格关闭，模型输出
-和逐回合评价数组与原 Student 完全一致。
+不能用 steady 的高值补偿 worst 失败，也不能只报告多帧融合窗口而隐藏单帧基线。
 
-实现位于
-[`uav_isac/agents/frozen_structure_student.py`](../uav_isac/agents/frozen_structure_student.py)，
-训练入口为
-[`tools/train_multiscale_structure_student.py`](../tools/train_multiscale_structure_student.py)。
+### 4.2 QoS 成功率与 Wilson 下界
 
-## 4. pre-G2 historical execution results（当前可复核的历史事实）
-
-> 本节原样保留当时执行语义。出现 `communication+sensing=1 W` 或“1 W 投影”时，表示
-> 该历史 ordinary monotone 路径选择了饱和解，并不改写为当前物理约束；当前统一可行域
-> 是 capped simplex `{p≥0:1ᵀp≤P_max}`，隐蔽约束路径允许未用功率。
-
-### 4.1 结果总表
-
-| 协议与版本 | 种子 | steady | weak3 | mean worst | CVaR | QoS feasible | 决策 |
-|---|---:|---:|---:|---:|---:|---:|---|
-| 4/4 冻结部署版，50 kbit/s，自适应 4--8 bit | 100 | 0.913 | 0.885 | 0.739 | 0.277 | 0.72 | 当前正式版本 |
-| 4/4 基数残差安全门诊断 | 10 | 0.954 | 0.939 | 0.858 | 0.477 | 0.90 | 与原 Student 逐回合完全相同 |
-| 6/6 原跨尺度 Student（**干净种子重跑**） | 20 | 0.766 | 0.556 | 0.293 | — | 0.10 | 四地板全不达标 |
-| 6/6 锚点保持基数残差（**干净种子重跑**） | 20 | 0.773 | 0.564 | 0.344 | — | 0.30 | 四地板全不达标 |
-| 6/6 冻结集中式控制（**干净种子重跑**） | 20 | 0.784 | 0.603 | 0.339 | — | 0.25 | 参考控制，不是部署策略 |
-
-注意：第一行是正式 100 种子结论；其余是机制筛选，不能与正式结果混称。
-
-> **⚠ 2026-08-16 污染数据作废与重跑披露**：本表 6/6 三行**已用干净种子重跑替换**。
-> 原数据（worst 0.543/0.645/0.635、QoS 0.60/0.70）来自 `980_k6q6` test split 前 10
-> 个种子，**含全部 5 个被隔离种子**（795/747/105/860/2）且该 10 个种子恰好偏乐观
-> （隔离种子 795/747/105 的 worst 为 0.996/0.768/0.650）——原"均值达标、可行率未达标"
-> 结论被高估。重跑用重建的干净 test bank
-> （`config/stratified_seeds_980_k6q6_v2.json`，隔离种子排除、无 split 重叠）前 20 个
-> 种子：**6/6 三个变体四地板全不达标**（worst 0.29–0.34 < 0.60，QoS 0.10–0.30），
-> 6/6 跨尺度零样本部署明确失败，无需再以"可行率略低"表述。结果目录：
-> `results/_6x6_reval_{cardinality20,adaptive_b4b8_20,teacher_trace_20}/paired_eval.csv`。
-> **D1.6 分解（advice 013 情况 A，2026-08-16）**：同一配置接上解析部署候选栈
-> （L0 KKT + lex L1 + P0-L2 + 多候选 L3）后，6/6 worst 恢复 **0.751–0.910、
-> QoS 0.65–0.90**（`results/_6x6_d1_6_analytical_*_20/`）——6/6 失败主因是
-> 旧配置未启用解析栈，非跨尺度学习崩坏，无需重训 Student；teacher 结构 oracle
-> （0.910）优于 Student（0.75–0.77），残差为 Student 校准 gap ~0.15（可选）。
-> 详见 [`ALGORITHM_EVOLUTION.md`](ALGORITHM_EVOLUTION.md) 与
-> [`CURRENT_SYSTEM_MODEL.md`](CURRENT_SYSTEM_MODEL.md) §10。
-
-### 4.2 配对统计
-
-> ⚠ **历史机制证据（不作决策数据）**：本节配对统计基于旧 gate10 的 6/6 十个
-> 种子（**含全部 5 个被隔离种子** 795/747/105/860/2），仅用于解释"基数残差相对
-> 原 Student 的机制方向"；决策数据以 §4.1 干净重跑（`stratified_seeds_980_k6q6_v2.json`
-> 前 20）为准（本日志“测试集污染种子隔离”条目已替换旧数据并加披露）。
-
-在相同的 6/6 十个种子上，基数残差相对原跨尺度 Student：
-
-- mean worst 提升 `+0.1025`；
-- 配对 bootstrap 置信区间为 `[+0.0499, +0.1574]`；
-- 9 个种子改善，0 个退化，1 个持平；
-- 但 `QoS feasible=0.60 < 0.70`，因此不满足升级门槛。
-
-基数残差相对 6/6 集中式参考的 mean worst 仅高 `+0.0105`，置信区间
-`[-0.1377, +0.1360]` 跨零，不能宣称优于集中式控制。
-
-### 4.3 资源与约束
-
-4/4 正式部署版平均总通信量为 `1143.259 bit/frame`，其中结构通信约
-`419.534 bit/frame`，平均选择精度为 `7.883 bit`。结构发送具有原子性和缓存约束；
-每 UAV 总功率误差不超过 `4.44e-16`。
-
-### 4.4 6/6 局部候选与有限轮协调审计
-
-局部候选审计不训练新网络，而是检查：只使用本地状态、实际收到的目标 Token，以及在
-局部邻居集合上重新计算的聚合量，能否生成足以承载高质量接收端所有权解的稀疏超边
-候选。开发 10 种子上的原始 exact-edge Gate A 保持为失败，不能用事后指标覆盖。
-
-在与开发集不重叠的后 10 个种子上，事前固定的等价证据 Gate A2 使用
-`L_u=4, L_q=4`、单次价值/覆盖重排和 `0.95` 证据比例。warm-start 后：
-
-- 任意 owner 等价目标召回为 `0.992`，同 owner 等价目标召回为 `0.952`；
-- owner 召回为 `0.996`，空目标率为 `0.00056`；
-- 精确边召回仍只有 `0.869`，所以严格 Gate A 仍然失败；
-- A2 的等价目标、owner、空目标和性能剪枝检查全部通过。
-
-独立 10 种子上的同求解器重放为：
-
-| 控制器 | steady | weak3 | mean worst | CVaR | QoS feasible |
-|---|---:|---:|---:|---:|---:|
-| 完整物理图教师参考 | 0.880 | 0.762 | 0.536 | 0.211 | 0.40 |
-| 候选受限教师参考 | 0.880 | 0.769 | 0.551 | 0.211 | 0.40 |
-| 候选 Student + 集中式可行投影（归因对照） | 0.877 | 0.764 | 0.558 | 0.197 | 0.50 |
-| 1 轮局部价格协商 | 0.740 | 0.502 | 0.266 | 0.053 | 0.20 |
-| 3 轮局部价格协商 | 0.727 | 0.494 | 0.267 | 0.073 | 0.10 |
-| 公共候选图复制式确定性求解（复杂度对照） | 0.875 | 0.752 | 0.543 | 0.197 | 0.50 |
-
-这组归因给出三个明确结论。第一，候选剪枝和冻结 Student 边值不是主要瓶颈；第二，
-简单目标价格/角色价格更新损失约 `0.29` mean worst，且增加轮数不单调改善，应停止继续
-调价格步长和奖励权重；第三，各节点得到同一候选图后独立运行同一确定性求解，mean
-worst 距候选受限教师参考仅 `0.007`，说明给定当前候选图和同状态轨迹时，缺失的是
-可扩展的组合协调器，而不是更多局部特征。
-目标缺口队列对照也没有改善 CVaR，因此不进入主路径。
-
-这里的“教师参考”不是数学上界：Candidate Student 加集中式投影的 worst 为 `0.558`，
-高于固定教师的 `0.551`，表明二者的边值或优化目标不同。只有在相同状态、相同边值、
-相同目标并证明候选集合上的全局最优后，才能使用“候选上界”这一术语。
-
-物理 Token 拓扑审计显示，在 300 个非空求解帧中，一轮候选泛洪后的公共视图率和边
-一致率均为 `0.9967`，第二至第四轮没有额外收益。冷启动首次求解仍以 fail-closed 处理，
-占全部求解帧 `3.23%`；新协商字段目前只做了离线重放和通信量估算，尚未接入环境的
-功率、时延与丢包过程。因此 **Gate A2 通过不等于端到端协议门通过**。
-
-可复现报告见 [A2 候选审计](../results/architecture_v2_scale_k6q6_local_candidate_value_lu4_lq4_r1_gate_a2_holdout10/summary.json)、
-[价格协议与泛洪审计](../results/architecture_v2_scale_k6q6_price_protocol_gossip_audit_holdout10/summary.json) 和
-[复制式求解对照](../results/architecture_v2_scale_k6q6_replicated_consensus_holdout10/summary.json)。
-已有 v1 JSON 中的 `candidate_upper_minus_protocol` 是历史字段名；后续 v2 输出已更名为
-`candidate_reference_minus_protocol`，不改变已冻结数值。
-
-### 4.5 Gate C1 因子图协调器首轮筛选
-
-实现了 UAV 节点、目标节点和 `(Tx,Rx,target)` 超边节点组成的共享参数有限轮因子图，
-以及只执行角色、owner、容量裁剪和确定性 tie-break 的轻量投影。训练使用前 10 个种子
-中的 8 个，2 个验证；后 10 个种子首次评估后又用于多项结构筛选，因此以下只能称为
-开发 holdout，不能再作为最终独立测试。
-
-| C1 开发筛选 | 参数量 | steady | weak3 | worst | CVaR | QoS | repair rate |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 原始 3 轮因子图 | 105k | 0.840 | 0.684 | **0.446** | 0.124 | 0.40 | 0.176* |
-| 一次联合 logits 耦合 | 105k | 0.806 | 0.633 | 0.408 | 0.124 | 0.40 | 0.181 |
-| 3 轮均值场耦合 | 105k | 0.828 | 0.662 | 0.417 | 0.124 | 0.40 | 0.157 |
-| 12k 紧凑模型 | 12k | 0.815 | 0.652 | 0.418 | 0.085 | 0.30 | 0.130 |
-| 跨目标全局上下文 | 124k | 0.838 | 0.684 | 0.446 | 0.124 | 0.40 | 0.274 |
-| 等价 owner/物理证据监督 | 105k | 0.806 | 0.621 | 0.384 | 0.121 | 0.30 | 0.108 |
-| 联合近等价证书 listwise | 105k | 0.827 | 0.663 | 0.411 | **0.157** | 0.30 | 0.116 |
-
-`*` 原始模型的 repair rate 用当前统一的“已按预测角色/owner 形成 proposal，再统计硬投影
-改写”口径重算；冻结的旧 summary 使用了更严格的历史 proposal 定义。
-
-候选受限教师参考为 `0.875/0.752/0.543/0.197/0.50`。当前最佳 C1 的 worst/CVaR
-差分别为 `0.097/0.073`，等价证据召回 `0.731`，投影改写 `0.176`，只满足硬冲突为零；
-所以 Gate C1 明确失败，Gate C2 不启动。该结果仍优于价格协议的 `worst=0.266`，说明
-消息传递有价值，但尚未学会联合角色—owner 组合。
-
-两项归因尤其重要：仅替换为教师角色得到 worst `0.412`，仅替换为教师 owner 得到
-`0.439`，同时替换才恢复到 `0.538`。因此不能继续独立提高某一个分类头；单目标等价
-证据监督也不足以保证全局角色可组合性。
-
-复制式教师现可导出完整潜在角色分区、owner、逐目标值和联合近等价结构。在 10 个训练
-种子的 300 个求解帧上，95% worst/总值门槛下平均有 `1.99` 个联合证书；`56.7%`
-存在不同角色分区，`54.3%` 存在不同 owner。联合 listwise 监督将开发 CVaR 从 `0.124`
-提高到 `0.157`，并降低投影改写，但 mean worst 降为 `0.411`，仍未通过任何 C1 性能
-差门。这证明联合等价性真实存在，也证明一次性摊销分类仍不足以代替局部组合改进过程。
-
-### 4.6 Gate C1.5 可行局部邻域审计
-
-在不训练交换网络的条件下，新增了 fail-closed Oracle 局部搜索。每个中间结构均显式
-检查候选图、单 Tx/Rx 角色、单 owner、receiver 容量与目标端点上限；只有与复制式教师
-完全相同的词典序边值目标严格改善时才接受原子动作。N1 是同 owner 边增删/替换，N2
-是角色交换并重建支持边，N3 是 owner 迁移并重建支持边，N5 是对 2--3 个 UAV 和 1--2
-个当前弱目标的局部精确重优化。N5 已覆盖本阶段需要验证的原子链式重排，因此未单独
-实现只能表达部分链的 N4。
-
-开发 holdout 上的 mean worst 如下；zero-step 均为各初始化自己的零步基线：
-
-| 初始化 | zero-step | N1 | N1+N2 | N1+N2+N3 | +N5 |
-|---|---:|---:|---:|---:|---:|
-| 因子图 + 硬投影 | 0.446 | 0.446 | 0.479 | 0.483 | **0.544** |
-| role-first | 0.147 | 0.147 | 0.384 | 0.515 | **0.529** |
-| 上一帧结构 + 必要修复 | 0.072 | 0.072 | 0.424 | **0.542** | 0.537 |
-
-复制式参考为 `0.543`。因子图 + N5 的
-`steady/weak3/worst/CVaR/QoS=0.871/0.745/0.544/0.197/0.50`，恢复组合差距
-`100.5%`，平均接受 `1.66` 次修改，所有教师目标轨迹严格单调，因此 Gate C1.5 通过。
-但它每个求解帧平均枚举 `492.3` 个候选，仍是搜索上界而不是部署算法。
-
-初始化审计揭示了更有用的时序结构：上一帧热启动只用 N1--N3 就达到
-`0.875/0.754/0.542/0.197/0.50`，平均接受 `0.58` 次修改、评估 `41.3` 个候选；常规
-帧不需要运行 N5。相反，从因子图或冷 role-first 启动时，只有能够原子调整角色、owner
-和支持边的小块 N5 才能跨过组合能垒。不同初始化最终均可接近参考，说明局部邻域有
-足够 headroom；但计算效率明显依赖时序热启动。
-
-还需注意，逐帧严格单调的是教师的边值代理目标，不是重新计算后的 episode 检测指标；
-例如 previous 的 `+N5` worst 略低于 N1--N3。这一差异要求后续 C1.6 同时报告代理 regret
-和真实检测 regret，不能把精确验证器的代理改进直接写成闭环物理改进。
-
-### 4.7 Gate C1.6 学习排序与事件触发冷启动
-
-在生成训练标签前，正增益判定已进一步收紧：确定性边索引 tie-break 只用于多个正增益
-动作之间的稳定排序，不再把“物理目标和边数完全相同、仅索引更优”当成值得切换的动作。
-固定宽度的 29 维 move descriptor 只包含动作类型、角色/owner 改变量、冻结 Student 边值
-的局部增删统计和当前稀缺度，不输入 post-move 全局最小值或精确词典序键；因此没有把
-验证答案直接泄漏给排序器。共享 MLP 仅有 `6,210` 个参数。
-
-上一帧热启动、N1--N3 的开发 holdout 闭环结果为：
-
-| 排序器 | Top-M | worst | CVaR | 平均精确验证 |
-|---|---:|---:|---:|---:|
-| 全邻域 Oracle | all | 0.542 | 0.197 | 41.29 |
-| random（3 次均值） | 5 | 0.481 | 0.136 | 5.85 |
-| total-gain | 5 | 0.373 | 0.013 | 5.43 |
-| scarcity | 3 | 0.514 | 0.140 | 3.68 |
-| scarcity | 5 | **0.538** | 0.177 | 5.80 |
-| learned | 1 | 0.388 | 0.059 | 1.40 |
-| learned | **3** | **0.526** | **0.197** | **3.66** |
-| learned | 5 | 0.526 | 0.197 | 5.86 |
-
-learned Top-3 的 `steady/weak3/worst/CVaR/QoS` 为
-`0.874/0.751/0.526/0.197/0.50`，worst 距 Oracle `0.016<0.02`，CVaR 完全恢复，精确
-验证减少 `90.8%`。相同 Top-3 预算下它显著优于 scarcity；Top-5 不再改善闭环结果，
-因此常规时序维护选择 learned Top-3，warm Gate C1.6 通过。
-
-该结论不能外推到冷启动 N5。以因子图为初解时，scarcity Top-5、learned Top-3 和
-learned Top-5 的 worst 分别只有 `0.485/0.475/0.498`，而 N5 Oracle 为 `0.544`；纯学习
-N5 块排序明确失败并停止调参。离线 Top-3 命中率高但闭环失败，原因是早期次优动作会
-改变后续候选分布，静态组内准确率不能代替路径级 regret。
-
-事件触发混合控制则通过了离线性能屏：每个 episode 首次求解（10/300，`3.33%`）使用
-完整 N5 Oracle 建立可行结构，后续 290 次求解使用 previous + learned Top-3，得到
-`0.870/0.744/0.538/0.197/0.50`，worst 距复制式参考仅 `0.0053`。平均有效精确评估为
-`21.05` 次，相对相同路径的全标签评估下降 `55.5%`。这不是“纯学习协调器已解决”：
-它证明学习排序适合常规维护，冷启动仍需要确定性局部初始化，而且尚未经过真实 Token、
-状态反演化和 Hold/switch-cost 的 C1.7。
-
-### 4.8 Gate C1.7a 动态状态反演化
-
-C1.7a 已把协调器接入真实闭环：Actor、UAV/目标运动、U2U Token 历史、本地观测、
-Student 边值和 `L_u=4,L_q=4` 候选图逐帧重新生成；结构仍按部署基线 Hold-5 更新，
-暂不加入事件触发和切换成本。部署执行路径只为学习排序后的 Top-M 候选计算精确目标，
-不再为了离线诊断偷偷计算全邻域标签。
-
-10 个开发种子的同序配对结果为：
-
-| 控制器 | steady | weak3 | worst | CVaR | QoS | 精确验证/resolve | ms/resolve |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| previous-only | 0.754 | 0.565 | 0.251 | 0.001 | 0.20 | 19.75 | 8.21 |
-| dynamic Oracle N1--N3 | 0.882 | 0.771 | 0.531 | 0.138 | 0.50 | 50.97 | 11.10 |
-| Hybrid learned Top-3 | 0.878 | 0.763 | 0.507 | 0.138 | 0.40 | 23.01 | 15.24 |
-| **Hybrid learned Top-5** | **0.882** | **0.772** | **0.533** | **0.138** | **0.50** | **25.10** | **14.73** |
-| replicated candidate reference | 0.915 | 0.832 | 0.632 | 0.236 | 0.50 | 85.81 | 96.66 |
-
-Top-3 在 seed `483` 上漏掉关键正增益修改，使 episode worst 从 Oracle 的 `0.608`
-降至 `0.349`；Top-5 在 10 个种子上恢复 Oracle 路径，并在 seed `243` 略优。故动态
-版本将验证预算修正为 Top-5。相对 dynamic Oracle，其 mean worst 差为 `-0.0014`、
-CVaR 差为 `0`，精确验证减少 `50.75%`，QoS 可行率相同，Gate C1.7a 通过。结构可行性
-在每次解算后断言，单 UAV 1 W 最大误差为 `4.44e-16 W`。
-
-该通过结论只针对“学习排序是否能逼近动态局部 Oracle”。相对 replicated 全局重解，
-Top-5 的 steady/weak3/worst/CVaR 仍低 `0.033/0.060/0.099/0.098`，说明全局与局部
-协调之间仍有显著 headroom。此外，当前 Python rank/enumerate 实现的墙钟时间是 Oracle
-的 `1.33x`；验证次数下降尚不能写成实际加速。新鲜最终测试种子仍未使用。
-
-### 4.9 Gate C1.7b 全局重构 headroom
-
-为检验剩余 `0.099` worst 缺口是否可由“低频大邻域重构 + 日常 Top-5 维护”关闭，动态
-协调器加入了 periodic/oracle N5 rebootstrap。Hold=5 条件下，`Periodic-N5(H=5)` 在
-每个可更新 warm resolve 后检查完整 N5，并且只接受公共 Student 代理目标严格改善的动作；
-因此它同时是现有 N5 的最高频 headroom 检查，低频 H=10/20 不可能提供更高的 N5 上限。
-
-10 个相同开发种子的结果为：
-
-| 控制器 | steady | weak3 | worst | CVaR | QoS | 精确验证/resolve | ms/resolve |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Local-only Top-5 | 0.882 | 0.772 | 0.533 | 0.138 | 0.50 | 25.10 | 14.73 |
-| **Periodic-N5 H=5** | **0.915** | **0.831** | **0.573** | **0.178** | **0.50** | **170.00** | **85.86** |
-| Replicated global reference | 0.915 | 0.832 | 0.632 | 0.236 | 0.50 | 85.81 | 96.66 |
-
-H=5 改善了 steady/weak3 和平均尾部，但没有通过预注册的 `mean worst>=0.60` 门槛，
-距 replicated global 仍差 `0.0588` worst 和 `0.0576` CVaR。N5 在 `93.55%` resolve
-上被检查，但仅 `3.79%` 的检查接受动作。逐 episode 按 `1e-4` 容差统计为 3 个改善、
-4 个持平、3 个恶化；paired mean-worst 增益 `0.0404` 的 bootstrap 95% CI 为
-`[-0.0835,0.2097]`。seed `989` 改善 `+0.7065`，但 seed `483` 恶化 `-0.2957`，说明
-“单帧公共代理正增益”不能保证“多帧物理 worst 正增益”。
-
-因此停止 H=10/20 与 Hold 大扫描，也暂不训练 rebootstrap trigger：触发器无法修复错误的
-重构价值标签。下一 Gate 先在相同状态、相同随机数和冻结后续动作下审计 N5 代理增益与
-1/5 帧真实 worst 增益的一致性；若一致性仍不足，再进入“学习选择 UAV/目标块 + 块内精确
-LNS”，而不是继续扩大 Top-M 或反复调整切换权重。该结论仍未消耗新鲜最终测试种子。
-
-### 4.10 Gate D0/D1 N5 反事实初筛
-
-反事实工具现可保存动态协调器实际使用的公共 value/mask，分别枚举现有 `proxy_weak` N5
-和诊断性的 `all-target` 单/双目标块，并在相同 P0 前状态、相同动作和相同 RNG 下强制执行
-任一候选。seed `483` 的机械 smoke 得到 `max_geometry_error=0`，确认 UAV/目标运动及随机流
-严格一致。以下结论只来自首次代理正机会 frame `75`，属于事件级初筛而非总体 N5 上限。
-
-| seed 483 / frame 75 | 现有 proxy-weak 池 | all-target 诊断池 |
-|---|---:|---:|
-| 原子候选数 | 209 | 2046 |
-| 一帧物理 Oracle worst 增益 | +0.082 | +0.323 |
-| 一帧物理 Oracle weak3 增益 | +0.180 | +0.412 |
-| 一帧物理 Oracle steady 增益 | +0.090 | +0.206 |
-
-all-target 最优动作不在现有池中，额外 worst headroom 为 `0.2406`，证明“只围绕公共代理
-最弱两个目标生成块”至少在该灾难事件上会漏掉关键重构。与此同时，现有池 13 个代理正
-候选中有 3 个使同帧物理 worst 恶化，错误接受率为 `23.1%`；但代理 Top-1 恰好也是现有池
-的一帧物理最优，且现有池 10 个物理正候选均被代理正集合覆盖，故不能概括成“代理完全无
-排序能力”。实际重构序列在该事件只接受一个动作，
-已排除连续多步过冲。
-
-五开发种子的 local-only 与 Periodic-N5 轨迹进一步完成闭环对齐。seed `483` 在 frame 75
-前结构逐帧完全一致且物理 PD 最大误差为 `0`。首次重构后：
-
-| 闭环窗口 | mean worst 增益 | 时域最小 worst 增益 | target-frame bottom-20% 增益 |
-|---|---:|---:|---:|
-| H=1 | +0.0821 | +0.0821 | +0.1749 |
-| H=5 | +0.0555 | -0.0013 | +0.0438 |
-| H=10 | -0.1049 | -0.0013 | -0.0036 |
-
-目标随机状态始终完全一致。frame 76 首先出现 sensing weight 分叉，frame 77 开始出现运动
-动作与 UAV 几何分叉；到 frame 80，Periodic 路径单帧 worst 比 Local 低 `0.4175`。因此
-该事件同时暴露两个瓶颈：候选块漏失，以及短期结构收益被通信辅助感知/运动闭环响应反转。
-
-当前仍不能直接训练 trigger 或宣布转向 learned block-LNS：完整 all-target 只审计了一个
-事件，尚未完成冻结未来动作的 H=5 重放，也未建立顺序 LNS 上限。下一步只在 5 种子轨迹
-中分层抽取少量“代理接受、代理漏失、deficit spike”事件重复 D0，并补冻结动作对照；新鲜
-最终测试种子继续保持封存。
-
-### 4.11 Gate D0.2--D0.3 冻结控制归因与 deficit 安全门
-
-冻结控制重放已经完成。No-op 与 Forced-N5 从同一 pre-step 状态出发，未来使用完全相同的
-运动、Token、速率、掩码、通信/感知功率和 Student 公共图。seed `483` 的前缀重放物理
-`P_D` 误差为 `0`、观测最大误差为 `2.98e-8`，且 1 W 功率平衡误差不超过
-`2.22e-16 W`。严格区分干预当帧与之后五帧后：
-
-| seed 483 / frame 75 路径 | future-5 mean worst 增益 | future-5 终点增益 |
-|---|---:|---:|
-| 全部 No-op 控制冻结 | +0.0956 | 0.0000 |
-| 仅恢复运动反馈 | +0.0896 | -0.0255 |
-| 仅恢复通信/资源/Student 反馈 | +0.1462 | -0.0000 |
-| 恢复完整记录闭环 | -0.0444 | -0.4175 |
-
-因此 seed `483` 的结构动作本身是正增益，单独的运动或通信/资源路径也不能解释崩塌；
-movement × radio/resource/Student 的非线性交互项为 `-0.1847`。这支持“联合过渡一致性”
-而不是独立平滑某一个 Actor head。混合路径属于 cross-world 诊断，不能解释为可加的自然
-间接效应。
-
-随后对五开发种子中四个相互独立的首次 N5 接受事件重复 Gate。结果不是单一机制：
-
-| 类别 | 事件 |
-|---|---|
-| 同帧代理误接受 | seed 291 / frame 95 |
-| 正动作被闭环反转 | seed 483 / frame 75 |
-| 稳定正增益 | seed 566 / frame 10；seed 103 / frame 15 |
-
-seed `291` 在事件前两条轨迹逐值一致，实际 N5 却把 worst 从 `0.8401` 降到 `0.5795`。
-完整同状态池显示 proxy/all-target 分别有 `172/1719` 个候选，但两池的物理最优都是 No-op；
-唯一代理正候选就是物理有害候选。因此该事件是纯代理/No-op 接受错误，不是候选块漏失。
-
-基于这一诊断增加了默认关闭的 deficit-only N5 审计门。10 个 `selection` 种子上，它只拦截
-seed `291`，其余九个种子逐值不变：
-
-| 控制器 | steady | weak3 | mean worst | CVaR | QoS | exact/resolve |
-|---|---:|---:|---:|---:|---:|---:|
-| Periodic-N5 H=5 | 0.9155 | 0.8309 | 0.5730 | 0.1784 | 0.50 | 170.00 |
-| + deficit guard | 0.9153 | 0.8306 | 0.5777 | 0.1784 | 0.50 | 144.14 |
-
-guard 使 mean worst 增加 `0.00476`，精确验证减少 `15.2%`，但 `0.5777<0.60`，CVaR 与
-可行率均未改善。它可以保留为安全/计算保护，却不是性能主贡献。并且当前环境级
-`coord_pd_ema` 不是免费分布式信号；正式实现必须用 owner 局部 QoS Token 或有限轮 max/min
-共识替代。
-
-协议审计同时记录一次测试集污染：首次 seed `291` 全池命令漏写显式 `selection` split，N5
-过滤得到 0 个事件且该结果未参与方法判断，但普通 paired evaluator 仍运行了默认 `test`
-split 的前 5 个种子 `795/747/105/860/2`。这 5 个种子必须永久隔离，不能再进入确认性或
-最终性能声明；后续只能使用未查看的锁定剩余池或重新预注册替代测试池。正确的 seed `291`
-审计随后在独立输出目录中用显式 `selection` split 完成。
-（2026-08-16 已代码级隔离：`config/quarantined_seeds.json` 单一事实来源 +
-`load_stratified_seed_split(strict=True)` 默认 fail-closed，见
-[`ALGORITHM_EVOLUTION.md`](ALGORITHM_EVOLUTION.md) 的工程审计章节；此处保留历史 Gate 叙述。）
-
-### 4.12 Gate D0.4 嵌套弱目标预算与 No-op 安全证书
-
-N5 的候选目标集合已从固定 Top-2 推广为嵌套预算 `B in {1,2,3,Q}`。这里 `B` 只决定可从
-多少个公共代理最弱目标中选择单目标/双目标原子块，并不把一次原子重构扩展成不可控的多目标
-全局修改。候选集合严格嵌套，`B=Q` 仅作为离线诊断上界。每个候选继续满足 delivered
-candidate graph、角色/owner/容量约束以及单 UAV `communication + sensing = 1 W`；物理
-重放使用同状态 common random numbers。
-
-接受规则显式包含 No-op。若 baseline 的 steady/weak3 已达到阈值，候选不得跌破阈值；若
-baseline 尚未达标，候选不得继续恶化该指标。只有同时满足该保护并提高物理 worst 的候选
-才算 QoS-safe。三个开发危机事件结果为：
-
-| B | 三事件候选总数 | 存在安全正动作的事件 | 平均 No-op-safe worst 增益 |
-|---:|---:|---:|---:|
-| 1 | 174 | 1/3 | +0.0274 |
-| 2 | 616 | 1/3 | +0.0274 |
-| 3 | 1204 | 1/3 | +0.0274 |
-| Q=6 | 4615 | 1/3 | +0.1076 |
-
-seed `103/566` 即使扩大到 `B=Q`，也只能用 weak3 下降换取 worst 上升，安全证书应选择
-No-op。seed `483` 确有候选遗漏：同帧安全 worst 增益从 `+0.0821` 增至 `+0.3227`，且
-steady/weak3 同时提高；但冻结 No-op 控制后的 future-5 mean 仅从 `+0.0956` 增至
-`+0.0984`，边际持久收益只有 `+0.00283`，并在下一次普通结构重解时归零。`B=Q` 的三事件
-候选量则是 `B=2` 的 `7.49x`。因此统一扩大候选池被否决；嵌套预算只能作为按需搜索机制。
-
-下一方法不应是固定更大的 Top-k，而应是置信约束、事件触发的局部大邻域搜索。每个 target
-owner 用实际收到且带时延/年龄的 Token 构造检测 logit 下界：
+若 100 个 episode 中有 `s` 个成功，点估计 `p_hat=s/n`。单侧 95% Wilson 下界采用
+`z=Phi^-1(0.95)`：
 
 ```text
-P_lower(q,S) = sigmoid(P_logit_hat(q,S) - beta * uncertainty(q,S))
+LCB = [p_hat + z^2/(2n)
+       - z*sqrt(p_hat(1-p_hat)/n + z^2/(4n^2))]
+      / [1 + z^2/n]
 ```
 
-候选 `S'` 只有在所有目标的下界不低于各自受保护基准，并且最差目标下界的增益超过结构
-切换、bit、时延和功率成本时才允许执行；No-op 永远属于可行集。`uncertainty` 必须由
-校准残差、Token age、丢包和量化误差得到，不能访问真实全局几何。该机制在数学上属于
-带置信安全集的分布式重构，而不是 Reward Shaping；在收集足够的 owner-local 校准事件并
-完成事件级交叉验证前，不接入部署控制器。
+正式门槛使用 `LCB>=0.80`，而不是只要求 `p_hat>=0.80`。这把有限样本不确定性显式计入验收。
+对 `n=100`，至少需要 `87/100` 成功才达到该门槛；`86/100` 仍不通过。
 
-### 4.13 Gate D0.5--D0.6 依赖闭包、尾缺口主序与时域证书
-
-Gate D0.5 纠正了此前“一个 N5 原子动作至多影响两个目标”的表述。历史 N5 虽然只允许
-1--2 个目标改变 owner，但角色变化后会重建全部支持边；三个危机事件的 `4615` 个候选中，
-`4595` 个（`99.57%`）实际改变超过两个目标，平均影响 `5.46` 个目标，最大为 `Q=6`。
-因此历史 N5 应称为**由小提案触发的多目标依赖闭包**，不能称为双目标局部动作。
-
-实现中新增了两个只用于开发审计、默认不进入部署的严格局部对照：`target_block` N5 冻结
-目标块外全部边，N6 固定角色分区、只交换 1--2 个目标的 owner/support。`B=Q` 时三事件
-分别只剩 `46/72` 个候选，两者均无逐目标安全正动作，也无尾缺口主序安全正动作。这说明
-当前物理增益确实来自跨目标角色耦合，而不是可由简单局部 owner 调整替代。
-
-逐目标 identity-preserving 约束
+### 4.3 通信指标
 
 ```text
-P_q(S') >= min(P_q(S), P_floor),  for every q
+delivery_rate = delivered_links / attempted_links
+deadline_violation_rate = deadline_failed_links / attempted_links
+bits_per_frame = total physically billed packet bits / frames
 ```
 
-在当前等权目标模型中过于保守：历史全闭包 N5 仅保留 seed `483` 的 `+0.00270` worst，且
-该候选在 `B=1` 已存在。为同时尊重 max--min、公平尾部和目标置换等变性，新增检测缺口的
-worst-k 累积主序。令
+无尝试链路的帧对 delivery 使用中性值 1，但正式报告还必须同时给出 active sender 和 attempted
+links，避免“全静默获得 100% delivery”的误读。正式门槛为平均 delivery `>=0.99`、平均 deadline
+violation `<=0.01`。
+
+### 4.4 运行时指标
+
+每个 episode 记录闭环关键路径逐帧时间，再取 P95；正式门槛要求每个 seed 的 P95 均
+`<=100 ms`。运行时声明必须来自 episode worker=1 的环境；多 episode 并行结果只可用于吞吐，
+不能作为单帧延迟证据。
+
+### 4.5 安全指标
+
+Endpoint minimum：所有帧末端、所有 UAV 对距离的全局最小值。
+
+Swept minimum：对每帧同时执行的线段，解析求
+`min_{tau∈[0,1]} ||r_0+tau*du||`，再对 UAV 对和帧取全局最小值。两者正式门槛均为 20 m。
+只报 endpoint 会漏掉换位穿越，因此不够。
+
+### 4.6 功率与电量
 
 ```text
-d_q(S) = max(P_floor - P_lower_q(S), 0)
-D_k(S) = sum of the k largest entries of d(S)
+power_violation_i,t = max(P_comm,i,t + sum_q P_sense,iq,t - 1 W, 0)
+episode_power_violation = max_i,t power_violation_i,t
+episode_min_battery = min_i,t B_i,t
+episode_energy_deficit = max_i,t max(E_used_i,t - B_before_i,t, 0)
 ```
 
-候选必须对所有 `k=1,...,Q` 满足 `D_k(S') <= D_k(S)`。在等权离散目标下，`k=1`
-保护最大缺口，每个 `D_k/k` 对应一个离散 upper-tail deficit CVaR，`k=Q` 保护总缺口。
-该规则在三个事件上拒绝 seed `103/566`，同时恢复 seed `483` 的 `+0.0821`（`B<=3`）和
-`+0.3227`（`B=Q`）同帧物理上界；它允许目标身份间的公平重分配，但不允许任何最坏-k
-尾部恶化。若未来目标权重不等，必须先推广为加权尾风险，不能直接沿用等权主序。
-
-Gate D0.6 证明同帧主序仍非闭环证书。seed `483` 的 `B=2` 动作在匹配记录闭环的 future-5
-仅 `1/5` 帧保持尾缺口主序，最大 worst-k 累积缺口违规为 `0.5147`，终点 worst 增益为
-`-0.4175`；`B=Q` 在冻结 No-op 路径上 `5/5` 帧保持主序，但没有与之匹配的闭环反馈轨迹，
-不能外推。所以下一证书对象改为候选相对 No-op 的 H 步尾缺口差，并按事件定义最大标准化
-低估残差：
-
-```text
-R_e = max over candidate c, horizon h and tail k
-      (G_true[e,c,h,k] - G_hat[e,c,h,k]) / u[e,c,h,k]
-```
-
-split-conformal 的 `beta` 只从独立事件级 `R_e` 校准，进而使用
-`G_upper = G_hat + beta*u <= 0` 作为 fail-closed 条件。这样同一事件中的候选、目标尾部和
-时刻不会被错误当成独立样本，并能覆盖冻结候选生成管线内的后选择。30 个独立事件仅作为
-pilot；在管线、H、损失定义和候选预算冻结前，不开始正式校准，也不改变部署控制器。
-
-## 5. 门槛判定
-
-当前 Medium 均值门槛为：
-
-```text
-steady >= 0.80
-weak3  >= 0.70
-mean worst >= 0.60
-```
-
-跨尺度候选还必须满足：
-
-```text
-QoS feasible >= 0.70
-4/4 anchor exact preservation
-```
-
-据此，**干净重跑（§4.1）下 6/6 三个变体四地板全不达标（worst 0.29–0.34 < 0.60），
-任何部署升级门槛都不满足**；D1.6 分解显示接入解析部署候选栈后恢复至
-worst 0.751–0.910、QoS 0.65–0.90（配置不匹配，非学习崩坏），因此 6/6 作为
-跨尺度候选的验证口径转入"解析栈配置"（见
-[`CURRENT_SYSTEM_MODEL.md`](CURRENT_SYSTEM_MODEL.md) §10）。原"基数残差满足
-前三项和锚点保持、仅可行率不足"的旧口径基于含隔离种子的数据，已作废。
-
-## 6. 可以与不可以写入论文的结论
-
-> **2026-08-16 更新（D1.5→D1.10，advice 013 路线闭合）**：以下清单已由
-> 全新 blind seed 认证刷新（详见 [`CURRENT_SYSTEM_MODEL.md`](CURRENT_SYSTEM_MODEL.md)
-> §10 与 [`ALGORITHM_EVOLUTION.md`](ALGORITHM_EVOLUTION.md) D1.5/D1.9/D1.10）。
-
-目前可以支持：
-
-- **历史 D1.10 认证（pre-V3/pre-G2，`--require-lcb` 当时成立）**：多 UAV 分布式 ISAC 部署
-  候选（L0-KKT 通信带宽 + Lex-L1 功率 + P0-L2 结构 + 多候选/前瞻 L3 几何）
-  在 **100 个从未暴露的 blind seed** 上独立采样认证：**QoS feasible 0.940
-  （94/100）、Wilson LCB 0.875 ≥ 0.70**，steady/worst 均值 0.963。此前
-  D1.5 的 LCB 0.636 < 0.70 统计功效缺口由 D1.9（瓶颈前瞻 L3，QoS
-  0.730→0.950）闭合。
-- **评估协议稳健性**：共享实例 vs 独立采样两种协议下认证值一致
-  （0.950/0.888 vs 0.940/0.875，统计噪声内）——主结果不依赖评估协议。
-- **左尾机制与可达性边界**：失败 seed 由初始最差目标-最近 UAV 距离
-  `worst_nearest` 主导；v_max×episode 位移预算 375 m 下 >450 m 物理不可达
-  （886/45/185），<479 m 为策略边界（615/298/613）——论文应披露
-  "0.94 QoS 为 1130 m 区域 / 25 m/s / 15 s 运动学设定下的认证结果"。
-- **早期瞬态修复**：D1.8 帧-0 warm start 与 D1.9 前瞻评分消除单步
-  trust-region 停滞（300–450 m 区间 QoS 0.4–0.69 → 全量 0.95）。
-- **分布式列生成**（D1.7）：λ-μ 攻防对偶本地 bid + Dantzig-Wolfe 列生成
-  与中央 LP 收敛至机器精度（对偶 gap 5.8e-16）。
-- **隐蔽性约束**（D1.1-D/E）：live 功率层满足 P_D^I ≤ ε 硬约束，与 QoS
-  地板联合进同一 LP。
-- 分布式、共享参数和置换等变的结构 Student 可在 4/4 达到 Medium 可部署门槛。
-
-目前不可以宣称：
-
-- 已实现完全分布式的端到端物理检测；
-- 6/6 跨尺度（980_k6q6）已通过独立采样 blind 认证（仅 20-seed D1.6
-  分解验证，teacher oracle 0.910 vs Student 0.75–0.77 存在 ~0.15 校准 gap）；
-- 当前结果代表波形级或真实硬件 ISAC 性能；
-- 100% QoS（5–6/100 seed 因物理可达性边界或策略边界不达标，见上文）；
-
-## 7. 下一阶段实验协议
-
-主线现在收敛为“局部候选图 → 一轮公共视图 → 可扩展的角色/owner 组合推理 → 硬可行
-投影”。4/4 部署版继续冻结，基数残差保留为跨尺度基线。
-
-1. 冻结 `L_u=4, L_q=4`、单次 refinement 的候选器和 A2 指标；不再围绕 exact-edge
-   复刻或二次重排继续调参，因为性能等价边已经足够。
-2. 停止目标价格、角色价格和简单缺口队列的参数扫描。现有负结果已证明这类可分离
-   局部贪心无法恢复 Tx/Rx 角色互斥、receiver 容量和 owner 唯一性的组合耦合。
-3. 将复制式确定性求解器只保留为“公共候选图上的教师/可达性能参考”，不能作为部署
-   算法；它接近候选受限教师参考，但枚举与动态规划复杂度不具备大规模演进性。
-4. 下一实现应是 ADMN 思路启发、但不直接照搬的共享参数消息传递/展开式协调器：网络
-   学习候选超边提案、有限轮更新和停止条件，最终角色、owner、容量及单 UAV 1 W 约束
-   仍由轻量确定性硬投影保证。监督损失以 owner、等价目标证据和参考目标差距为主，
-   exact edge 只作为辅助诊断，避免学习任意 tie-break。若多个 owner 在证据和目标值上
-   等价，则 owner 标签也采用集合监督；证据损失同时加入边数/bit 成本，防止用稠密全选
-   取得平凡的高召回。
-5. 硬投影只能执行单角色冲突修复、owner 唯一化、容量裁剪、确定性 tie-break 和 1 W
-   单纯形投影，不得重新调用动态规划或 MILP。新增 projection 修改边比例与 projection
-   目标增益，要求硬冲突为零、修改边比例原则上低于 `5%`，且目标性能不能主要由投影器
-   产生。
-6. **Gate C1（组合逼近门）**：先在离线公共候选图上要求 mean worst 距教师参考不超过
-   `0.02`、CVaR 差不超过 `0.01`、所有硬约束零违反，并报告 A2 等价证据召回、owner
-   准确率、目标差距、每轮收敛率和 projection repair rate。
-7. **Gate C2（物理通信门）**：C1 通过后才接入 bit、通信功率、时延、丢包、量化和
-   冷启动 fail-closed；只有真实 Token 条件下仍接近 C1，才能称有限轮分布式协调器。
-8. 当前 6/6 候选受限教师参考本身只有 `0.551` mean worst 和 `0.40` QoS 可行率。
-   C1/C2 只解决分布式执行逼近问题；之后仍需分别审计运动几何、6/6 边值校准及慢时标
-   承诺，不能暗示协调器单独即可达到 Medium。
-9. Gate C1.7a 已证明动态 Top-3 预算不足、Top-5 通过相对 dynamic Oracle 的性能与
-   `50%` 精确验证缩减门。冻结 ranker checkpoint 和 Top-5，不再继续扫描 M 或网络宽度。
-10. Gate C1.7b 的高频 N5 已失败：`worst=0.573<0.60`，且单帧代理接受的重构可使整段
-    episode 恶化。停止 H=10/20、Hold 大扫描和 trigger 训练，不把低频/触发机制误当作
-    N5 邻域能力提升。
-11. Gate D0/D1 初筛已在 seed `483` 定位“候选块漏失 + 闭环收益反转”双重瓶颈。下一步
-    不做全种子穷举，只对少量事件分层复核完整候选池，并增加冻结未来动作 H=5 对照，报告
-    proxy/all-target Oracle、错误接受/漏失、H1/H5/H10 mean/min/bottom-tail 与累计 regret。
-    只有重复证据支持后才在“修块选择、修短时域验证器、加保护期”之间选一条主线。
-12. Gate D0.2--D0.3 进一步确认失败机制至少有两类：seed `291` 是代理对 No-op 的同帧
-    误接受，seed `483` 是运动与通信/资源/Student 的负交互反转。deficit guard 仅把10种子
-    mean worst 从 `0.5730` 提到 `0.5777`，仍不达 `0.60`；下一阶段必须同时保留 No-op
-    安全验证和联合过渡一致性，而不能把单一 trigger 或单头平滑当成完整修复。
-13. Gate D0.4 否决统一扩大弱目标预算：`B=Q` 的候选量为 `B=2` 的 `7.49x`，三个危机
-    事件中仍只有一个存在 QoS-safe 正动作，且其相对 `B=2` 的冻结 future-5 mean 额外增益
-    仅 `0.00283`。下一 Gate 只收集 owner-local 检测下界的校准残差，采用事件级而非候选级
-    划分验证置信安全证书；证书通过前不训练 trigger、不改变部署协调器。
-14. Gate D0.5--D0.6 修正下一步：历史 N5 的 `99.57%` 候选实际影响超过两个目标，严格
-    双目标 N5 与固定角色 N6 均无尾缺口安全正动作，因此不能把主线包装成低成本双目标
-    LNS。保留等权目标下的 worst-k 累积缺口主序作为公平安全序，但同帧规则不足；正式主线
-    改为稀疏触发的角色依赖闭包与候选相关 H 步证书。只有事件级联合 conformal 上界通过后
-    才能训练 trigger 或接入部署。
-
-## 8. 复现实物与验证状态
-
-- 4/4 正式结果：
-  [`paired_eval.csv`](../results/architecture_v2_structure_student_u2u_resolve_bw50k_adaptive_b4b8_failclosed_gate100/paired_eval.csv)
-- 6/6 基数残差结果：
-  [`paired_eval.csv`](../results/architecture_v2_scale_k6q6_structure_student_cardinality_residual46_gate10/paired_eval.csv)
-- 4/4 锚点安全门：
-  [`paired_eval.csv`](../results/architecture_v2_structure_student_cardinality_residual46_bw50k_gate10/paired_eval.csv)
-- 基数残差模型：
-  [`frozen_structure_student_cardinality_residual46.pt`](../results/architecture_v2_structure_student_cardinality_residual46_gate/frozen_structure_student_cardinality_residual46.pt)
-- 6/6 配置：
-  [`exp_800_k6q6_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml`](../config/exp_800_k6q6_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml)
-- 8/8 配置：
-  [`exp_800_k8q8_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml`](../config/exp_800_k8q8_architecture_v2_maxmin_local_fusion_fullgraph_hold5_scale.yaml)
-- 局部候选与等价类审计：
-  [`audit_local_candidate_upper_bound.py`](../tools/audit_local_candidate_upper_bound.py)
-- 有限轮协调器与复制式教师参考：
-  [`finite_round_hyperedge.py`](../uav_isac/coordination/finite_round_hyperedge.py)
-- 协议重放入口：
-  [`run_distributed_hyperedge_negotiation.py`](../tools/run_distributed_hyperedge_negotiation.py)
-- Gate C1 因子图协调器：
-  [`factor_graph_coordinator.py`](../uav_isac/coordination/factor_graph_coordinator.py)
-- Gate C1 训练与审计入口：
-  [`train_factor_graph_coordinator.py`](../tools/train_factor_graph_coordinator.py)
-- 当前最佳 C1 筛选（未通过）：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_factor_graph_gate_c1_screen/summary.json)
-- 联合结构证书：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_joint_certificate_train10/summary.json)
-- 联合证书 listwise 筛选（未通过）：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_factor_graph_gate_c1_certificate_screen/summary.json)
-- Gate C1.5 可行局部搜索实现：
-  [`local_exchange_oracle.py`](../uav_isac/coordination/local_exchange_oracle.py)
-- Gate C1.5 审计入口：
-  [`audit_oracle_local_search.py`](../tools/audit_oracle_local_search.py)
-- 三初始化完整 Gate C1.5 报告（通过）：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_oracle_local_search_gate_c1_5_all_initials/summary.json)
-- Gate C1.6 排序特征与模型：
-  [`local_move_ranker.py`](../uav_isac/coordination/local_move_ranker.py)、
-  [`learned_move_ranker.py`](../uav_isac/coordination/learned_move_ranker.py)
-- warm learned Top-3 开发报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_ranked_local_search_gate_c1_6_learned_dev10/summary.json)
-- pure learned N5 失败报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_ranked_local_search_gate_c1_6_learned_cold_n5/summary.json)
-- 事件触发冷启动混合报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_hybrid_local_search_gate_c1_6/summary.json)
-- Gate C1.7a 动态四路对照与准入结论：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_dynamic_local_search_gate_c1_7a/summary.json)
-- Gate C1.7a 动态协调器与汇总入口：
-  [`dynamic_local_search.py`](../uav_isac/coordination/dynamic_local_search.py)、
-  [`summarize_dynamic_local_search_gate.py`](../tools/summarize_dynamic_local_search_gate.py)
-- Gate C1.7b 高频 N5 重构失败报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_rebootstrap_headroom_gate_c1_7b/summary.json)
-- Gate C1.7b 汇总入口：
-  [`summarize_rebootstrap_headroom_gate.py`](../tools/summarize_rebootstrap_headroom_gate.py)
-- Gate D0/D1 N5 反事实初筛报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_n5_counterfactual_gate_d0_d1_preliminary/summary.json)
-- Gate D0/D1 重放与汇总入口：
-  [`n5_counterfactual_audit.py`](../uav_isac/evaluation/n5_counterfactual_audit.py)、
-  [`summarize_n5_counterfactual_gate.py`](../tools/summarize_n5_counterfactual_gate.py)
-- Gate D0.2--D0.3 冻结控制/deficit guard 报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_n5_frozen_controller_gate_d0_2_d0_3/summary.json)
-- Gate D0.2 路径重放入口：
-  [`audit_n5_frozen_controller.py`](../tools/audit_n5_frozen_controller.py)
-- Gate D0.4 嵌套预算/No-op 安全报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_n5_weak_budget_gate_d0_4/summary.json)
-- Gate D0.4 事件审计与汇总入口：
-  [`audit_n5_weak_target_budget.py`](../tools/audit_n5_weak_target_budget.py)、
-  [`summarize_n5_weak_target_budget_gate.py`](../tools/summarize_n5_weak_target_budget_gate.py)
-- Gate D0.5 依赖闭包/证书口径报告：
-  [`summary.json`](../results/architecture_v2_scale_k6q6_n5_certificate_alignment_gate_d0_5/summary.json)
-- Gate D0.6 时域尾缺口报告：
-  [`transition_tail_summary.json`](../results/architecture_v2_scale_k6q6_n5_certificate_alignment_gate_d0_5/transition_tail_summary.json)
-- Gate D0.5--D0.6 汇总与联合证书实现：
-  [`summarize_n5_certificate_alignment_gate.py`](../tools/summarize_n5_certificate_alignment_gate.py)、
-  [`summarize_n5_transition_tail_gate.py`](../tools/summarize_n5_transition_tail_gate.py)、
-  [`transition_certificate.py`](../uav_isac/evaluation/transition_certificate.py)
-
-历史验证状态为 `385` 项主回归测试与 `14` 项 belief 校准测试通过；本次 Gate C1.5--C1.6
-相关的局部搜索、排序器、协调器、候选审计和 Student 路径共 `49` 项定向回归通过；Gate
-D0.4 修改后的 N5/Student 定向回归为 `32 passed`；Gate D0.5--D0.6 的局部性、尾缺口、
-事件级 conformal 及相关 Student/协调器扩展回归为 `69 passed`。详细命令、
-历史对照和所有失败路线见 [ALGORITHM_EVOLUTION.md](ALGORITHM_EVOLUTION.md)。
-
-### 4.14 Gate D0.7：物理原子提交与控制功率预留
-
-本 Gate 将重构判据从“异量纲加权和”改为三个可行域的交集：
-
-```text
-A_safe = A_role/owner/capacity/power
-       ∩ A_link/deadline/version
-       ∩ A_H-step-tail
-```
-
-bit、秒、焦耳、瓦和检测概率不再直接相加。代价只允许在已经满足全部硬约束的
-候选之间排序；owner 不可达、状态版本不一致、超时或功率越界均直接回退 No-op。
-
-实现采用 prepare/vote/decision 三轮原子提交。依赖闭包包括角色发生变化的 UAV、
-所有切换边的两个端点，以及受影响目标的新旧 owner。消息显式携带角色、owner、
-切换边和全目标检测下界记录。16 bit 检测下界向下量化、不确定度向上量化，单项
-保守网格误差不超过 `1/(2^16-1)=1.526e-5`。每条链路统一调用环境的 Shannon
-链路预算；投票轮多个发送者正交平分带宽。硬条件为：每包 SNR 和时限合格、三轮
-总时延不超过一个 `0.1 s` 控制帧、参与者版本一致，以及逐 UAV 满足
-
-```text
-P_comm,k + sum_q P_sense,kq <= 1 W.
-```
-
-seed `483` / frame `75` 的三个代表性正增益候选（index `0/4/8`）均形成 6-UAV
-依赖闭包。原执行分配中 UAV 2 的通信功率为 0，无法返回 vote，故全部正确拒绝。
-若对闭包参与者预留 `0.25 W` 控制功率，则 index `0/4` 的完整三轮消息为
-`1419 bit`、`1.948 ms`、`0.914 mJ`；index `8` 为 `1454 bit`、`1.985 ms`、
-`0.923 mJ`，均满足当前 `5 ms` 单包时限和 `0.1 s` 控制帧。
-
-`0.25 W` 只是固定可行上界，不是最终资源设计。新增的单调二分在每次迭代都重新投影
-剩余感知功率，并求满足全部链路/时限条件的最小共同通信功率下限。本事件的名义下限
-为 `2.119e-6 W`：index `0/4` 的三轮总时延/能量为 `6.170 ms/0.824 mJ`，index
-`8` 为 `6.210 ms/0.834 mJ`；瓶颈 vote 包时延为 `4.9995 ms`。该值紧贴 5 ms
-边界，只是特定几何和名义信道下的理论下界，不能直接作为部署值；正式裕量必须由
-独立信道事件残差校准，不能从单事件任意指定。
-
-预留功率没有被当作免费资源。审计重新执行通信/感知 1 W 硬投影并重跑同状态物理
-检测；三个候选的 worst 增益仍分别为 `+0.0821/+0.3227/+0.0821`，尾缺口主序
-仍成立，最大功率平衡误差为 `2.22e-16 W`。原因是该事件中 UAV 2 被削减的感知
-功率未被候选支持结构使用；这只是事件级机制证据，不能推广为一般零代价结论。
-
-当前研究定位进一步明确：主线属于**资源分配与分布式结构控制层**，联合优化目标
-支持、Tx/Rx 角色、融合 owner、通信 bit/rate 以及通信-感知功率分配；波形层目前
-仍是固定波形和解析信道抽象，尚未优化发射协方差、子载波、波束或模糊函数。因此
-当前不能声称波形级联合设计。创新候选收敛为“事件触发控制功率预留 + 原子依赖
-闭包提交 + H 步尾缺口证书”，在独立事件级 conformal 校准完成前继续默认关闭。
-
-新增实现与证据：
-
-- [`dependency_commit.py`](../uav_isac/coordination/dependency_commit.py)
-- [`audit_n5_dependency_commit.py`](../tools/audit_n5_dependency_commit.py)
-- [`seed483_frame75_commit.json`](../results/architecture_v2_scale_k6q6_n5_physical_commit_gate_d0_7/seed483_frame75_commit.json)
-
-扩展的局部性、时域证书、物理提交与 Student/协调器定向回归为 `78 passed`；本 Gate
-未使用新的最终测试种子。
-
-### 4.15 Gate D0.8：事件平衡残差反馈与漂移锁定
-
-反馈已纳入循环，但采用快慢双时间尺度，禁止当前事件的结果修改授权当前事件的证书。
-一个部署 epoch 内残差模型与 conformal 乘子完全冻结；已执行事件的 owner 反馈只能进入
-下一 epoch。对 Token 年龄、实际丢包比例、量化步长、切换规模、时域位置和尾部位置等
-owner 可观测特征，采用
-
-```text
-G_tilde[e,c,h,k] = G_hat[e,c,h,k] + f_theta(x[e,c,h,k]).
-```
-
-残差回归按事件平衡：每个事件总权重相同，事件内复制上千候选不会增加该事件权重。
-模型训练事件与校准事件 ID 强制互斥；校准仍以每个事件的
-`max_(c,h,k)(G_true-G_tilde)/u` 作为唯一分数。5% 误覆盖下至少需要 19 个独立校准
-事件才有有限 conformal 乘子，因此 30 个事件只能作为训练/校准 pilot，不能授权部署。
-
-另增加证书违例 e-process 漂移监测。在稳定条件
-`P(violation_t | past) <= alpha` 下，多个固定备择似然比的混合为非负超鞅；当 e-value
-越过 `1/delta` 时永久锁定 No-op。该 anytime 界依赖上述条件，不能由当前单事件推断。
-
-反馈链路没有免费化。K=Q=6、H=5 时，反馈包共享字段为 `153 bit`，每个
-`(target,horizon)` 条目为 `23 bit`。seed `483` / frame `75` 中 owner 1/2 分别
-携带 `24/12` 个条目，总无线发送量为 `1134 bit`。仅针对 commit 求得的
-`2.119e-6 W` 下限无法发送反馈：最小 SNR 为 `-1.165 dB`、时延为 `10.671 ms`。
-固定 `0.25 W` 可在 `1.551 ms/0.468 mJ` 完成反馈。
-
-进一步联合优化 proposer、三轮 commit 与延迟反馈后，名义共同功率下限为
-`6.795e-6 W`，协调者为 UAV 3。index `0/4` 的 commit 时延为 `3.982 ms`，index
-`8` 为 `4.022 ms`；反馈时延均为 `4.99988 ms`，反馈能量 `0.338 mJ`。使用该联合
-功率重新投影并重跑检测后，三个候选的 worst 增益及尾缺口主序保持不变。由于反馈
-仍紧贴 5 ms 时限，该值只是名义理论下界，部署裕量必须由独立信道残差校准。
-
-当前创新主线由此变为：**学习器估计局部边际价值 → 确定性物理层原子提交 → owner
-返回延迟有界残差 → 下一独立 epoch 更新预测器 → e-process 监测漂移并优先 No-op**。
-它属于双向、证书化、事件触发的分布式资源分配与结构控制，而不是普通的在线误差
-反传，也不是波形优化。当前继续默认关闭，未使用新的最终测试种子。
-
-新增实现与证据：
-
-- [`certified_feedback.py`](../uav_isac/evaluation/certified_feedback.py)
-- [`test_certified_feedback.py`](../tests/test_certified_feedback.py)
-- [`seed483_frame75_feedback.json`](../results/architecture_v2_scale_k6q6_certified_feedback_gate_d0_8/seed483_frame75_feedback.json)
-
-### 4.16 Gate D0.9：事件级联合校准的鲁棒信道闭环
-
-名义 `6.795e-6 W` 联合功率下限紧贴反馈链路 `5 ms` 时限，不能把人为
-指定的 `3 dB` 当作部署裕量。本 Gate 对每个独立事件内的全部链路、协议
-轮次与反馈包先取一个联合最坏信道分数：
-
-```text
-R_channel,e = max_i {0,
-  (SNR_hat-SNR_obs)/r_snr,
-  (delay_obs-delay_hat)/r_delay }.
-```
-
-`r_snr` 与 `r_delay` 是校准前固定的物理分辨尺度，不是把 dB 和秒相加的
-代价权重。同一事件内复制再多链路也只贡献一个校准样本。保守 SNR 在
-Shannon 公式之前施加，随后重新计算速率、串行化时延、RF 能量、三轮原子
-提交、owner 反馈和 `通信功率+感知功率=1 W` 投影。
-
-同时修正了风险预算：两个各为 5% 的独立证书只能直接给出 10% 的 union
-bound；若各压到 2.5%，有限 split-conformal 分位数至少需要 39 个事件，
-计划中的 30 个事件不够。当前首选做法是对同一事件使用
-
-```text
-R_joint,e = max(R_transition,e, R_channel,e),
-```
-
-并冻结一个共同乘子。该方法不假设检测误差与信道误差独立，在一个 5%
-风险预算内同时约束二者；训练事件与联合校准事件 ID 仍强制互斥。
-
-seed 483/frame 75 仅用于预校准敏感性重放。诊断乘子从 0 增至 6（分辨尺度
-为 `1 dB/0.1 ms`）时，共同 RF 下限单调从 `6.795 µW` 增至
-`34.424 µW`（`5.07×`）。最大点的反馈鲁棒 SNR 为 `4.943 dB`、时延仍低于
-`5 ms`，感知功率最大减少 `8.742 µW`。重新运行物理检测后，三个候选的
-即时 worst 增益仍为 `+0.0821/+0.3227/+0.0821`，tail-safe 判定不变，功率
-平衡误差不超过 `2.22e-16 W`。
-
-这些点只是“误差乘子—所需功率”曲线，不是部署裕量。至少 30 个独立开发
-事件完成联合校准，并由后续互斥事件验证前，控制器继续默认关闭；本 Gate
-没有使用新的最终测试种子。
-
-当前 U2U 传输的预测与交付仍共用确定性 Friis 几何模型，本身不能产生有
-意义的非零“观测减预测”信道残差。下一 Gate 必须先增加独立、可复现的观测
-信道/影子 CSI，并审计 Rician 归一化，再收集 30 个事件；否则零残差校准会
-形成循环论证。这属于资源分配证书的物理验证基础设施，不代表研究主线已经
-转为波形优化。
-
-新增实现与证据：
-
-- [`channel_margin.py`](../uav_isac/evaluation/channel_margin.py)
-- [`certified_feedback.py`](../uav_isac/evaluation/certified_feedback.py)
-- [`seed483_frame75_margin_curve.json`](../results/architecture_v2_scale_k6q6_robust_channel_gate_d0_9/seed483_frame75_margin_curve.json)
-- [`test_channel_margin.py`](../tests/test_channel_margin.py)
-
-隔离回归为非 belief 测试 `454 passed`、belief 校准测试 `14 passed`。单进程
-合并运行仍会在既有 Windows MKL `numpy.linalg.eigvalsh` 路径原生中止，故
-采用进程隔离；两组均无断言失败。
-
-### 4.17 Gate D0.10：证书深度审计与重放 provenance 纠错
-
-本 Gate 不以 D0.9 结果为前提，重新审计统计、通信协议和信道模型。发现并
-修复四类实质问题：
-
-1. `+inf` 事件分数过去会被 conformal 分位数函数删除；现在保留 `+inf`，
-   NaN/负无穷直接报错，无法解析的阈值强制 No-op。
-2. 声明为必需但缺失的 future-H 结果或链路包过去可能被静默跳过；现在缺失
-   或未送达映射为 `+inf`。只有预先注册的结构 padding mask 可以排除条目。
-3. 原总时延残差重复包含了低 SNR 已经造成的 Shannon 串行化增长；现在先用
-   实测 SNR 扣除 `bits/R(SNR)`，只校准额外排队、调度与处理时延。
-4. prepare/vote/decision 虽然计入 epoch/digest bit，但过去只比较状态版本；
-   现在 commit 与 owner feedback 同时要求状态版本、冻结证书 epoch 和 64-bit
-   候选摘要一致。proposal-pipeline digest 变化同样直接 No-op。
-
-同时发现 Rician helper 计算了 `sqrt(1/(K+1))` 却未乘到 NLoS 项，导致
-
-```text
-E|h|^2 = path_gain * (K/(K+1) + 1)
-```
-
-而不是正确的 `E|h|^2=path_gain`。在 `K=6 dB` 时平均信道功率约高估
-`79.9%`。归一化已经修正，并用固定随机种子在 `K=-10/0/6/20 dB` 上验证
-二阶矩。
-
-逐步测试推翻了最初的失效判断。`0.59446` 差异来自使用了与 trace 清单不一致的
-ranker/factor-graph checkpoint，造成控制前缀分叉；它不能解释为 Rician 修正导致的
-物理误差。当前配置的 `ground_communication_enabled=false`，检测 Deflection 不走
-Rician reporting-link 分支。使用 trace 记录的精确流水线后，seed 483/frame 75 的
-observation 前缀误差为 `2.98e-8`，物理 `P_D` 重放误差为 `0`。因此 D0.9 的该事件
-即时增益和确定性 U2U bit/Shannon 曲线没有因本次 Rician helper 修正而失效；启用
-ground/reporting stochastic link 的其他实验仍须单独重放。
-
-审计工具新增强制 provenance 绑定，在计算任何重放残差前核对 trace、config、
-Student、ranker、factor graph、搜索模式、Top-k、覆盖率和轮数。故意传入错误模型
-时工具在仿真前终止且不写结果；正确流水线则完整通过。这样把“物理模型不一致”和
-“控制器版本不一致”分开，避免用不可比较的轨迹作物理结论。
-
-创新性也重新定级：联合通感功率分配、MARL、conformal 安全控制和多智能体
-LNS 都不能单独宣称新颖。当前可辩护的潜在创新是它们的证书化组合：
-
-```text
-owner-local 边际价值
- -> 依赖闭包 LNS
- -> 物理计费且 epoch/digest 绑定的原子提交
- -> transition/transport 事件级联合最大分数
- -> 延迟 owner 残差与冻结管线
- -> e-process 漂移锁定 No-op。
-```
-
-这仍属于资源分配与分布式结构控制层，不是波形优化。完成系统相关工作检索、
-修正信道实验和逐组件消融前，只表述为“潜在集成创新”，不作首创性断言。
-
-新增实现与证据：
-
-- [`transition_certificate.py`](../uav_isac/evaluation/transition_certificate.py)
-- [`channel_margin.py`](../uav_isac/evaluation/channel_margin.py)
-- [`dependency_commit.py`](../uav_isac/coordination/dependency_commit.py)
-- [`channel.py`](../uav_isac/physical/channel.py)
-- [`summary.json`](../results/architecture_v2_scale_k6q6_deep_certificate_audit_gate_d0_10/summary.json)
-- [`seed483_frame75_revalidated.json`](../results/architecture_v2_scale_k6q6_deep_certificate_audit_gate_d0_10/seed483_frame75_revalidated.json)
-- [`test_channel_physics.py`](../tests/test_channel_physics.py)
-- [`test_audit_replay_provenance.py`](../tests/test_audit_replay_provenance.py)
-
-隔离回归为 `466 passed + 14 passed`；没有使用新的最终测试种子。
-
-局部性、时域证书、原子提交、反馈与 Student/协调器联合定向回归为 `84 passed`。
-
-### 4.18 Gate D0.11：证书路由的两时间尺度功率/结构/几何架构
-
-本 Gate 先否决了“再叠加一个结构专家”的路线。同一状态下把 cardinality 与
-multiscale 两个 Student 按目标仲裁，selection 前 10 个 episode 的 mean worst 仅从
-`0.608294` 增至 `0.608388`（`+9.49e-5`），而 payload-only 边值从每发送者
-`3072 bit` 增至 `6144 bit`。因此不以双模型和双倍 Token 负担掩盖真正瓶颈。
-
-物理分解显示当前主瓶颈是固定结构内的连续感知功率，而不是统一扩大 Top-k。
-对 selection 前 20 个 episode 的最终重解状态，原部署、只换配对、固定结构功率、
-联合单工结构/功率的 mean worst 分别为
-`0.677636/0.677636/0.918167/0.932318`。只换配对的增益严格为 0；联合层超过
-固定结构功率层的均值仅 `0.014151`。因此架构改为三层而不是继续扩大神经网络：
-
-```text
-快层：固定 role/owner/edge 的 max-min 感知功率修复
-中层：仅当固定结构上界低于 QoS 时才搜索 joint structure + power
-慢层：仅当宽松同几何上界仍低于 QoS 时才触发航迹/几何修复
-```
-
-固定唯一 owner 后，令 `a_iq` 为 UAV `i` 对目标 `q` 的每瓦有效 Deflection，
-`b_i=1-P_comm,i`。快层是线性规划
-
-```text
-max_{p,t} t
-s.t. sum_i a_iq p_iq >= t,                 for every q,
-     sum_q p_iq <= b_i, p_iq >= 0,         for every i.
-```
-
-其单纯形对偶为
-
-```text
-min_{lambda in simplex(Q)} sum_i b_i max_q lambda_q a_iq.
-```
-
-强对偶来自该 LP 的可行有界性。owner 只广播目标价格 `lambda_q`；每个 UAV 用
-本地 `a_iq` 选择 `argmax_q lambda_q a_iq`。有限轮实现不再使用会漏目标的纯
-次梯度极点平均，而采用 Dantzig--Wolfe 列生成：初始化 `Q` 个全目标覆盖列，
-每轮增加一个分布式最佳响应列，并在 owner 端求 `Q` 维受限主问题。任何返回的
-功率都是完整可行列的凸组合，因此每一轮均满足非负与每 UAV RF 上限；普通单调
-max-min 可选择饱和最优列，但这只是 tie-break。受限原始值单调不降，量化公共价格
-处的精确本地响应给出有效对偶上界。
-
-selection 前 10 个 episode 的全部 `310` 个结构重解事件上，6-bit 价格时的结果为：
-
-| 方法 | mean worst | QoS 可行率 | 相对精确 Deflection | payload-only 上界 |
-|---|---:|---:|---:|---:|
-| 原部署 | 0.430307 | 0.3226 | - | - |
-| 精确固定结构 LP | 0.704167 | 0.6323 | 1.0000 | 离线上界 |
-| 1 轮列生成 | 0.628041 | 0.5516 | 0.8014 | 228 bit/重解 |
-| 2 轮列生成 | 0.675462 | 0.6032 | 0.9199 | 360 bit/重解 |
-| 4 轮列生成 | 0.698827 | 0.6258 | 0.9827 | 624 bit/重解 |
-| 8 轮列生成 | 0.702509 | 0.6290 | 0.9944 | 1152 bit/重解 |
-
-4-bit/6-bit/8-bit 的 4 轮 mean worst 分别为
-`0.694920/0.698827/0.698825`，故暂用 6 bit；这只是同状态物理潜力审计，尚未计入
-header、竞争、重传和实测时延。功率守恒误差不超过 `4.44e-16 W`。
-
-算法冻结后，仅在尚未用于本轮设计的 selection 后 10 个 episode 上查看结果：
-原部署、精确固定结构 LP、4 轮列生成 mean worst 分别为
-`0.298254/0.569872/0.563907`，对应 4 轮 QoS 可行率 `0.4581`。这确认功率层收益
-可迁移，但也证明它不能单独解决所有事件。
-
-为纳入反馈，使用上一结构重解事件的 per-watt 增益作为最简单的因果估计。
-selection 后 10 个 episode 上，4 轮 causal lag-1 的 mean worst 为 `0.499996`；
-在全部 20 个 episode 上，lag-1 有 `8.83%` 事件比同事件 No-op 更差。用前 10 个
-episode 的事件分数做诊断性 one-sided conformal 余量后，后 10 个 episode 的门控
-策略 mean worst 为 `0.521787`，但仍有 `3.67%` 的约束违例。由于 300 个重解点只
-聚类在 10 个校准 episode 内，且尚未计入切换/bit/时延代价，该结果明确标记为
-`certificate_ready=false`，不能接入部署控制器。
-
-中慢层采用嵌套物理上界路由，避免把启发式可行解误称为上界。宽松同几何上界允许
-每个目标独占每架 UAV 的全部感知预算、每个发射机为每个目标自由选择最佳接收机，
-并放松共同 owner、角色、容量和跨目标功率耦合：
-
-```text
-D_q^relax = sum_i b_i max_j a_ijq.
-```
-
-任何可行同几何方案均逐目标不超过该值。最终重解的 20 个 selection episode 被
-证书路由为 `12 No-op / 6 fixed-power / 1 joint-structure-power / 1 slow-geometry`。
-seed 606 的宽松上界仅 `0.3986`，所以慢几何触发有严格依据；seed 138 的固定结构
-上界为 `0.5228`、宽松上界为 `0.9563`，且联合求解已找到 `0.7412` 的可行解，
-所以应先换结构。joint alternating 的失败本身不再被用于证明几何不可行。
-
-创新边界保持克制：max-min ISAC 功率分配、列生成/目标价格、两时间尺度资源分配、
-conformal 安全门和 MARL 都是已有方法。当前可辩护的是潜在集成创新，即
-“owner-local 检测反馈和边际增益 -> 始终 RF 可行的有限轮列生成 -> 嵌套物理上界
-只路由到最小必要控制层 -> epoch 隔离的残差下界和 No-op 安全层”。在完成系统文献
-检索、独立 episode 校准、真实 Token 时延/丢包重放和闭环航迹消融前，不作首创断言。
-当前研究仍是资源分配与分布式控制层，不是波形设计；波形、波束、子载波和模糊函数
-仍保持固定。
-
-新增实现与证据：
-
-- [`maxmin_power.py`](../uav_isac/coordination/maxmin_power.py)
-- [`bottleneck_router.py`](../uav_isac/coordination/bottleneck_router.py)
-- [`expert_arbitration.py`](../uav_isac/evaluation/expert_arbitration.py)
-- [`audit_distributed_power_repair_trace.py`](../tools/audit_distributed_power_repair_trace.py)
-- [`audit_structure_trace_physical_bottleneck.py`](../tools/audit_structure_trace_physical_bottleneck.py)
-- [`summary.json`](../results/architecture_v2_scale_k6q6_targetwise_expert_arbitration_gate_d0_11/summary.json)
-- [`selection20_all_resolves_power_feedback_gate.json`](../results/architecture_v2_scale_k6q6_targetwise_expert_arbitration_gate_d0_11/selection20_all_resolves_power_feedback_gate.json)
-- [`selection20_final_resolve_physical_bottleneck.json`](../results/architecture_v2_scale_k6q6_targetwise_expert_arbitration_gate_d0_11/selection20_final_resolve_physical_bottleneck.json)
-
-### 4.19 Gate D0.12--D0.13：可观测物理反馈、通信计费与事件触发原子结构修复
-
-本轮首先修正了反事实物理审计的一个根本性可辨识性错误。过去用
-`d_eff / 当前感知功率` 恢复每瓦增益；当某 UAV--目标的当前功率为零时，
-这会把“未激励、不可由该比值识别”错误写成物理零。当前非 Swerling 模型中，
-trace 已保存与功率无关的 `alpha`、`g_dd` 和 `chi_rep`，因此现在直接使用
-
-```text
-a_ijq = 1[g_dd,ijq >= g_min] chi_rep,ijq alpha_ijq^2
-        * M N G_tx G_rx n_CPI / P_noise .
-```
-
-上式是 G2-0 后的能量归一化形式；D0.12 当时实际使用的 pre-G2 式额外含 `T_sym`，
-其 50 个重解事件的内部重放误差为 `1.36e-12`，但这只能证明旧代码自洽，不能证明
-量纲正确。Swerling 开启时该重建会失败关闭，因为单次 RCS 随机实现不能由
-上述三个量识别。延迟到下一事件的增益继续按双基地距离律传输：
-
-```text
-a_ijq(t) R_iq(t)^2 R_jq(t)^2
-  = a_ijq(t-1) R_iq(t-1)^2 R_jq(t-1)^2 .
-```
-
-当前 `g_dd >= g_min` 同时作为硬支持门，而不是被平均进一个连续代理。这个修正
-证明当前主线仍是**资源分配与分布式控制层**：波形、子载波、波束和模糊函数
-保持固定，OTFS/双基地模型只提供物理可行域与每瓦边增益，不能称为波形联合设计。
-
-固定 owner 后的快层仍求解 max--min LP。有限轮 Dantzig--Wolfe 现在不仅量化
-6-bit 目标价格，也真正以 IEEE binary16 量化 owner Deflection 反馈；未计数的
-双精度侧信道已被移除。通信协议显式包含 64-bit header、16-bit epoch、64-bit
-digest、节点/轮次/目标索引、价格与反馈字段。owner 反馈正交分带、协调者价格
-广播，完整时延为
-
-```text
-T_protocol = T_feedback,0 + R (T_price + T_feedback),
-```
-
-并在 Shannon 速率、3 dB SNR 工程裕量、0.5 ms 时延工程裕量和 0.1 s 控制周期下
-重新投影 `P_comm,k + sum_q P_sense,kq = 1 W`。selection20 的 600 个因果事件全部
-通信可行：平均 `1537 bit`，平均最大单包时延 `1.071 ms`，最坏完整协议时延
-`28.805 ms`，平均能量 `0.455 mJ`，最大额外通信功率 `3.20e-4 W`，功率平衡误差
-不超过 `4.44e-16 W`。binary16 相对双精度只造成约 `7.6e-5` 的 mean-worst 损失。
-
-20 个非保留训练 episode 与 20 个冻结 selection episode 按 episode 而非候选做
-联合 split-conformal 校准。每个 episode 只贡献候选、No-op 与配对增益残差的一个
-联合最大值；5% 风险下有限样本覆盖下限为 `20/21=95.24%`。功率层联合裕量为
-`2.03e-6`。计入切换、逐事件真实 bit、最大包时延和 RF 能量成本后，selection20
-接受率为 `89.5%`，策略事件 mean-worst 为 `0.63740`，接受动作的约束违例、净收益
-违例和 episode-any 违例均为 0。该证书仍因确定性信道及工程裕量未由独立随机
-CSI/丢包残差校准而标记 `certificate_ready=false`。
-
-中层没有重新统一扩大 Top-k，而是采用最多三步的原子 B=2 N5/N6。每一步只改变
-一/两个目标的依赖闭包。候选先由两个严格可行下界排序：复用当前功率得到的下界，
-以及令所有 UAV 依次集中到目标 q、再进行公共列时间共享得到的
-
-```text
-c_q = sum_i b_i a_iq,
-t_mix = 1 / sum_q (1/c_q).
-```
-
-代理只负责排序；每步最多 Top-8 候选必须再经过 4 轮 6/16-bit 列生成验证，且只
-接受严格单调改进，No-op 始终显式保留。训练池曾证伪“用目标中位数补全所有未观测
-替代边”：该做法造成 `75.5%` harm；将未观测结构边下界置零并加入 DD 硬门后，
-harm 降为 0。这一负结果说明置信域约束比扩大候选池更重要。
-
-冻结 selection20 上，三步结构层在 267 个触发事件中 260 个找到严格改进；触发
-事件的 power-only/structure mean-worst 为 `0.31950/0.48242`，接受动作平均增益
-`+0.16731`，harm 为 0，预测绝对误差 `1.37e-7`。三层原始路由在 600 个因果事件
-上由原部署 `0.37389/26.0%` 和全事件功率层 `0.63859/55.17%` 提升到
-`0.68078/68.5%`（mean-worst/QoS 率）。包含每个 episode 首个不可因果事件时，
-检测残差门后的 overall 值为 `0.66127/66.29%`，联合裕量仍为 `2.03e-6`，检测约束
-与净增益违例均为 0。
-
-更新后的最终事件物理 Oracle 进一步表明：原部署、固定结构功率、单工联合结构/
-功率、全双工 mean-worst 分别为 `0.67764/0.91817/0.98475/0.98815`；单工联合可行解
-20/20 达到 0.6，而全双工平均只再增加 `0.00340`。因此当前主要差距是低成本分布式
-结构搜索逼近误差，不是必须转向波形层或全双工。放松同几何上界也不能再直接用于
-宣称慢几何必要性，因为它放松了共同 owner、角色、容量和跨目标功率耦合。
-
-创新性保持克制：UAV-ISAC 轨迹/资源联合优化、Dantzig--Wolfe/列生成、conformal
-控制和多智能体 LNS 均已有先例。当前可辩护的是组合机制：**可观测双基地因果修正
--> 始终 RF 可行的量化有限轮功率修复 -> 嵌套物理上界路由 -> B=2 原子结构搜索
--> episode 联合候选/No-op/增益残差门**。它属于潜在集成创新，不作“首次提出”断言。
-
-当前仍有三个部署阻塞项：多步结构 dependency-commit 的 header/bit/时延/能量尚未
-逐步计入统一收益门；3 dB/0.5 ms 仍是工程裕量而非随机 CSI 校准量；慢几何动作只被
-路由、尚未实现。因此结构控制器继续默认关闭，也没有使用新的 test 或 confirmation
-种子。
-
-新增实现与证据：
-
-- [`geometry_gain_predictor.py`](../uav_isac/coordination/geometry_gain_predictor.py)
-- [`power_repair_transport.py`](../uav_isac/coordination/power_repair_transport.py)
-- [`dual_guided_structure_repair.py`](../uav_isac/coordination/dual_guided_structure_repair.py)
-- [`episode_joint_conformal.py`](../uav_isac/evaluation/episode_joint_conformal.py)
-- [`audit_power_repair_transport_trace.py`](../tools/audit_power_repair_transport_trace.py)
-- [`audit_dual_guided_structure_trace.py`](../tools/audit_dual_guided_structure_trace.py)
-- [`cross_split_transport_certificate.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/cross_split_transport_certificate.json)
-- [`cross_split_routed_detection_certificate.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/cross_split_routed_detection_certificate.json)
-- [`selection20_structure_frozen_validation.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/selection20_structure_frozen_validation.json)
-- [`selection20_final_updated_physical_oracle.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/selection20_final_updated_physical_oracle.json)
-- [`summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/summary.json)
-
-本轮隔离回归为非 belief `507 passed`、belief 校准 `14 passed`，无断言失败。
-
-本 Gate 未使用新的最终测试或 confirmation 种子，新增控制器继续默认不接入部署。
-隔离全回归为 `487 passed + 14 passed`；没有断言失败。
-
-### 4.20 Gate D0.14：通信有界 Top-1 与对偶区间反馈排序
-
-D0.13 的 Top-8 结构搜索仍遗漏了一项关键成本：每个候选的精确功率验证都需要
-owner feedback/price 往返，已接受原子动作还需要 prepare/vote/decision。若只计算
-最终动作而不计算搜索过程，约 13 次精确验证会把通信复杂度隐藏在控制器之外。本 Gate
-将结构周期定义为严格串行的完整序列：
-
-```text
-当前结构功率验证
-  -> [Top-1 候选功率验证 -> 若接受则原子提交]，最多 3 步。
-```
-
-序列证书逐步累计 header、epoch、digest、索引、6-bit 价格、binary16 Deflection、
-正交反馈争用、Shannon 时延、RF 能量和原子提交，并同时检查总时延不超过 `0.1 s`、
-单包不超过链路 deadline，以及每架 UAV
-`P_comm + sum_q P_sense,q <= 1 W`（该历史普通单调实例选择了用满预算的最优解）。
-解析最小通信功率采用机器精度级单向上取整，修复了
-门限复算约 `-3.4e-15 dB` 的浮点误判；SNR 门限本身没有放宽。
-
-仅使用可行下界的 Top-1 会降低排序质量。为此利用功率层已经公开的量化目标价格
-`lambda in simplex(Q)`，对每个候选构造严格区间：
-
-```text
-L(S') <= t*(S') <= U_lambda(S'),
-U_lambda(S') = sum_i b_i max_q lambda_q a'_iq.
-```
-
-`L` 是当前功率重放、公共全目标列混合和“当前列--公开价格最佳响应列”最优凸组合三者
-中的最大值，因而始终对应真实可行 RF 分配。`U_lambda` 来自 max--min LP 的单纯形
-对偶，对任意公开价格均是有效上界。候选只按
-
-```text
-score(S') = 0.5 L(S') + 0.5 U_lambda(S')
-```
-
-排序；上界绝不进入接受条件。Top-1 候选仍须通过有限轮量化功率复算、严格单调改进、
-完整通信序列和 episode-conformal 净收益门，否则执行 No-op。训练池中
-`kappa=0.25/0.5/1.0` 的 raw mean-worst 分别为
-`0.72147/0.72157/0.71468`，纯上界明显过度乐观，因此冻结区间中点，不再用 selection
-结果调参。
-
-冻结 selection20 的 600 个因果事件中，267 个触发结构层，完整序列 267/267 可行；
-平均 `6282.63 bit`、平均总协议时延 `27.70 ms`、最大 `46.44 ms`，功率恒等式误差不超过
-`2.22e-16 W`。相对只用可行下界的通信闭合 Top-1，raw mean-worst 从 `0.67129`
-提高到 `0.67895`，QoS 率从 `0.66333` 提高到 `0.68167`，已接受动作 harm 为 0；它也
-接近尚未完整计费的 Top-8 `0.68078`，说明对偶反馈改善了排序，而不是靠扩大候选池。
-
-calibration20 与 selection20 继续按 episode 隔离。5% 风险下有限样本覆盖下界为
-`20/21=95.24%`，联合检测余量为 `2.03e-6`。计入切换、逐事件真实 bit、最大单包时延
-和 RF 能量后，443 个候选动作接受 414 个；包含每个 episode 首个不可因果事件在内的
-总体 mean-worst/QoS 率为 `0.65507/65.97%`。接受动作的检测约束违例、净收益违例及
-episode-any 违例均为 0。
-
-研究主线仍是**分布式结构与感知功率分配/控制层**，不是波形层；OTFS 波形、子载波、
-波束和模糊函数仍固定。可辩护的创新性是“公开对偶价格形成可证区间排序 + 通信有界
-Top-1 原子 LNS + 完整验证/提交计费 + episode 级 No-op 安全门”的组合机制，仍只表述为
-潜在集成创新，不作首创断言。
-
-部署证书仍为 `false`。当前 trace 工具集中持有因果预测增益张量；虽然区间的加和项可按
-UAV/owner 分解，owner-local 最佳提案 Token、量化字段及候选竞争通信尚未逐 bit 实现。
-此外，确定性 U2U 重放尚无独立随机 CSI/丢包残差校准，`3 dB/0.5 ms` 仍是工程裕量，
-slow-geometry 动作也尚未实现。控制器继续默认关闭，本 Gate 没有使用新的最终测试或
-confirmation 种子。
-
-新增实现与证据：
-
-- [`structure_sequence_transport.py`](../uav_isac/coordination/structure_sequence_transport.py)
-- [`dual_guided_structure_repair.py`](../uav_isac/coordination/dual_guided_structure_repair.py)
-- [`audit_dual_guided_structure_trace.py`](../tools/audit_dual_guided_structure_trace.py)
-- [`train20_structure_top1_dual_interval_k0p5_development.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/train20_structure_top1_dual_interval_k0p5_development.json)
-- [`selection20_structure_top1_dual_interval_k0p5_frozen.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/selection20_structure_top1_dual_interval_k0p5_frozen.json)
-- [`cross_split_routed_top1_dual_interval_k0p5_transport_certificate.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/cross_split_routed_top1_dual_interval_k0p5_transport_certificate.json)
-- [`gate_d0_14_summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/gate_d0_14_summary.json)
-
-隔离全回归为非 belief `512 passed`、belief 校准 `14 passed`；无断言失败。
-
-### 4.21 Gate D0.15：owner 单提案协议与完整决策时延门
-
-D0.14 已计入候选验证与原子提交，但 trace 重放仍集中持有全部候选区间分数，且软收益门
-只使用最大单包时延。后者只适合检查单链路 deadline，不能表示多阶段重构动作完成前的
-信息年龄。因此 D0.15 明确取代 D0.14 的软时延结果，并采用
-
-```text
-T_decision = T_baseline
-           + sum_s (T_proposal,s + T_verification,s + T_commit,s)
-```
-
-计算 `lambda_delay T_decision`。最大单包时延继续作为硬链路约束，不再作为完整动作的
-软时延代理。专门的防回归测试保证只要完整协议字段存在，收益门就不能退回最大单包字段。
-
-候选竞争改为有界 owner 单提案协议。B=2 弱目标集合被划分给其当前 owner；每个 owner
-只发送本组区间分数最高的一个 N5/N6 原子候选。未量化时该分解不改变全局 Top-1：
-
-```text
-max_o max_{S' in C_o} score(S') = max_{S' in union_o C_o} score(S').
-```
-
-因为所有候选只改变两个弱目标的单/双目标块，每步 owner 提案数不超过 `B=2`。每个
-目标旧边和新边各不超过 `L_pair`，所以边翻转数满足
-`E_toggle <= 4 L_pair`；角色变化不超过 3 个 UAV，owner 变化不超过 2 个目标，依赖闭包
-参与者不超过 K。Token 显式包含 header、epoch、digest、proposer、N5/N6 类型、受影响
-目标、角色/owner/边差分和 `[L,U]`。`L` 用 IEEE binary16 向下取整，`U` 向上取整；
-不支持的量化宽度直接报错，而不是使用未计数的精度侧信道。
-
-协议时序固定为
-
-```text
-当前结构功率验证 -> owner 正交提案 -> Top-1 功率验证
-                   -> 若严格改进则 prepare/vote/decision。
-```
-
-calibration20 上，每事件最多 1/2/3 个原子步骤的 raw mean-worst 为
-`0.71319/0.72028/0.72150`，平均完整结构时延为 `18.14/26.48/29.58 ms`。在冻结的
-切换、bit、完整决策时延和 RF 能量权重下，平均净效用反而为
-`+0.13372/+0.08256/+0.06122`，正净效用率为 `70.29%/63.24%/58.82%`。因此第二、
-第三次验证的边际检测收益小于信息年龄成本，最终冻结为**每个事件最多一次原子结构
-重构**，而不是继续堆叠 LNS 步数。
-
-冻结 selection20 的 267 个结构触发事件全部通过完整序列硬证书。每事件 owner 提案平均
-`1.36` 个、最多 `2` 个，提案空口平均 `76.33 bit`、最大 `259 bit`；全部结构协议平均
-`4085.42 bit`、最大 `6383 bit`，平均时延 `17.86 ms`、最大 `22.63 ms`，功率恒等式
-误差不超过 `2.22e-16 W`。raw mean-worst/QoS 率为 `0.67336/67.33%`，已接受动作
-harm 为 0。
-
-calibration20 到 selection20 的 episode split-conformal 覆盖下界仍为 `20/21=95.24%`，
-联合检测余量为 `2.03e-6`。使用完整决策时延收费后，443 个候选动作接受 347 个；包含
-每个 episode 首个不可因果事件的总体 mean-worst/QoS 率为 `0.62787/64.68%`。接受动作
-的检测约束违例、净收益违例和 episode-any 违例均为 0。作为反证，三步策略在相同完整
-时延口径下只有 `0.59942/63.87%`，说明用更深搜索提高 raw 检测值会降低真实控制净收益。
-
-本 Gate 的潜在创新性是“owner 分组的定向区间 Token + 通信有界单步 Top-1 + 完整决策
-信息年龄收费 + episode 级 No-op 安全门”的组合，而不是新的波形或普通 MAPPO 网络层。
-研究重点仍是分布式结构/感知功率分配和安全控制；OTFS 波形、子载波、波束与模糊函数
-保持固定，不作首创性断言。
-
-部署证书继续为 `false`。当前重放已发送候选描述与区间，但 owner 候选缓存仍由集中 trace
-张量模拟，尚未从实际送达 Token 的年龄、丢包和版本状态逐项重建；随机 CSI/丢包残差也
-没有独立校准，`3 dB/0.5 ms` 仍是工程裕量，slow-geometry 动作尚未实现。控制器继续
-默认关闭，本 Gate 未使用新的最终测试或 confirmation 种子。
-
-新增实现与证据：
-
-- [`owner_proposal_transport.py`](../uav_isac/coordination/owner_proposal_transport.py)
-- [`structure_sequence_transport.py`](../uav_isac/coordination/structure_sequence_transport.py)
-- [`dual_guided_structure_repair.py`](../uav_isac/coordination/dual_guided_structure_repair.py)
-- [`audit_geometry_feedback_cross_split.py`](../tools/audit_geometry_feedback_cross_split.py)
-- [`train20_owner_proposal_steps1_development.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/train20_owner_proposal_steps1_development.json)
-- [`selection20_owner_proposal_steps1_frozen.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/selection20_owner_proposal_steps1_frozen.json)
-- [`cross_split_owner_proposal_steps1_full_delay_certificate.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/cross_split_owner_proposal_steps1_full_delay_certificate.json)
-- [`gate_d0_15_summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/gate_d0_15_summary.json)
-
-最终隔离全回归为非 belief `518 passed`、belief 校准 `14 passed`；无断言失败。
-
-### 4.22 Gate D0.16：owner-local 两部分物理证书与反馈控制变量审计
-
-D0.16 对 D0.15 的信息边界做了反向审计。此前 lag-1 系数由 trace 中的完整
-`privileged_alpha/g_dd/chi_rep` 张量解析重建，因而“上一帧系数为正”并不等价于
-“该边曾被本地观测”。在 calibration20 中，完整物理支持平均为 `175.73` 条边，
-真正由上一帧已选且有正感知功率的边平均仅 `11.28` 条；约 `93.6%` 的物理边并无
-直接反馈来源。当前帧 `privileged_candidate/g_dd` 和全局真值目标状态也不能作为部署输入。
-
-为避免把零增益支持错误混入普通回归误差，本 Gate 将物理证书拆为两部分。首先只在
-双向实际送达 Token 的端点对上形成候选，并由接收 owner 的本地 belief 计算 OTFS
-延迟--多普勒有效度，采用严格支持判据
-
-```text
-g_dd_hat(i,j,q) - m_phys > g_min.
-```
-
-其次，上一轮已选且有正感知功率的边反馈目标级双基地雷达方程充分统计量
-
-```text
-kappa_q = a_ijq R_iq^2 R_jq^2,
-a_hat_ijq = kappa_q / (R_iq_hat^2 R_jq_hat^2),
-```
-
-并形成 `[a_hat exp(-m_phys), a_hat exp(+m_phys)]`。一个独立 episode 内对所有帧、候选边、
-DD 假阳性以及双侧对数增益误差共同取最大值，只校准一个联合半径。这样不会把同一事件的
-上千相关候选当成独立样本，也不会把上下两个 5% 证书误称为 95% 联合证书。
-
-40 个互不重叠、且与 selection/stress/test/confirmation 均无交集的开发事件上，5% 探索性
-半径为 `0.245581`，阶次 `39/41`，对应乘法区间 `[0.78225, 1.27836]`。但端到端还包含
-检测安全门和链路门，必须满足 union bound 风险预算
-
-```text
-alpha_total >= alpha_physics + alpha_detection + alpha_link.
-```
-
-因此下一 Gate 的物理层冻结风险改为 `2.5%`；在 40 个校准事件下只能使用最大次序统计量，
-覆盖下界为 `40/41=97.56%`，半径为 `0.253913`。链路随机残差尚未校准，所以这仍不是
-部署证书。
-
-反馈闭环使用当前协调检测 EMA 作为 No-op 控制变量，而不是让几何模型同时替代已部署基线：
-
-```text
-P_hat(S') = clip(P_feedback(S) + P_phys_lower(S') - P_phys_lower(S), 0, 1).
-```
-
-这修复了候选与 No-op 使用不同偏差基线的问题，但没有消除逐目标风险。在最后一次未揭盲的
-开发 holdout20 上，平均 Token 候选/物理准入边数为 `179.9/100.88`，准入物理精度
-`99.9934%`，物理 episode-any 越界为 `10%`。单步 Top-1 LNS 的 raw mean-worst/QoS 为
-`0.54851/46.17%`，相对 No-op 伤害率 `0.167%`；完整结构协议平均 `3614.10 bit`、
-`16.41 ms`，最大 `22.79 ms`，1 W 功率平衡误差不超过 `2.22e-16 W`。因此本轮没有
-通过性能或安全 Gate。
-
-进一步的事件联合检测残差达到 `0.73608`，单一全局加性半径会拒绝所有动作。原因是某些
-非瓶颈目标可能在 worst 指标改善时显著下降；不能通过取消 `forall q` 约束来隐藏该问题。
-下一步冻结为“目标级自归一化反馈证书”：不确定度显式包含 Token 年龄/送达状态、本地 belief
-协方差、距 `g_min` 的 DD 支持裕量、物理区间宽度、检测反馈--物理预测分歧和结构切换年龄。
-MAPPO/Student 仍只估计局部边际价值，owner Token 携带 `kappa_q`、检测反馈与不确定度，
-确定性硬投影层独占提交权。已揭盲 holdout 不再复用；归一化分数冻结后必须换新的独立开发事件。
-
-本 Gate 的研究重点仍是**分布式结构、感知功率分配与事件触发安全控制**，不是波形优化。
-OTFS 波形、子载波、波束和模糊函数保持固定，只通过 DD 有效度、双基地雷达方程和 1 W RF
-预算进入硬约束。控制器继续关闭，未使用新的最终 test 或 confirmation 种子。
-
-新增实现与证据：
-
-- [`owner_local_physics.py`](../uav_isac/coordination/owner_local_physics.py)
-- [`audit_owner_local_physics_certificate.py`](../tools/audit_owner_local_physics_certificate.py)
-- [`audit_dual_guided_structure_trace.py`](../tools/audit_dual_guided_structure_trace.py)
-- [`audit_geometry_feedback_cross_split.py`](../tools/audit_geometry_feedback_cross_split.py)
-- [`d016_feedback_holdout20_owner_local_physics_frozen.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/d016_feedback_holdout20_owner_local_physics_frozen.json)
-- [`d016_feedback_holdout20_owner_local_lns_feedback_frozen.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/d016_feedback_holdout20_owner_local_lns_feedback_frozen.json)
-- [`gate_d0_16_summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/gate_d0_16_summary.json)
-
-### 4.23 Gate D0.17：目标储备、双侧反馈证书与快慢环并行审计
-
-本 Gate 继续聚焦**分布式结构、感知功率分配和事件触发安全控制**，不进入波形层。OTFS 波形、子载波、波束和模糊函数均保持固定；物理层只通过 DD 支撑、双基地增益、检测概率单调映射以及单 UAV `通信功率+感知功率=1 W` 进入硬约束。
-
-首先修复了自归一化分数中的一个数学错误。旧分数额外校准逐目标概率差，但控制器并未消费该量；同时候选概率经过 `[0,1]` 裁剪后，反馈锚定项不再代数消去，少数事件产生 `1e4--1e5` 的伪异常分数。新证书只校准实际用于决策的逐目标双侧包络：
-
-```text
-A_q = max(F_q-L_0,q, 0) + eps,
-B_q = max(U_0,q-F_q, 0) + eps,
-L_c,q = clip(P_hat_c,q-m A_q, 0, 1),
-L_0,q = clip(F_q-m A_q, 0, 1),
-U_0,q = clip(F_q+m B_q, 0, 1).
-```
-
-由最小值算子的单调性，
-
-```text
-min_q P_c,q - min_q P_0,q
-  >= min_q L_c,q - min_q U_0,q.
-```
-
-因此不再使用“所有目标最大误差之和”惩罚 worst 增益。事件内所有帧和目标仍只取一个最大分数，40 个独立事件在 `alpha=0.05` 下使用第 `39/41` 阶统计量，覆盖下界为 `95.12%`。
-
-候选生成也从事后拒绝改为储备优先。约束
-
-```text
-L_c,q >= min(L_0,q, P_floor)
-```
-
-先利用检测函数的严格单调性反解为每个目标的最小 Deflection，再加入有限轮 Dantzig--Wolfe 主问题。主问题先满足储备，再最大化 worst；储备约束和 max--min 约束的对偶乘子合并为公开目标价格，每个 UAV 仍只用本地增益生成完整 RF 列。所有列及其凸组合保持逐 UAV 感知功率预算，最终 `1 W` 平衡误差不超过 `4.44e-16 W`。结构 Top-1 代理增加了储备优先的公共列水填充下界；这是真实可实施时分凸组合，不把 relaxed upper 当成可行动作。
-
-首次揭示的全新训练池 holdout20 与既有 80 个开发事件及 selection/stress/test/confirmation 全部无交集。未加储备的 owner-local LNS raw mean-worst/QoS 为 `0.61509/54.83%`，动作伤害率为 0，说明搜索层有价值而证书是瓶颈。揭示后该集合只用于架构诊断，不再称为独立最终验证。
-
-储备、双侧证书和 slow-geometry 快速临时修复组合后，诊断集合上的硬传输约束策略从 No-op `0.39971/30.48%` 提高到 `0.47302/40.81%`（mean-worst/QoS），候选接受率 `22.89%`。接受事件的同步区间越界、认证服务下界违例、真实逐目标 no-harm 违例和 worst 净增益违例均为 0。owner-local DD 准入精度为 `99.9965%`，episode-any DD 支撑越界为 `5%`。但是该结果仍明显低于 `0.60`，且属于揭示后的开发诊断，不能作为部署证书。
-
-快慢环并行只把认证 mean-worst 从 `0.47265` 提高到 `0.47302`，因此 slow route 等待期 No-op 不是主瓶颈。统一扩大 Top-k 仍被否决；下一主线必须是：在闭环重放中持久化已接受的结构/功率/Token/反馈状态，并实现带转移证书的慢几何优化。bit、时延和能量当前已作为容量、deadline 和 RF 功率硬约束；在没有约束对偶价格前，不再把任意常数权重重复加到检测概率上。
-
-部署状态仍为 `false`。剩余阻挡项包括：策略改变后需要新的独立校准和未揭示开发集；闭环状态尚未跨事件传播；慢几何动作尚未实现；随机 CSI、丢包及 Swerling/模型漂移残差尚未联合校准。没有使用新的最终 test 或 confirmation 种子。
-
-新增实现与证据：
-
-- [`self_normalized_feedback.py`](../uav_isac/evaluation/self_normalized_feedback.py)
-- [`maxmin_power.py`](../uav_isac/coordination/maxmin_power.py)
-- [`dual_guided_structure_repair.py`](../uav_isac/coordination/dual_guided_structure_repair.py)
-- [`audit_self_normalized_feedback_cross_split.py`](../tools/audit_self_normalized_feedback_cross_split.py)
-- [`d017_self_normalized_holdout_seeds_k6q6.json`](../config/d017_self_normalized_holdout_seeds_k6q6.json)
-- [`gate_d0_17_summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/gate_d0_17_summary.json)
-
-隔离回归为非 belief `531 passed`、belief `14 passed`，无失败。
-
-隔离全回归为非 belief `521 passed`、belief 校准 `14 passed`，无断言失败。一次合并进程在既有
-belief `eigvalsh` 用例中触发 MKL 原生中止；拆分重跑后两组均通过，因此记录为运行库并发问题，
-不记录为算法回归通过前的断言失败。
-
-### 4.24 Gate D0.18：动作时刻对齐、持久闭环与物理区间双证书
-
-本 Gate 完成了一次架构级修正，而不是继续修改 Top-k 或 MAPPO 网络。研究重点明确为
-**分布式感知结构分配、连续 RF 功率再优化和事件触发安全控制**；OTFS 波形、子载波、波束与
-模糊函数保持固定。波形物理只以延迟--多普勒可分辨性、双基地雷达增益和单 UAV
-`通信功率+感知功率=1 W` 的硬约束进入控制层。
-
-#### 动作时刻对齐
-
-D0.17 trace 的 `local_obs` 对应动作前状态，而 `g_dd/alpha/P_D` 对应动作执行后的物理状态。
-用动作前几何预测动作后检测量会产生系统性时序偏差。D0.18 按环境中的同一运动学更新对
-owner-local 状态作因果投影：
-
-```text
-p_i^+ = Project_Omega(p_i + Delta p_i),
-v_i^+ = BounceAndClip(Delta p_i / dt, v_max).
-```
-
-目标位置若具有椭球不确定集
-`(p-p_hat)^T Sigma_p^{-1}(p-p_hat) <= rho^2`，令
-`r_p=rho sqrt(lambda_max(Sigma_p))`，则双基地时延满足确定性界
-
-```text
-|Delta tau| <= 2 r_p / c.
-```
-
-多普勒界由单位视线向量在位置球内的扰动上界和目标/UAV 速度界共同得到；把所得时延、
-多普勒归一化区间代入 `sinc^2`，在区间端点、零点和整数零陷处取严格最小值，形成
-`g_dd^L`。超出 DD 支撑的边下界置零并 fail closed，不再把“当前已选边”无条件继承为安全边。
-动作对齐后，固定目标基准的全边联合对数残差从约 `0.220` 降至不超过
-`4.39e-6`，DD 准入物理精度为 `100%`，60 个独立 episode 中没有 episode-any DD
-支撑越界。这表明此前的主要物理模型误差来自时间索引错位，不是需要更宽的经验裕量。
-
-#### 有适用域的目标不变量缓存
-
-双基地充分统计量 `kappa_q=a_ijq R_iq^2 R_jq^2` 按目标独立保存，并携带 age/version；禁止
-跨目标填补，过期后下界归零。本基准中 `tracking_enabled=false`、目标固定、`RCS=1`、
-`use_swerling=false`，所以 `kappa_q` 在 episode 内保持不变，150 帧缓存具有物理依据。
-该结论**不能**外推到运动目标、随机 RCS 或 Swerling 起伏；这些场景必须引入目标状态转移和
-模型漂移不确定度，而不能继续沿用长缓存。
-
-#### 持久闭环和双证书
-
-审计不再把每一帧视为独立反事实：只有通过证书的结构才进入下一帧已部署状态，连续 RF
-功率则按冻结 trace 的当前局部提案作每事件 recourse。候选替代 No-op 的反馈证书仍满足
-
-```text
-L_c,q >= min(L_0,q, P_floor),  for every q,
-min_q L_c,q - min_q U_0,q > 0.
-```
-
-新增物理区间证书使用候选物理下界和 No-op 物理上界满足同一逐目标条件。控制器当前允许
-`feedback OR physics`，但两个分支的并集风险尚未做联合 episode 级分配，所以仍是开发证书；
-不能由“每个分支单独看起来安全”推出并集已具有相同覆盖率。
-
-冻结参数为 4 轮、6-bit 价格、16-bit 反馈、Top-1、每事件最多一个原子结构步骤，边残差
-双侧余量 `1e-5`，反馈和控制归一化余量均为 `1.0`。两个 30-seed 集与历史开发集及
-selection/stress/test/confirmation 均不重叠，统计单位为独立 episode seed，不把 episode
-中的候选或帧误当成独立校准样本：
-
-| 独立划分 | 因果帧数 | 持久闭环 mean-worst | QoS 率 | 接受动作 |
-|---|---:|---:|---:|---:|
-| calibration30 | 900 | 0.49869 | 52.89% | 467 |
-| validation30 | 900 | 0.64067 | 69.33% | 578 |
-| 合并 60 seeds | 1800 | **0.56968** | 61.11% | 1045 |
-
-1045 个接受动作中，worst 伤害、反馈区间越界、物理区间越界、逐目标认证服务违例和真实
-逐目标 no-harm 违例均为 0；最大完整协议时延 `55.97 ms`，功率平衡误差不超过
-`4.44e-16 W`。安全层因此通过开发审计。但 validation 单独超过 0.60、calibration 只有
-0.49869，两者均值差 `0.14198`；合并 mean-worst `0.56968<0.60`。因此 Gate 状态是
-**安全通过、性能失败**，不得挑选 validation 结果宣称架构达标，部署控制器继续关闭。
-
-本轮还否决了两条表面上更“深”的修改：每事件做两个顺序 LNS 步骤会增加 bit/时延且性能
-略降；无条件继承已选边的 DD 支撑会产生假安全接受。真正有创新价值的部分是“动作时刻一致的
-owner-local 物理预测 + 有版本的目标不变量 Token + 确定性 DD/检测区间 + 持久化 No-op
-基线 + 学习器只提供边际价值、硬安全层独占提交权”的组合。
-
-下一 Gate D0.19 不再放宽证书或扩大 Top-k，而应针对划分不稳定性实现**带转移证书的时域候选
-生成**：在短时域内联合传播 UAV/目标状态不确定度，优化保守 worst 检测下界，并显式收费
-切换、bit 和决策时延；结构仍只执行首个原子动作，下一事件滚动重算。随机丢包、随机 CSI、
-Swerling/模型漂移、实际 Token 中的 `kappa/age/version` 量化成本以及 live controller RF
-recourse 必须进入独立事件校准。在安全与合并性能同时通过前，不使用最终 test 或 confirmation
-种子。
-
-新增实现与证据：
-
-- [`owner_local_physics.py`](../uav_isac/coordination/owner_local_physics.py)
-- [`physics_interval_gate.py`](../uav_isac/evaluation/physics_interval_gate.py)
-- [`audit_dual_guided_structure_trace.py`](../tools/audit_dual_guided_structure_trace.py)
-- [`d018_action_aligned_closed_loop_seeds_k6q6.json`](../config/d018_action_aligned_closed_loop_seeds_k6q6.json)
-- [`d018_action_aligned_calibration30_frozen_closed_loop.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/d018_action_aligned_calibration30_frozen_closed_loop.json)
-- [`d018_action_aligned_validation30_frozen_closed_loop.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/d018_action_aligned_validation30_frozen_closed_loop.json)
-- [`gate_d0_18_summary.json`](../results/architecture_v2_scale_k6q6_geometry_feedback_gate_d0_12/gate_d0_18_summary.json)
-
-该 Gate 当时的完整回归按 MKL 稳定边界拆分执行：非 belief `530 passed`、belief 相关
-`22 passed`，合计 `552 passed`。2026-08-20 当前 G2-1A 基础设施工作树重新执行全部测试：
-非 belief `1036 passed`、belief 测试独立 `14 passed`，合计 **1050 passed**、无
-断言失败。合并进程仍可在 Windows/MKL `eigvalsh` 内原生中止；该事件继续记录为运行库
-批处理问题，不伪装成一次完整单进程通过。
-
-## 9. 2026-08-20 可信执行审计
-
-本轮不改变已经冻结的性能数字，修复的是“一个结果是否可复现、可归因、可进入 Gate”的
-前提条件：
-
-1. 配置加载改为严格模式，未知键直接报错；全部版本化 YAML 均已加载验证。
-2. 动作空间显式播种；`reset(seed)` 同步重绑定环境、动作映射和感知衰落 RNG。
-3. run manifest 新增确定性源码快照、解析后配置、Git dirty 状态、运行时依赖和检查点
-   SHA-256。旧结果若只有 commit 字符串、但定义它的工作树改动未提交，不能据此声称
-   “可由该 commit 单独复现”。
-4. 隐蔽性约束求解失败改为 fail-closed，禁止退化到无约束功率；V3/拥塞修复异常会进入
-   `info`，且其 cache、计数、错误和通信 bit 状态纳入精确快照。
-5. 正式 Gate 校验 episode 数组等长、有限、概率范围和 seed 唯一性。历史失败与当前
-   强制 Gate 分离：D1.5 LCB、6/6 V3-C0、6/6 Gate 1 LCB 均显示
-   `DISCLOSED FAIL`。其中 Gate 1 的点估计 `0.780` 不能覆盖 LCB `0.689<0.70`；当前
-   仍未完成 6/6 置信认证。
-
-因此，本轮提高的是结论可信度而非性能本身。下一算法 Gate 必须使用预注册、未查看的独立
-seed，并同时满足通信 bit/时延/功率约束、三项感知 QoS 地板和 Wilson LCB 门槛。
-
-## 10. G2-1A bridge：5/100 分步诊断（2026-08-20，IN PROGRESS）
-
-四系统各执行历史 bank 的前 5 个唯一 episode seed，共 20 个隔离 worker，原生崩溃数为 0。
-结果仅用于 falsification 和执行审计；不是 blind，不是正式 100-seed G2-1A 结论。
-
-| 系统 | steady | weak3 | worst | QoS | Wilson LCB | delivery | deadline violation | sensing W/frame |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4×4 | 0.96020 | 0.94693 | 0.86069 | 5/5 | 0.56551 | 1.00000 | 0.00000 | 0.1004 |
-| 8×8 V3-C0 | 0.26850 | 0.26101 | 0.26101 | 0/5 | 0.00000 | 0.99919 | 0.00081 | 0.2008 |
-| 6×6 V3-C0 | 0.37420 | 0.36754 | 0.36754 | 1/5 | 0.03622 | 0.81667 | 0.18333 | 0.1506 |
-| 6×6 multi-scale CE | 0.28884 | 0.28718 | 0.28718 | 1/5 | 0.03622 | 0.78022 | 0.21978 | 0.1506 |
-
-6×6 使用相同有序 seed；CE−V3-C0 的配对差为 steady `-0.08535`、weak3/worst
-`-0.08036`，三项均只赢 `2/5`。这些数字提示 CE 的额外 `5736.448 bit/frame` payload
-并未在小样本中稳定转化为尾部感知收益，且 deadline violation 高于 V3-C0；但 n=5 不足以
-支撑模型选择或参数修改。
-
-审计产物为 [`_g2_1a_batch5_audit.json`](../results/_g2_1a_batch5_audit.json)。所有可执行
-一致性检查通过：episode 数组与 seed 对齐、汇总可重算、Wilson 有界、通信概率守恒、感知
-总功率等于 `K×0.0251 W`。正式状态保持 `formal_complete=false`，下一步继续断点扩展到
-100/100，再冻结阈值进入新的预注册 G2-1B seed bank。
-
-## 11. 不同规模 worst 差机制审计（2026-08-20）
-
-新增 [`audit_scale_worst_gap.py`](../tools/audit_scale_worst_gap.py)，输出
-[`_scale_worst_gap_audit5.json`](../results/_scale_worst_gap_audit5.json)。该审计联合读取
-当前 20 个隔离 worker、精确历史 100-seed bank 的几何元数据和三个 cap-aware oracle 探针。
-
-| 系统 | 5-seed worst | 初始100-bank worst-nearest | 初始100-bank matching bottleneck | 最弱目标最大功率份额 | P0 coverage |
-|---|---:|---:|---:|---:|---:|
-| 4×4 | 0.861 | 246 m | 363 m | 0.28 | 1.00 |
-| 6×6 V3-C0 | 0.368 | 385 m | 523 m | 0.86 | 1.00 |
-| 8×8 V3-C0 | 0.261 | 363 m | 555 m | 0.90 | 1.00 |
-| 6×6 CE | 0.287 | 385 m | 523 m | 0.51 | 0.60 |
-
-初始到最终 worst-nearest 在当前五个 seed 上平均改善约 4×4 `60 m`、6×6 V3-C0
-`133 m`、8×8 `80 m`，但解析功率层仍需把 86%–90% sensing mass 投向一个最弱目标，
-说明移动改善不足以消除双基地/匹配尾部。8×8 最终 worst-nearest（281 m）甚至优于
-6×6（312 m），但 worst 更低；这进一步证明 nearest 单指标不能解释尺度差。
-
-首次 physical-oracle 探针暴露旧 oracle 未施加 0.0251 W sensing PA cap，曾对 6×6
-seed 237 给出不可行的 power-only worst=1；该结果已作废。修正后探针如下：
-
-| 探针 | sampled deployed | pair-only | power-only | joint single-role | full duplex |
-|---|---:|---:|---:|---:|---:|
-| 4×4 seed 643 | 0.716 | 0.587 | 0.982 | 0.982 | 0.983 |
-| 6×6 seed 237 | 0.295 | 0.295 | 0.295 | 0.352 | 0.352 |
-| 8×8 seed 248 | 0.087 | 0.087 | 0.087 | 0.123 | 0.123 |
-
-每行只有一个 episode 的 5 个抽样帧，不能做置信声明。4×4 的 pair-only 低于 deployed，
-说明该孤立 oracle 的候选支持/约束集不必包含部署图，不能将 pair-only 标签误称为严格上界；
-可用于尺度归因的是满足 cap 的 joint 探针方向。下一正式实验必须使用难度匹配的 nested 或
-coupled geometry bank，并同时报告 nearest、second-nearest、matching bottleneck 和
-cap-aware joint oracle gap。
-
-## 12. 跨尺度后续协议预注册（2026-08-20，未执行）
-
-该协议不替代 G2-1A/G2-1B，也不允许用当前 5-seed 调参：
-
-| Gate | 问题 | 冻结量 | 主要输出 | 调算法 |
-|---|---|---|---|---:|
-| S0-P | 固定 15 s mission/硬件的自然物理 scaling | 密度、PA、速度、T | physical capability 分布 | 否 |
-| S0-M | 相同 difficulty 下的 scale-only | nearest/second/matching/relative mobility | 4/6/8 paired gap | 否 |
-| S0-F | controller 是否混杂规模差 | common controller + factorial | scale×controller interaction | 否 |
-| S0-O | 失败来自 fixed/L2/physical 哪层 | cap-aware oracle | Hold/L2/L3/U 比例 | 否 |
-| S1-G | 双基地几何机制是否有方向性价值 | S0 全部阈值 | shadow capability gain | 否 |
-| S1-CIS | Region II 是否可增量修复 | physical ceiling 前置门 | active-set/full-path 一致性 | 否 |
-| S2 | 哪个机制获得 live 权限 | fresh preregistered seeds | QoS+LCB+物理/通信门 | 是 |
-
-S0-P 保留 `rho_move` 随规模下降，因为它是固定 mission 的真实物理结果；S0-M 才配平相对
-机动能力和几何 difficulty。两套实验不得相互替代。极值 `F_R^Q` 仅作为 IID 理想化解释，
-真实结论以 empirical capability/matching 分布为准。
-
-CE 另行预注册 2×2 factorial，不继续训练：
-
-| | baseline transport | CE transport/load |
-|---|---|---|
-| baseline Student | A | B |
-| CE Student | C | D |
-
-`A->C` 估计 Student 表征效应，`A->B` 隔离 transport 负载伤害，`C->D` 测 CE 在自身
-transport 下的闭环影响。每个 cell 必须共享 seed、物理配置和 controller，记录 admission、
-P0 coverage、trajectory divergence、bit、deadline 与 worst；不得只比较最终均值。
-
-## 13. G2-1A bridge：10/100 分步里程碑（2026-08-20，IN PROGRESS）
-
-在冻结配置、checkpoint、历史 seed 顺序和单 worker 协议下，每系统新增 5 个 episode，
-共新增 20 个 worker，0 crash。综合审计文件为
-[`_g2_1a_batch10_audit.json`](../results/_g2_1a_batch10_audit.json) 与
-[`_scale_worst_gap_audit10.json`](../results/_scale_worst_gap_audit10.json)。
-
-| 系统 | steady | weak3 | worst | QoS | Wilson LCB | delivery | deadline violation | P0 coverage |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4×4 | 0.97865 | 0.97153 | 0.92454 | 10/10 | 0.72246 | 1.00000 | 0.00000 | 1.00 |
-| 8×8 V3-C0 | 0.27842 | 0.26968 | 0.26968 | 1/10 | 0.01788 | 0.99910 | 0.00090 | 1.00 |
-| 6×6 V3-C0 | 0.29725 | 0.28976 | 0.28976 | 1/10 | 0.01788 | 0.81591 | 0.18409 | 1.00 |
-| 6×6 CE | 0.17924 | 0.17841 | 0.17841 | 1/10 | 0.01788 | 0.73340 | 0.26660 | 0.52 |
-
-6×6 CE 与 V3-C0 使用完全相同的 10 个 seed；CE−V3 的 paired steady/weak3/worst
-分别为 `-0.1180/-0.1114/-0.1114`，CE 只赢 `2/10`。CE 的 seed 237/705/752/866
-出现 P0 coverage=0，seed 274 为 0.2；其中多个 episode 的 worst 回落到
-`P_FA≈0.001`。该结果支持预注册 CE Student×Transport factorial，不支持继续训练或
-扩大 payload。
-
-规模机制 telemetry：4×4/6×6/8×8 的最终 worst-nearest 均值约为
-`142/296/256 m`，单目标最大 sensing power share 约为 `0.276/0.861/0.889`；8×8
-虽然 nearest 优于 6×6且通信几乎全交付，worst 仍略低，继续指向双基地 matching、PA cap
-和共享 max-min 水床，而非单最近距离或通信单因子。
-
-新增五个 seed 的运行时间为 4×4 `69 s`、6×6 V3-C0 `154 s`、6×6 CE `129 s`、
-8×8 `381 s`。计算成本随规模显著增长，但当前仅是固定硬件上的工程 telemetry，不拟合
-复杂度阶数。全部可执行一致性检查通过，`formal_complete=false`；下一步继续相同协议扩展，
-不得把 10-seed 结果称为 G2-1A 正式结论。
-
-## 14. G3-A/G3-B post-G2 capability shadow（2026-08-20，开发审计）
-
-使用已查看且不属于未来 blind bank 的 seeds `291/566/99/103/483`，冻结当前 6×6 V3-C0
-checkpoint，生成 750 帧 trace。统计单位仍是 episode；帧相关仅作机制诊断。
-
-G3-B 帧级 Spearman（预测量对实际 worst `P_D`）：single-pair `0.53572`、owner-consistent
-`0.18375`、relaxed `0.30951`、negative matching bottleneck `0.44001`、negative nearest
-`0.19787`、negative second-nearest `0.17412`。`single<=owner<=relaxed` 的 750 帧顺序检查
-零违例。owner 指标未超过最佳距离代理，故不进入 SOCP/live；episode n=5 的相关性仅记录，
-不作显著性或泛化声明。产物：
-[`_g3_b_postg2_capability_explanation.json`](../results/_g3_b_postg2_capability_explanation.json)。
-
-G3-A 从每个 episode 抽取 frame `30/60/90/120/150`，共 25 帧；每帧使用合法
-`0.0251 W/UAV` sensing cap、single-role、local-only fusion 和 trace 中的 pair/receiver
-容量。三重任务地板为 `(worst, bottom-3, average)=(0.61,0.71,0.81)`。结果：
-
-| Region | 帧数 | 证据含义 |
+正式门槛为功率违反 `<=10^-9 W`、截断前能量缺口 `=0 J`。`episode_min_battery>=0` 只是状态
+完整性诊断，因为状态本身会截断到 0，不能单独证明能量因果性。同时保留感知 PA 上限检查，
+不能把联合 RF slack 全部错误注入 sensing PA。
+
+### 4.7 Belief 与结构诊断
+
+诊断字段包括 belief position RMSE、NIS、posterior covariance trace ratio、packet AoI、target
+coverage、唯一 owner 完整率、composable certificate complete fraction、primal–dual gap、fallback
+比例和 movement intervention/fail-closed 比例。这些不是主 QoS 的替代品，而是解释失败根因。
+
+## 5. 算法验证矩阵
+
+| 模块主张 | 必须观察的证据 | 关键消融/反例 | 当前状态 |
+|---|---|---|---|
+| 无真值分布式决策 | truth invariance、缺 belief fail closed | 隐藏真值置换 | 单元测试通过 |
+| 固定结构功率全局最优 | primal 可行、dual upper、gap | 零增益、极小系数、reserve 不可达 | 单元测试通过 |
+| 安全投影有效 | barrier、endpoint、swept | 迎面穿越、初始近距离、陈旧节点 hold | 新门禁已接入 |
+| 物理通信付费 | bits、airtime、energy、delivery | 静默、超 deadline、丢包 | 闭环字段已接入 |
+| 公共模型后再拼接 LP 行 | exact model digest、fallback fraction | 一节点系数分歧 | 已接入 strict profile |
+| 能量因果有效 | pre-clamp deficit | 低电量、候选重算 | 已接入正式门禁 |
+| DD 抽象可校准 | ROC、相关性、分辨率分层误差 | 同栅格/邻栅格双目标 | 待波形离线校准 |
+| Hyperedge 有效 | 唯一 owner、全覆盖、公共视图一致 | 丢失提议、冲突 owner | 当前解析主线 |
+| Markov 候选优于 blind | paired delta CI | 等候选预算 blind | 未证明 |
+| Fixed-lag 可预测未来 | forecast delta CI | white vs persistent acceleration | white 模型未证明 |
+| Predictive-GNN 可替代求解器 | 物理复核、fallback、闭环消融 | 错排序、OOD、证书失败 | 未接入主线 |
+
+## 6. 2026-09-10 审计发现与修复
+
+### 6.1 发现的问题
+
+1. 旧 formal evidence 绑定历史 commit，不能代表当前代码。
+2. 运动安全曾缺少正式逐 seed endpoint/swept 硬门禁。
+3. Markov 物理分配只检查部分几何条件，且 benchmark 使用硬编码物理参数。
+4. pilot/bank 没有统一输出功率最大违反和最低电量。
+5. 若干完整性测试包含恒真断言、重复随机循环或只检查字段存在。
+6. `results`、`docs` 和 `tools` 混有大量过时分支与历史输出，难以判断当前证据。
+7. `alpha` 的文档曾把阵列增益写入传播系数，容易与 Deflection 外部 `G_tx*G_rx` 形成双计歧义。
+8. 旧 battery 门禁检查的是已经截断的状态，逻辑上不能发现透支。
+9. 独立节点 LP 在公共系数视图不一致时仍可拼接，缺少共同模型充分条件。
+
+### 6.2 已实施修复
+
+- 在系统 manifest 中强制 movement safety projection、投影动作执行、本地 assignment cache、
+  stale fail closed 和 independently composable safety。
+- Markov transition 复用同一 pairwise projection；evaluation 同时检查 UAV–target 与 UAV–UAV 距离。
+- pilot 新增 endpoint/swept distance、最大 RF violation、最低 battery 字段。
+- bank 与 formal gate 新增四项逐 seed 硬门禁。
+- Markov benchmark 从当前 L4 profile 读取高度、区域、channel、OTFS、P_FA、RCS 和 movement step。
+- 修正无效测试并补充构造碰撞测试。
+- 更新因安全语义变化而失效的 characterization fingerprint。
+- 核验实现中 `alpha` 仅含传播/RCS，阵列增益只在 Deflection 外乘一次，并纠正文档。
+- 通信统计新增发送者唯一 airtime；多接收者测试证明能量不是逐接收者累加。
+- strict profile 开启 byte-exact common-model certificate；端点状态与唯一 owner posterior 均从
+  同一不可变量化广播包重建，发送者使用零空口开销的同包回环；失败时改用逐行 harmonic
+  composable fallback。
+- UAV 保存最大截断前能量缺口；pilot、bank 与 formal gate 改用该字段证明能量因果性。
+
+## 7. 验证记录
+
+### 7.1 修改前基线
+
+| 检查 | 结果 | 解释 |
 |---|---:|---|
-| I | 4 | 当前 fixed structure 已满足三地板 |
-| II | 21 | 同几何 joint structure-power witness 满足三地板 |
-| III | 0 | 未发现 relaxed same-geometry upper bound 不可行 |
-| U | 0 | 本抽样未留下未决帧 |
+| 全量测试 | 1764 passed, 2 skipped | 修改前代码基线 |
+| Architecture V2 | PASS | 依赖边界有效 |
+| K16/Q16 identity 字段 | PASS | 配置身份一致 |
+| 当前 formal gate | FAIL | 旧证据 stale，不允许跨提交复用 |
 
-按 seed 的 Region I/II 分别为：291 `3/2`、566 `0/5`、99 `1/4`、103 `0/5`、483
-`0/5`。该审计耗时约 158 s。结论是当前样本的 fixed failure 属于 L2 可修的结构—功率
-部署缺口，不是 L3 几何不可达证据。它是已查看开发集上的机制归因，不是性能提升结果；
-G2-1A 状态仍为 10/100 IN PROGRESS。产物：
-[`_g3_a_postg2_capability_regions.json`](../results/_g3_a_postg2_capability_regions.json)。
+### 7.2 修改中定向回归
 
-## 15. G4-A minimum-intervention exact oracle（2026-08-20，开发审计）
+安全、formal-gate、Markov 和 bank 定向回归：`89 passed, 2 skipped`。
 
-输入为 G3-A 的 21 个 Region-II 帧。每帧使用相同 post-G2 coefficient、通信后 residual
-budget、`25.1 mW/UAV` PA cap、single-role、唯一 owner、`K_q<=3` 和 trace receiver
-capacity。MILP 按 dependency closure、prepare bit、总 sensing power 三阶段字典序求解；
-21 个最终状态均为 solver optimal，21/21 conservative PWL witness 满足三地板。
-prepare bit 仅覆盖当前 role/owner/edge/certificate layout，不含未来显式量化 power record，
-也没有执行 L0 over-air admission，不能解释为完整协议 bit 或可部署性证明。
+### 7.3 清理后最终回归
 
-| 干预量 | min | median | mean | max |
-|---|---:|---:|---:|---:|
-| role flips | 0 | 1 | 1.05 | 2 |
-| owner changes | 0 | 0 | 0.19 | 2 |
-| edge toggles | 0 | 1 | 1.90 | 5 |
-| affected targets | 0 | 1 | 1.71 | 4 |
-| participating UAVs | 0 | 2 | 2.57 | 5 |
-| closure cardinality | 0 | 3 | 4.29 | 9 |
-| prepare payload | 374 bit | 389 bit | 399 bit | 441 bit |
-| sensing power | 0.0197 W | 0.0375 W | 0.0361 W | 0.0625 W |
+```text
+1760 passed, 6 skipped, 7 warnings
+Architecture V2: PASS
+JSON parse and git diff check: PASS
+```
 
-16/21 帧满足 role flips<=2、owner changes<=2 且 participants<=3；18/21 只需一次 role
-flip，11/21 只切换一条边。1 帧无需结构变化，说明其 Region-II failure 可由 L1 功率重新
-部署修复。另一方面 seed 103 多数帧需要较大 closure，故结论是“嵌套局部扩张有依据”，
-不是“固定小块永远足够”。5 个同 episode 帧相关，统计单位仍只有 5 个开发 episode。
+测试数量减少源于退役完全依赖已清空历史 `results` 的 G2-1A bridge 测试，不是跳过当前主线
+失败。保留工具的依赖闭包经过 test collection 和全量回归验证。清理后重新生成的 current data
+catalog 只登记 4 个现存结果文件，entrypoint catalog 登记 81 个现存入口；Architecture V2 的
+数据完整性与入口新鲜度检查均通过。正式门禁仍按预期失败，因为没有当前提交、clean tree 的
+blind-100 证据，不能把本节 smoke 伪装成正式结论。
 
-首次未修正 PWL 的运行仅得到 1/21 feasible。根因是 ceiling 达数万时单条长 chord 把
-`P_D≈0.9998` 下压到约 `0.6102`，不是物理不可行。加入 saturating chord 后，高 D 区使用
-由检测单调性保证的常数 `0.999` 下界；2000 点、跨度 `11--1e5` 的数值检查零下界违例。
-该修复未接入冻结 live。产物：
-[`_g4_a_minimum_intervention.json`](../results/_g4_a_minimum_intervention.json)。
+## 8. 最新诊断实验
 
-## 16. G4-B dependency-closed nested block shadow（2026-08-20）
-
-仍使用相同 5 个已查看 episode 的 21 个 Region-II 帧。每层冻结 block 外 role、owner 和
-edge binary，连续 sensing power 允许在合法当前结构上重新部署；block 集合严格嵌套。
-proposer 使用 `r_task` 当前最大违约分支的子梯度支持，比较 task-weighted gain 与
-gain/marginal-closure-cost 两种无权重扫描模式。
-
-| 指标 | gain | closure efficiency |
-|---|---:|---:|
-| 最终获得三地板 witness | 21/21 | 21/21 |
-| full block 前获得 witness | 16/21 | 13/21 |
-| 与 G4-A minimum closure 相同 | 13/21 | 15/21 |
-| 首次可行块 ≤3 UAV 且 ≤3 target | 4/21 | 4/21 |
-| 首次可行 UAV 中位数 | 5 | 5 |
-| 首次可行 target 中位数 | 6 | 6 |
-| 每帧尝试中位数 | 2 | 3 |
-| 总 MILP 尝试 | 54 | 82 |
-
-该对比不支持从开发集选择一个赢家：closure efficiency 在最小干预命中上较好，但搜索成本
-和提前恢复较差。G4-B 判为 **completeness PASS / locality-efficiency FAIL**。这不否定
-G4-A 发现的真实最小 repair 通常较小，而是说明当前只看任务违约与单边 gain 的 proposer
-难以定位它。暂不执行 G4-C admission 或 live paired。产物：
-[`_g4_b_nested_blocks_gain.json`](../results/_g4_b_nested_blocks_gain.json) 与
-[`_g4_b_nested_blocks_closure_efficiency.json`](../results/_g4_b_nested_blocks_closure_efficiency.json)。
-
-## 17. G4-B2b exact fixing-deletion conflict audit（2026-08-20）
-
-由于当前环境无 `highspy`，本 Gate 没有输出 IIS/Farkas 证书。方法从 full permission block
-开始逐项冻结 target、UAV 和 role 权限，每次调用完整三地板 exact MILP；最终保留集合是
-one-deletion irreducible，但不声称全局最小，统计单位仍只有 5 个开发 episode。
-
-| 指标 | sequential deletion | bisect group deletion |
-|---|---:|---:|
-| 可行 | 21/21 | 21/21 |
-| minimum closure 命中 | 16/21 | 16/21 |
-| permission block ≤3 UAV×3 target | 15/21 | 15/21 |
-| permission UAV 中位数 | 2 | 2 |
-| permission target 中位数 | 1 | 1 |
-| permission role 中位数 | 1 | 1 |
-| exact feasibility 调用 | 333 | 471 |
-
-二分删除在小规模、必要项分散时需要先证明批量不可删再递归拆分，故计算反而增加，关闭。
-顺序版本保留为离线 conflict-label oracle；尚未计入 L0 admission、通信 bit、量化/AoI 或
-闭环未来帧。产物：
-[`_g4_b2_fixing_conflicts.json`](../results/_g4_b2_fixing_conflicts.json) 与
-[`_g4_b2_fixing_conflicts_bisect.json`](../results/_g4_b2_fixing_conflicts_bisect.json)。
-
-## 18. G4-B2c backbone 与 bounded conflict-cut master（2026-08-20）
-
-full-block one-deletion sweep 每帧固定 19 次 feasibility 检查，共 399 次。21 帧中 13 帧
-backbone 非空，大小中位数 2。backbone 频次最高的是 `uav:4`（8 帧）、`target:3`
-（6 帧）、`target:2` 与 `uav:1`（各 5 帧）；role backbone 为 0。seed 99/291 均为空，
-seed 103 每帧含 target 2，seed 483 每帧含 target 3。
-
-raw conflict-cut master 使用严格有效的 complement cut，但每帧最多 16 次 exact query 时：
-
-| master | 收敛 | 触顶 | master queries | minimum closure 命中 |
-|---|---:|---:|---:|---:|
-| 无 backbone 强制 | 1/21 | 20/21 | 321 | 1/21 |
-| 强制 exact backbone | 1/21 | 20/21 | 321 | 1/21 |
-
-唯一收敛帧是 permission cardinality 0 的 power-only repair。未缩减 complement cut 会枚举
-大量等价低基数组合；强制 backbone 仍不足以排除这些组合。该 Gate 判为 backbone PASS、
-raw conflict-master FAIL。产物：
-[`_g4_b2c_backbone_ccar.json`](../results/_g4_b2c_backbone_ccar.json) 与
-[`_g4_b2c_backbone_ccar_forced.json`](../results/_g4_b2c_backbone_ccar_forced.json)。
-
-## 19. G4-B2d core-guided conflict repair（2026-08-20）
-
-### 19.1 预注册门与理论单测
-
-固定门为：21/21 feasible recovery；至少 18/21 在每帧 16 个 master candidate 内完成；
-G4-A minimum closure hit 至少 16/21；新 exact feasibility 调用低于 B2b 的 333。新增测试
-覆盖 2-core、3-core、backbone=singleton-core、`role<=UAV` closed-set dependency、首次
-feasible minimum hitting set 的全局 permission-objective 最优性、QuickXplain irreducibility
-及 monotone antichain 推断。完整回归为 `1058 passed, 8 warnings`。
-
-### 19.2 21 帧主结果
-
-| 方法 | 16 candidate 内收敛 | closure hit | core 中位/最大 | master query | 新 exact feasibility |
-|---|---:|---:|---:|---:|---:|
-| raw B2c complement | 1/21 | 1/21 | 未收缩 | 321 | 321 |
-| B2d sequential，等权 cardinality | 16/21 | 15/21 | 3/5 | 210 | 2824 |
-| B2d sequential，support lex + antichain | 16/21 | 16/21 | 3/5 | 214 | 2822 |
-| B2b offline repair-label oracle | 21/21 | 16/21 | 不适用 | 不适用 | 333 |
-
-等权版本发现 194 个 core，support-lex 发现 198 个。两版相同的五个触顶帧为
-`(566,150)` 和 seed 103 的 frame `30/60/90/120`。support-lex 只通过 closure-hit 门；其余
-三门失败。它说明小 conflict core 能显著缓解 raw enumeration，但黑盒逐项 shrink 把成本
-转移成大量 exact MILP，不能替代 B2b，更不能上线。
-
-### 19.3 关闭的查询策略
-
-在同一预先选择的 3 帧 smoke 上，index sequential 为 3/3 收敛、315 次 exact；QuickXplain
-为 1/3、316 次，physics-ordered sequential 为 1/3、396 次。物理顺序使用 max-min dual
-price、通信后 sensing budget 和 per-watt coefficient，仅影响查询顺序，hard cut 仍由 exact
-oracle 认证；其失败说明“物理合理排序”不自动等于“对 hitting-set 覆盖最有利的 core”。
-两分支关闭，不运行全量或改顺序追结果。
-
-产物：[`_g4_b2d_core_guided_sequential.json`](../results/_g4_b2d_core_guided_sequential.json)、
-[`_g4_b2d_core_guided_supportlex.json`](../results/_g4_b2d_core_guided_supportlex.json)、
-[`_g4_b2d_core_guided_quickxplain_smoke3.json`](../results/_g4_b2d_core_guided_quickxplain_smoke3.json)
-与 [`_g4_b2d_core_guided_physics_smoke3.json`](../results/_g4_b2d_core_guided_physics_smoke3.json)。
-
-## 20. G4-B2e Objective-Layer Conflict Separation（2026-08-21）
-
-### 20.1 B2e-0 tri-state certificate
-
-新增 `CERT_FEASIBLE/CERT_INFEASIBLE/UNRESOLVED`。feasibility-only incumbent 通过 bounds、
-LinearConstraint activity 和 integrality 独立校验才认证可行；仅 HiGHS/SciPy `status=2`
-认证不可行。unresolved 不进入 antichain cache、不产生 cut。证书限定于 conservative PWL
-MILP。理论测试覆盖 unresolved fail-closed、未扰动 objective face、common-zero cut 严格
-抬升下界和 `Z(tau)` 随 tau 单调缩小。最终完整回归 `1063 passed, 8 warnings`。
-
-### 20.2 B2e-1/2 五个触顶帧 face/sublevel 审计
-
-| seed/frame | 当前 LB | 最大 certified-infeasible tau | cut 后 LB | physical queries |
-|---|---:|---:|---:|---:|
-| 566/150 | 22 | 28 | 29 | 3 |
-| 103/30 | 37 | 43 | 44 | 4 |
-| 103/60 | 30 | 36 | 37 | 4 |
-| 103/90 | 29 | 35 | 36 | 3 |
-| 103/120 | 31 | 37 | 38 | 5 |
-
-初始 `Z(L)` 查询 5/5 为 solver `status=2`、0 unresolved，且全部包含六个 target permissions，
-证明 target-free 最优面可被整层删除。二分 sublevel 共 19 次 physical query，每帧跨越
-6–7 个标量 cost level。产物：
-[`_g4_b2e_face_separation_failed5.json`](../results/_g4_b2e_face_separation_failed5.json) 与
-[`_g4_b2e_layer_escalation_failed5.json`](../results/_g4_b2e_layer_escalation_failed5.json)。
-
-### 20.3 完整 OLCS smoke 与停止决定
-
-| bundle | 收敛 | physical calls | sublevel cuts | bundle cuts | unresolved |
-|---|---:|---:|---:|---:|---:|
-| 最多 8 supports | 0/5 | 407 | 28 | 52 | 0 |
-| 单 support/no-good | 0/5 | 100 | 13 | 67 | 0 |
-
-8-support greedy bundle 平均每轮测试多个 union，重新造成 query explosion；单-support 版本
-避免爆炸，却在相同 objective layer 枚举候选，下界长期不动。两者均未达到五帧 smoke 的
-可行恢复前提，因此不运行 21 帧正式 Gate，B2e 当前判为 certificate PASS、face/sublevel
-PASS、greedy bundle FAIL、end-to-end FAIL，保持 shadow/offline。产物：
-[`_g4_b2e_olcs_failed5.json`](../results/_g4_b2e_olcs_failed5.json) 与
-[`_g4_b2e_olcs_failed5_bundle1.json`](../results/_g4_b2e_olcs_failed5_bundle1.json)。
-
-## 21. R1 Interaction Width Audit（2026-08-21）
-
-### 21.1 口径与 Gate
-
-复用 G4-A 的 21 个 post-G2 Region-II 帧和相同通信后 residual sensing budget、检测地板。
-每目标最多有 `K*(2^(K-1)-1)=150` 个 owner/TX-subset modes，总上限 900。只删除独占资源
-乐观 ceiling 仍不能达到检测地板的 mode。exact treewidth 采用 elimination subset-DP；
-本地 K=Q=6 Gate 为 resource-target 与 summary-incidence 的最大值满足 median<=3、max<=4。
-跨规模趋势因没有同口径其他 K/Q Region-II 数据，预先标记 unresolved。
-
-### 21.2 结果
-
-| 指标 | 结果 |
-|---|---:|
-| 帧数 | 21 |
-| raw/resource/incidence/mode treewidth | 5 / 5 / 6 / 6（每帧相同） |
-| effective width median / max | 6 / 6 |
-| retained modes min / median / max | 630 / 793 / 835 |
-| median retention | 88.1% |
-| per-target modes min / median / max | 55 / 132.5 / 150 |
-| UAV endpoint target degree | 全部为 6 |
-| incidence component | 每帧单一 12 节点分量 |
-| median overlap HHI | 0.1673 |
-
-seed 103 的五帧总 modes 为 `630/662/658/668/680`，seed 566 为
-`715/774/794/813/824`；两组 effective width 都恒为 6。因此模式数量能区分一部分组合
-歧义，却没有形成小 separator。local width Gate 判 FAIL，scaling hypothesis 判
-UNRESOLVED；按顺序门不运行 R2/R3，不实现 separator solver，也不使用 dual 阈值删除边。
-新增 3 个测试覆盖 canonical graph 的 exact treewidth、安全 mode 剪枝和四图 QoS 语义；
-完整回归为 `1066 passed, 8 warnings`。
-
-产物：[`_r1_interaction_width_k6q6_regionii.json`](../results/_r1_interaction_width_k6q6_regionii.json)。
-
-## 22. S0-A Context-Free Safe Screening（2026-08-21）
-
-规则只筛模型中的严格 `a_ijq=0`，不使用 epsilon。D-F 固定全部零边；D-O 只固定 reference
-structure 未选中的零边。增加反例单测，证明现选零边虽可在不损 QoS 的情况下删除，却会
-制造 repair toggle，因此 feasibility-preserving 不等于 optimality-preserving。
-
-| 指标 | 结果 |
-|---|---:|
-| 帧数 | 21 |
-| candidate directed edges | 3780 |
-| D-F / D-O screened | 96 / 96 |
-| pruning ratio | 2.54% |
-| 每帧 screened min/median/max | 0 / 4 / 16 |
-| D-F QoS preserved | 21/21 |
-| D-O discrete/full lex preserved | 21/21 / 21/21 |
-| positive UAV-target incidence edges | 每帧 36 |
-| positive-incidence exact width | 每帧 6 |
-
-本批 selected-zero edge 为 0，所以 D-F 与 D-O 集合数值相同，但定理口径仍严格区分。
-Gate 判 safety PASS、sparsification FAIL。产物：
-[`_s0_a_safe_screening_k6q6_regionii.json`](../results/_s0_a_safe_screening_k6q6_regionii.json)。
-
-## 23. S0-D Coefficient Low-Energy-Rank Audit（2026-08-21）
-
-对 21 帧×6 targets 共 126 个矩阵，报告 squared-singular-value energy rank、stable rank、
-entropy effective rank 与 rank-1 Frobenius residual。由于 trace 的 alpha 已去除对角线，另由
-UAV/target geometry 重建包含对角线的理想 inverse-range outer product，避免错误归因。
-
-| stage | median r90/r95/r99 | median stable rank | median rank-1 residual |
-|---|---:|---:|---:|
-| ideal path completion | 1 / 1 / 1 | 1.000 | 0.000 |
-| raw operational bistatic | 2 / 2 / 2 | 1.712 | 0.645 |
-| × report reliability | 2 / 2 / 2 | 1.712 | 0.645 |
-| × DD gate | 2 / 2 / 2 | 1.738 | 0.652 |
-
-DD operational `r95` 分布为 rank-2:109、rank-3:14、rank-4:3，即 `86.5%` 不超过 2。
-这不是 exact low-rank 或 safe approximation 证书；当前只判 dense-low-energy-rank hypothesis
-SUPPORTED，压缩算法与 QoS envelope 均未过门。产物：
-[`_s0_d_coefficient_rank_k6q6_regionii.json`](../results/_s0_d_coefficient_rank_k6q6_regionii.json)。
-
-补充 exact factorization audit：从非对角 path entries 恢复 outer-product completion，验证
-report reliability 为 receiver-only，再以 sparse list 保存 DD-inactive entries。126/126
-可重建，最大相对误差 `8.08e-16`；DD exceptions 为 `96/3780=2.54%`。该结果升级为
-exact-representation PASS，但 payload、量化和 solver-speed Gates 尚未执行。
-
-本轮测试覆盖 D-F/D-O 反例、D-O lex 保持、谱秩语义、exact factor+exception 重建和
-non-receiver-only fail-closed；完整回归为 `1073 passed, 8 warnings`。
-
-## 24. M1/M2-0/M3 Certified Factor Message（2026-08-21）
-
-### 24.1 M1 payload 与 M2-0 containment
-
-| factor bits/value | dense bits | factor median bits | reduction | median log interval width |
-|---:|---:|---:|---:|---:|
-| 3 | 597 | 347 | 41.9% | 1.559 |
-| 6 | 1137 | 563 | 50.5% | 0.1949 |
-| 8 | 1497 | 707 | 52.8% | 0.0487 |
-| 12 | 2217 | 995 | 55.1% | 0.00305 |
-| 14 | 2577 | 1139 | 55.8% | 0.000761 |
-| 16 | 2937 | 1283 | 56.3% | 0.000190 |
-
-所有 3–16 bit、21 帧逐项 containment violations 为 0。该表是 aggregated semantic shadow
-record；dense baseline 尚未做任务证书，不能把 reduction 当公平通信收益。产物：
-[`_m1_m2_factor_message_k6q6_regionii.json`](../results/_m1_m2_factor_message_k6q6_regionii.json)。
-
-### 24.2 M3 three-floor certificate
-
-每个 bit-depth 使用 21 个 G4-A witnesses 及 `0/0.25/0.5/0.75/1` 五档功率，共 105 plans。
-所有档位 false-feasible=0、false-infeasible=0。8 bit 起可认证 84/84 true-infeasible
-缩放方案，但 nominal 21 个 true-feasible witnesses 在 3–16 bit 始终 unresolved，因为
-minimum-power objective 令 worst 真值等于 0.61 地板。
-
-重新以 nominal floors 加统一 headroom 求解 exact lex witness：
-
-| headroom | design feasible | 8-bit CF | 10-bit CF | 12-bit CF | median extra power |
-|---:|---:|---:|---:|---:|---:|
-| 0.0025 | 21/21 | 0/21 | 2/21 | 21/21 | 0.168 mW |
-| 0.005 | 21/21 | 0/21 | 19/21 | 21/21 | 0.328 mW |
-| 0.01 | 21/21 | 2/21 | 21/21 | 21/21 | 0.663 mW |
-
-逐帧首次认证的正式 task-equivalent bit 结果由 §25 的公平 baseline 给出。M3 静态安全门
-PASS。产物：
-[`_m3_factor_qos_certificate_k6q6_regionii.json`](../results/_m3_factor_qos_certificate_k6q6_regionii.json)。
-
-新增测试覆盖 log interval containment、factor envelope、adaptive DD codec accounting 和
-three-floor fail-closed；完整回归 `1077 passed, 8 warnings`。
-
-## 25. M4-A/B Task-Equivalent Rate Audit（2026-08-21）
-
-### 25.1 Gauge balance remediation
-
-旧 factor split 将公共 detector scale 放入 RX factor，导致共同 log range 被无意义拉宽。
-log-center gauge balance 精确保持 dense reconstruction；8-bit median/max product log width 从
-`0.412/0.419` 降为 `0.0487/0.0551`。新增测试验证 dense matrix 不变且公共 range 严格缩小。
-balance 后重新生成 M1/M2/M3 产物；旧 12/14/16-bit headroom 数字作废。
-
-更新后的 M3：
-
-| headroom | 8-bit CF | 10-bit CF | 12-bit CF | median extra power |
-|---:|---:|---:|---:|---:|
-| 0.0025 | 0/21 | 2/21 | 21/21 | 0.168 mW |
-| 0.005 | 0/21 | 19/21 | 21/21 | 0.328 mW |
-| 0.01 | 2/21 | 21/21 | 21/21 | 0.663 mW |
-
-### 25.2 Fair dense baselines
-
-| headroom | method | certified | min-bit distribution | adaptive median payload |
-|---:|---|---:|---|---:|
-| 0.0025 | dense-linear | 11/21 | 12:1,14:6,16:4 | 2563* |
-|  | dense-log | 21/21 | 10:9,12:12 | 2235 |
-|  | factor-log | 21/21 | 10:2,12:19 | 995 |
-| 0.005 | dense-linear | 14/21 | 12:2,14:7,16:5 | 2569* |
-|  | dense-log | 21/21 | 8:1,10:19,12:1 | 1891 |
-|  | factor-log | 21/21 | 10:19,12:2 | 851 |
-| 0.01 | dense-linear | 17/21 | 12:3,14:8,16:6 | 2563* |
-|  | dense-log | 21/21 | 8:6,10:15 | 1891 |
-|  | factor-log | 21/21 | 8:2,10:19 | 851 |
-
-`*` dense-linear median 只针对已认证子集，不能与 21/21 方法作公平 operating-point 比较。
-三种方法在全部测试上 containment violations=0、false-cert=0。factor/best dense-log ratio
-为 0.445/0.450/0.450，M4-A safety PASS、M4-B communication-value PASS。产物：
-[`_m4_task_equivalent_rate_k6q6_regionii.json`](../results/_m4_task_equivalent_rate_k6q6_regionii.json)。
-
-本轮仍未执行 M4-C L1、M4-D L2、fixed-physics scale、AoI/FBL 或 live transport；21 帧仅作
-5 个开发 episode 的机制 falsification，不做 iid 置信区间。
-
-新增 gauge-invariance 与 task-equivalent payload baseline 测试；当前完整回归为
-`1079 passed, 8 warnings`。
-
-## 26. M4-C-light Fixed-Structure Capability Route（2026-08-21）
-
-### 26.1 口径与数学修正
-
-复用 21 个 G4-A Region-II fixed structures、相同 conservative saturating-PWL task gauge 和
-factor-log interval。只认证 `gamma*<=1` 的 L1 route，不要求 power vector、dual 或 LP basis
-相同。利用 `A^-<=A<=A^+` 推出 `gamma(A^+)<=gamma(A)<=gamma(A^-)`；缺失 LP 结果、
-非有限值或夹逼倒置一律 unresolved。
-
-审计前修正 PWL gauge 的提前退出：旧代码在 `gamma=1` budget 不能达到 worst floor 时返回
-`None`，与“gamma-1 表示额外预算比例”的定义冲突。删除该退出后，LP 可合法报告 `gamma>1`；
-新增回归验证这一点。为避免调参，每帧从其 exact baseline gauge 出发，仅缩减 residual sensing
-budget，预注册构造 `gamma*=0.90/0.97/0.99/1.01/1.03/1.10` 六点。
-
-### 26.2 结果
-
-| true gamma | scenarios/certified | first-certified bit distribution | median payload |
-|---:|---:|---|---:|
-| 0.90 | 21/21 | 6:13, 8:8 | 579 bit |
-| 0.97 | 21/21 | 8:14, 10:7 | 723 bit |
-| 0.99 | 21/21 | 8:1, 10:19, 12:1 | 867 bit |
-| 1.01 | 21/21 | 8:2, 10:18, 12:1 | 851 bit |
-| 1.03 | 21/21 | 8:17, 10:4 | 723 bit |
-| 1.10 | 21/21 | 6:10, 8:11 | 675 bit |
-
-全部 126 个场景在 16 bit 内认证；3–16 bit coefficient containment violations=0、全部量化
-gauge bracket violations=0、false certified routes=0。`|1-gamma*|` 与首次认证 bit 的描述性
-Spearman `rho=-0.824`，即越接近 L1 边界通常需要越高精度。场景是 21 个相关帧、仅 5 个
-独立开发 episode，故不报告 iid 显著性，也不声称泛化。
-
-M4-C-light safety 与 route-value Gate 均 PASS。仍未完成 M4-D lex winner、分布式 scale、
-semantic-to-air codec、deadline/AoI/FBL 或 live replacement。产物：
-[`_m4c_capability_route_k6q6_regionii.json`](../results/_m4c_capability_route_k6q6_regionii.json)。
-
-新增 capability-route monotonic/fail-closed 与 `gamma>1` gauge 测试。定向测试为
-`17 passed`。单进程完整回归在累计导入 Torch/SciPy 后，分别于既有 `eigvalsh`/`svd` 测试
-发生 NumPy/MKL 进程级 abort；相同测试单独运行通过。为区分运行库污染与断言回归，将全部
-163 个测试文件各置于独立 pytest 进程复跑，结果为 `1082 passed`、零失败。故代码回归判
-PASS，但保留“monolithic Windows MKL/OpenMP runner 不稳定”的工程问题，不伪称单进程通过。
-
-## 27. M4-D-light 与 post-normalization provenance audit（2026-08-21）
-
-### 27.1 冻结候选与判据
-
-候选只复用可严格重放的 G4-A 与 G4-B2b sequential/bisect filter；依赖缺失 `physical_pd` 的
-G4-B ladders 被排除，且不以 `local_pd` 替代。不生成新结构。lex objective 为
-`(closure, prepare bits, total sensing power)`。第三阶段新增固定
-结构 minimum-total-power PWL LP；dense-log/factor-log 均传播 closed coefficient interval，
-等价最优 power 容差冻结为 `1e-8 W`。
-
-### 27.2 退化结果与根因
-
-| 指标 | 结果 |
-|---|---:|
-| frames | 21 |
-| unique candidates/frame | 1（全部帧） |
-| capability-dependent frames | 0 |
-| containment / power-bracket violation | 0 / 0 |
-| certified nonoptimal | 0 |
-| legacy G4-A nonzero closure / median | 20/21 / 3 |
-| current replay nonzero closure / median | 0/21 / 0 |
-
-因此 dense/factor 的 `B*=0` 是 singleton vacuity，不是 L2 information saving。Safety 子程序
-PASS，但 candidate-pool、decision、communication-value Gates 均 FAIL；总状态为
-`INVALID_INPUT_DEGENERATE_CANDIDATE_POOL`。
-
-根因是 legacy G3/G4 artifact 与最终 post-G2 物理语义没有共同 provenance。当前 per-watt
-Deflection 已取消错误的 `T_sym` energy factor，并冻结 `n_cpi=1,c_det=1`。对 legacy G3-A
-相同 5 个 exposed seeds、25 帧重放，25/25 原结构经合法功率重新部署即可满足任务，L2 帧为
-0。trace 不含 sensing-power tensor 和 environment-level `physical_pd`，所以当前 deployed
-performance 无法重建；`local_pd` 不作为替代。
-
-产物：[`_m4d_lex_decision_rate_k6q6_regionii.json`](../results/_m4d_lex_decision_rate_k6q6_regionii.json)、
-[`_post_normalization_layer_triage_exposed5.json`](../results/_post_normalization_layer_triage_exposed5.json)
-与 [`_m4d_g4a_replay_check.json`](../results/_m4d_g4a_replay_check.json)。
-
-新增固定结构 minimum-total-power 单调性测试；相关定向测试 `18 passed`。全部 163 个测试文件
-继续按独立 pytest 进程隔离既有 Windows MKL/OpenMP 污染，结果 `1083 passed`、零失败。
-M4-D 不继续扩候选；下一 Gate 改为 fresh-trace provenance：显式保存 deployed sensing power、
-environment `P_D`、config/code/physics hash 后重新分层。G2-1A 与 blind bank 未改动。
-
-## 28. P0 Current-Model Layer Provenance Gate（2026-08-21）
-
-### 28.1 实现与预注册字段
-
-`teacher_trace.npz` 的新鲜导出契约升级为 schema 3。新增逐帧字段包括
-`uav_velocities/target_positions/target_velocities`、`deployed_selected/role/receiver_owner`、
-`deployed_sensing_power_w/deployed_comm_power_w`、`per_watt_coefficient`、
-`frame_sensing_budget_w` 与 `task_mean/weak3/worst_pd`。环境原始 `physical_pd`、`g_DD`、
-`chi_rep` 保留。嵌入 `provenance_json` 绑定 code/config/physics/checkpoint 四个 SHA-256；
-checkpoint bundle 包括实际 deployed actor tensor hash，而不只记录文件路径。
-
-### 28.2 旧输入 fail-closed 结果
+### 8.1 K16/Q16 两种子、30 帧 smoke
 
 命令：
 
-```text
-python tools/audit_p0_layer_provenance.py \
-  --trace results/architecture_v2_scale_k6q6_teacher_trace_selection20/teacher_trace.npz \
-  --output results/_p0_layer_provenance_legacy_gate.json
+```powershell
+pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 11033,10361 --frames 30 --tail-window 20 --quiet
 ```
 
-结果：`gate=FAIL`，原因为 `schema 1 != current schema 3`，科学状态
-`BLOCKED_BY_LAYER_PROVENANCE`。这是预期安全失败；没有尝试用 `local_pd` 代替环境 `P_D`，也
-没有从旧动作猜测 sensing power。M4-D 不因 singleton 得到 `0 bit` 正结论。
+该运行使用 dirty tree，且帧数/种子数低于正式协议，故 `formal_eligible=false`。
 
-新增 5 个 P0 单元测试覆盖完整 trace 通过、缺功率拒绝、physics payload 篡改拒绝、跨模型
-physics hash 拒绝和 state-dict hash 的顺序不变/数值敏感性；与 provenance/capability 定向
-测试合计 `18 passed`。随后已按当前策略生成 schema-3 natural trace 并进入 P1；blind bank
-与 G2-1A 继续隔离。
+| 指标 | seed 11033 | seed 10361 | 聚合/门槛 |
+|---|---:|---:|---:|
+| delivery rate | 1.0 | 1.0 | mean 1.0 / `>=0.99` |
+| endpoint min distance | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
+| swept min distance | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
+| pre-execution swept certificate | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
+| max RF violation | 0 W | 0 W | `<=10^-9 W` |
+| minimum battery | 49,669.368 J | 49,669.368 J | 诊断字段 |
+| pre-clamp energy deficit | 0 J | 0 J | `=0 J` |
+| common-model certificate | 0.3 | 0.3 | 部分通过 |
+| common-model safe fallback | 0.7 | 0.7 | 结构/后验纪元不齐时触发 |
 
-## 29. P1 Fresh Natural Layer Re-triage（2026-08-21）
+聚合检测与通信：
 
-### 29.1 协议
+| 指标 | 数值 |
+|---|---:|
+| steady | 0.837721 |
+| weak3 | 0.684702 |
+| worst | 0.606968 |
+| short-window QoS rate | 0.5（1/2） |
+| bits/frame | 2412.8 |
+| deadline violation | 0 |
+| hyperedge coverage | 1.0 |
 
-- 配置：`exp_800_k6q6_analytical_l0l1_movement_lex_candidates_v2_blind_indep.yaml`；
-- warm-start：与上一轮 post-G2 trace 相同；训练 episode 为 0，策略学习率为 0；
-- exposed seeds：`291,566,99,103,483`，每个 150 帧，共 750 帧；
-- P0：schema 3、750 帧、code/config/physics/checkpoint 四 hash PASS；
-- P1 抽样：`frame mod 15=0`，50 帧，不按 difficulty、部署失败或 L2 结果筛选；
-- task floors：worst `0.61`、bottom-3 `0.71`、average `0.81`。
+解释：新能量门禁、安全、功率和 delivery 接线均通过。packet-model rendezvous 使两个 episode
+各有 30% 帧满足 byte-exact 公共模型证书，其余 70% 在结构 owner 更新而相应 posterior 尚未同纪元
+到达时安全回退；没有把私有 belief 拼入公共 LP。短窗 QoS 改善为 1/2，但证书覆盖仍不足以启动
+blind-100。下一步应把结构版本、owner 映射和 posterior 时间戳原子绑定，并保留逐行证书 fallback。
+多帧检测窗口 2 的 QoS 为 1.0 仍不能替代冻结的单帧 tail 指标。
 
-产物：[`p0_gate.json`](../results/_p0_current_layer_trace5/p0_gate.json)、
-[`_p1_current_layer_triage5_stride15.json`](../results/_p1_current_layer_triage5_stride15.json)。
+### 8.2 Markov/KNN 物理影子基准
 
-### 29.2 分层结果与交叉验证
+条件：固定种子 20260910，K16/Q16，32 synthetic cases；graph 和 blind 每 case 都评估 32 个
+候选；二者共享 incumbent 和精确 fixed-structure LP。
 
-| 层 | 帧数 | 比例 | 证据语义 |
-|---|---:|---:|---|
-| D | 17 | 0.34 | 实际环境 `P_D` 已满足三地板 |
-| L1 | 1 | 0.02 | deployed 失败，固定结构合法重分配可满足 |
-| L2 | 32 | 0.64 | fixed `gamma>1`，joint structure-power 构造 witness `gamma<=1` |
-| III | 0 | 0 | 无 relaxed same-geometry ceiling 失败 |
-| U | 0 | 0 | 无 heuristic miss 未决帧 |
+| 指标 | 数值 |
+|---|---:|
+| graph acceptance rate | 0.90625 |
+| graph beats blind rate | 0.4375 |
+| graph / tie / loss | 14 / 9 / 9 |
+| graph mean improvement | 2.4164e-4 |
+| blind mean improvement | 2.3149e-4 |
+| paired delta mean | 1.0147e-5 |
+| paired delta median | 0 |
+| paired delta P10 | -6.2299e-5 |
+| paired delta bootstrap 95% CI | [-1.2407e-5, 3.4669e-5] |
+| graph/blind mean time | 0.1032 / 0.1015 s |
 
-同帧 `selected*per-watt coefficient*deployed power` 重算环境 `P_D` 的最大误差
-`2.22e-16`；deployed 最大 sensing-budget 违反 `6.94e-18 W`。32 个 L2 witness 的最小真实
-worst/bottom-3/average 为 `0.610000/0.710002/0.810055`，最大 budget violation
-`1.53e-16 W`；closure 范围 3--8、中位 5。`gamma_fixed` 最小 `1.0181`，
-`gamma_joint,witness` 最大 `0.9931`。因此 L2 判定同时有离散结构变化、功率可行性和真实检测
-概率支撑，不是 solver tolerance、singleton 或 `local_pd` 替代造成。
+结论：候选接受机制不会接受比分 incumbent 更差的动作，但相对等预算 blind 的平均优势小、区间
+跨 0，且时间没有优势。支线保留用于真实 belief snapshot 的后续 falsification，不晋级主线。
 
-固定结构可行的 18 帧上，`Delta P_L1=P_deployed-P_min,fixed` 中位约 `0.13487 W/frame`
-（全 6 UAV 合计）。这是“达到冻结三地板所需的功率余量”，不是无损能量节省：若当前
-字典序仍最大化 worst/weak3/average，直接降到 minimum-floor power 会牺牲超额检测性能。
+### 8.3 Fixed-lag smoother 影子基准
 
-### 29.3 Gate 判定
+条件：32 seeds；分别模拟 white acceleration 与具有时间持续性的 acceleration。主问题是历史
+平滑和 residual forecast 是否分别有效。
 
-旧 M4-D artifact 仍为 `BLOCKED_BY_LAYER_PROVENANCE`，不能翻案；但 fresh 路线为
-`RESUME_ONLY_ON_OBSERVED_L2`。下一轮只在 32 个 fresh L2 帧上冻结自然定位算法候选，exact
-MILP witness 仅作裁判。5 个 episode 内帧强相关，因此 `64%` 只作机制描述，不作总体发生率、
-显著性或 blind 性能结论。
+| 模型 | filtered history MSE | smoothed history MSE | ratio | residual forecast delta 95% CI |
+|---|---:|---:|---:|---:|
+| white | 65.813 | 17.642 | 0.2681 | [-0.01120, 0.01560] |
+| persistent | 54.856 | 18.802 | 0.3427 | [0.00864, 0.04231] |
 
-P0/P1、trace 标签、解析功率、联合 RF、capability 与 minimum-intervention 相关回归共
-`65 passed`；新增模块与训练/审计入口 `py_compile` 通过，`git diff --check` 无 whitespace
-错误。P1 artifact 另记录审计脚本自身 SHA-256，避免只绑定生成 trace 的代码而遗漏分层逻辑。
+解释：RTS 对历史去噪在两种模型中都有效；只有人为 persistent 模型的 residual forecast CI 大于
+0。当前 L4 真实身份是 white acceleration，因此不能用 persistent 合成结果为在线预测背书。
 
-## 30. M4-D0/D1 Candidate Provenance and Sufficiency（2026-08-21）
+## 9. 当前数据文件
 
-### 30.1 D0 协议
+| 文件 | 内容 | 证据等级 |
+|---|---|---|
+| `results/current/strict_k16q16_smoke.json` | 两种子短闭环、安全/资源诊断 | diagnostic |
+| `results/current/markov_graph_shadow.json` | 32-case Markov 对 blind 配对基准 | shadow |
+| `results/current/fixed_lag_shadow.json` | 32-seed smoothing/forecast 机制筛查 | shadow |
+| `results/current/README.md` | 数据边界说明 | metadata |
 
-D0 在全部 50 个 stride-15 帧上运行，未读取 P1 JSON。输入限于 deployed structure、完整
-same-frame `A`、residual budget、fixed capability gauge 的 `pi/eta/p*` 和结构硬约束。
-候选冻结后才启动新的 exact referee；temporal ordering PASS。禁止字段包括
-witness/closure/MILP/B2b/feasibility-query/P1 label。
+原始 smoke 运行保存在 `artifacts/runs/pilot-6c77b5083922176cb920/`。`results/current` 只保存小型
+可解释汇总，不替代受管 artifact 的 provenance。
 
-v1 whole-role completion 在 32 个 L2 帧上 Pool A/B coverage 都为 0；restricted closure gap
-为 1--6，首先败在结构前缀。由于该 completion 会不必要地重建所有目标，v2 只增加全部合法
-单步 owner replacement、TX support replacement/add/remove 与全局 role swap，不读取 witness。
+## 10. 正式 blind-100 执行协议
 
-v2 候选冻结 SHA-256 为
-`9cfbabedf6b145d5020e529a87c08fd661a383c5bdae4f33bdddede4585d7d71`；每帧 Pool A
-337--742 个（median 562），Pool-B union 866--2390 个（median 1928.5）。
+### 10.1 执行前检查
 
-### 30.2 D1 结果
+1. 工作树形成 clean commit；记录 commit hash。
+2. 运行全量 pytest 和 Architecture V2 检查。
+3. strict identity 检查必须无 dirty、配置或 seed-bank mismatch。
+4. 确认 100 个 ordered test seeds 与 bank 完全一致，无 quarantined/development seeds。
+5. 固定 workers=1、tail=50、carrier period=3 和运行包/线程环境。
 
-| seed | genuine L2 | Pool A coverage | Pool B coverage |
-|---:|---:|---:|---:|
-| 99 | 2 | 0 | 2 |
-| 103 | 10 | 0 | 0 |
-| 483 | 10 | 0 | 4 |
-| 566 | 10 | 0 | 3 |
-| 合计 | 32 | 0 | 9 |
+### 10.2 执行中原子性
 
-Pool-B-only 的 9 帧为 `LOCALIZATION_GAP`；另外 23 帧为 `MOVE_GRAMMAR_GAP`。Pool A coverage
-rate=0，Pool B=0.28125，D2 eligible=0。主要产物：
+每个 seed 完成后原子写入 episode 结果。正式运行禁止从可变的半成品 episode JSON resume；只有
+manifest、commit、source tree、effective config、seed bank、参数和 seed 顺序完全相同的受管
+checkpoint 才能恢复。单个 seed 失败不能静默丢弃或重新抽样。
 
-- [`_m4d0_oracle_free_candidates_stride15.json`](../results/_m4d0_oracle_free_candidates_stride15.json)
-- [`_m4d1_candidate_sufficiency_stride15.json`](../results/_m4d1_candidate_sufficiency_stride15.json)
-- [`_m4d0_v2_oracle_free_local_candidates_stride15.json`](../results/_m4d0_v2_oracle_free_local_candidates_stride15.json)
-- [`_m4d1_v2_candidate_sufficiency_stride15.json`](../results/_m4d1_v2_candidate_sufficiency_stride15.json)
+### 10.3 执行后验收
 
-### 30.3 Gate
+Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 summary。它检查：
 
-`STOP_AT_CANDIDATE_LOCALIZATION`。没有执行 dense/factor bit sweep，故没有新的通信率 PASS/FAIL；
-M4-B/C 结论不受影响。当前负结果说明 candidate information 是首要缺口，fresh closure
-3--8、median 5 不能由旧 small-conflict 直觉替代。统计仍以 5 个 episode 为 cluster，不对
-32 帧作 iid 推断。
+- 100 条 episode 顺序、唯一性和 QoS boolean；
+- 三项检测门槛与 Wilson LCB；
+- delivery、deadline、每 seed runtime P95；
+- endpoint/swept distance、power violation、pre-clamp energy deficit 与 battery 诊断；
+- artifact hash、completion status、formal eligibility、commit 和有效配置；
+- registry 的 evidence blob 与当前 release 内容绑定。
 
-capability dual、oracle-free locator、minimum-intervention 与 provenance 相关回归 `28 passed`；
-新增模块和两阶段工具 `py_compile` 通过，`git diff --check` 无 whitespace error。
+只有所有 enforced gate 通过，才允许把结果写成“当前版本正式通过”。
 
-## 31. Joint Structural Locator Development Replay（2026-08-22）
+## 11. 下一轮实验计划（按证据依赖排序）
 
-针对 M4-D1 的 23 个 `MOVE_GRAMMAR_GAP` 重构候选语法后，在相同已暴露 exact digest 上执行
-开发回放。Pool A exact-digest recall 为 `28/32`；候选数 min/median/max 为
-`1582/2396.5/3433`，32 帧耗时 `195.53 s`。产物：
+### P0：语义闭合与回归
 
-- [`_joint_structural_locator_development_replay.json`](../results/_joint_structural_locator_development_replay.json)
-- [`L2_JOINT_STRUCTURAL_LOCATOR.md`](L2_JOINT_STRUCTURAL_LOCATOR.md)
+- 完成并测试 antenna-gain 单次计数、单广播 airtime、共同模型证书和截断前能量缺口。
+- 刷新两种子 smoke 与结果摘要；旧语义数据不得继续标为 current。
+- 构造近 20 m、迎面运动、交叉换位、边界反射、低电量和一节点消息陈旧压力测试。
 
-本结果的 evidence class 固定为 `DEVELOPMENT_ONLY_NOT_BLIND`。它支持“move grammar 已明显改善”，
-不支持 independent confirmation、blind generalization 或新的 M4-D0/D1 temporal separation。
+### P1：当前确定性基线的 clean formal
 
-## 32. Endpoint-Coherent DP + FBL Communication（2026-08-22）
+- 只有 P0 全量回归、Architecture V2、identity 与新门禁全部通过后，才运行 K16/Q16 blind-100。
+- 失败按 belief/structure/model-certificate/power/movement/communication/energy/runtime 分层归因，
+  不查看 test seed 后调参；修复必须建立新 commit 与 evidence epoch。
 
-共享端点动态 beam 对同一 32 个已暴露 L2 帧的 Pool A exact-digest recall 达到 `32/32`；候选
-min/median/max=`2089/3054/4330`，总耗时 `297.08 s`。产物：
+### P2：belief-robust SOCP
 
-- [`_joint_structural_locator_endpoint_dp_development_replay.json`](../results/_joint_structural_locator_endpoint_dp_development_replay.json)
+- 用 selection split 标定系数均值/协方差、`epsilon_q` 与 Gaussian/Cantelli 选择。
+- 对比 nominal LP、lower-bound LP、SOCP：机会约束违反率、worst `P_D`、保守损失、求解时间。
+- 先做小规模精确 Monte Carlo coverage；覆盖不足即停止，不进入 blind-100。
 
-该结果仍为 `DEVELOPMENT_ONLY_NOT_BLIND`，不能覆盖旧 formal D1 负结论。它说明候选语法在开发
-结构族上已闭合，同时暴露了在线计算和候选通信成本。
+### P3：对偶定价 hyperedge 与事件触发
 
-通信侧新增有限码长正常近似、BLER 反演、可复现 codeword erasure，并将 learned message 与
-evidence packet 接入同一可靠性门禁。FBL 默认关闭；FBL 与旧 Shannon optimal-bandwidth KKT
-组合会 fail closed。理论与边界见 [`COMM_FINITE_BLOCKLENGTH.md`](COMM_FINITE_BLOCKLENGTH.md)。
+- 固定 SOCP/LP 功率块，逐项加入 target/RF/energy/airtime/AoI price。
+- 与固定周期 top-1 协议做同随机数配对，报告 bits、airtime、energy、AoI、QoS 与 fallback。
+- 只有 reduced-cost 事件触发同时降低资源且不破坏预注册 QoS，才进入主线。
+
+### P4：对偶移动与安全 QP
+
+- 将 target price 传入 bottleneck movement，将 barrier price 纳入 QP；执行前验证 swept certificate。
+- 压力测试报告安全余量、干预率、hold 率、能耗和检测收益，不以 endpoint 安全替代 swept 安全。
+
+### P5：小规模联合 oracle
+
+- 在小 K/Q 上穷举或混合整数求联合结构—功率 oracle，量化 finite-round hyperedge + LP/SOCP 的
+  最优性差距；只把 gap 当诊断，不把小规模最优性外推到 K16/Q16。
+
+### P6：波形级 DD 校准
+
+- 分层覆盖同 bin、邻 bin、远离主瓣和相关多边证据；比较解析系数、Monte Carlo ROC 与相关矩阵。
+- 校准未通过时保留“几何充分统计量模拟”表述，禁止硬件/真实波形外推。
+
+Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为低优先级 shadow：除非
+上述主线出现明确瓶颈且支线先通过独立 falsification，否则不占用正式种子或主报告结论。
+
+## 12. 结果解释与禁止表述
+
+允许表述：
+
+- “两种子 smoke 中未观察到安全或 RF 预算违反。”
+- “Markov graph 的 paired CI 跨 0，当前没有稳定优于 blind 的证据。”
+- “Fixed-lag 改善历史估计，但 white acceleration 下未证明预测收益。”
+
+禁止表述：
+
+- “当前 K16/Q16 已正式通过”——当前没有 clean-commit blind-100。
+- “算法全局最优”——只有固定结构功率子问题全局最优。
+- “系统完全分布式”——仿真推进和统计汇总仍集中完成。
+- “保证永不碰撞”——保证限于离散控制模型、投影前提和当前连续线段验证。
+- “Markov/GNN 显著提升性能”——现有数据不支持。
+
+## 13. 复现命令
+
+```powershell
+# 软件回归
+pytrch_ven\Scripts\python.exe -m pytest -q
+pytrch_ven\Scripts\python.exe tools/check_architecture_v2.py
+
+# 系统身份（dirty tree 会按设计失败）
+pytrch_ven\Scripts\python.exe tools/check_system_identity.py --manifest config/exp_strict_distributed_k16q16.yaml --strict
+
+# 两种子 diagnostic smoke
+pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 11033,10361 --frames 30 --tail-window 20 --quiet
+
+# 研究支线影子基准
+pytrch_ven\Scripts\python.exe tools/benchmark_markov_graph_assignment.py --cases 32 --cardinality 16 --neighbors 3 --blind-candidates 32 --output results/current/markov_graph_shadow.json
+pytrch_ven\Scripts\python.exe tools/benchmark_fixed_lag_smoother.py --seed-count 32 --output results/current/fixed_lag_shadow.json
+
+# 当前 formal gate；在 blind-100 刷新前应拒绝 stale evidence
+pytrch_ven\Scripts\python.exe tools/assert_formal_gates.py
+```
+
+正式 bank 必须从项目受管 CLI/执行器启动；不得通过直接编辑 registry、summary 或 completion 文件
+绕过 provenance。

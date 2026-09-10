@@ -437,7 +437,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path,
                         default=Path("results/paper_final_suite"))
     parser.add_argument("--report", type=Path,
-                        default=Path("docs/FINAL_PAPER_EXPERIMENTS.md"))
+                        default=Path("results/current/final_paper_experiments.md"))
     parser.add_argument("--bootstrap-samples", type=int, default=20_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20_260_722)
     args = parser.parse_args()

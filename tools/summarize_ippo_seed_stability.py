@@ -203,11 +203,11 @@ def main() -> None:
     (output / "summary.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     write_csv(output / "ippo_training_seeds.csv", report["rows"])
-    Path("docs/IPPO_TRAINING_SEED_STABILITY.md").write_text(
+    Path("results/current/ippo_training_seed_stability.md").write_text(
         markdown(report), encoding="utf-8")
     print(f"wrote {output / 'summary.json'}")
     print(f"wrote {output / 'ippo_training_seeds.csv'}")
-    print("wrote docs/IPPO_TRAINING_SEED_STABILITY.md")
+    print("wrote results/current/ippo_training_seed_stability.md")
 
 
 if __name__ == "__main__":

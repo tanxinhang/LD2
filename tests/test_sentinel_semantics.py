@@ -1,6 +1,6 @@
 """R14 property tests: named sentinels, zero-semantics, domain-isolated.
 
-The audit (docs/DEEP_AUDIT_SYSTEM_2026-08-29.md R14) found bare numeric
+The audit (docs/EXPERIMENT_LOG.md R14) found bare numeric
 sentinels with two hazards:
   (a) the SAME value (-1) carrying OPPOSITE semantics in different domains
       ("expired, frozen" in persistent_geometry_execution vs "no cached age,

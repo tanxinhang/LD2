@@ -1,5 +1,5 @@
 """O5 / T7 property tests: bistatic movement potential with a strict-accept
-descent rule (roadmap docs/ALGORITHM_PERFORMANCE_ROADMAP_2026-08-29.md §3 T7).
+descent rule (roadmap docs/CURRENT_SYSTEM_MODEL.md §3 T7).
 
 T7 (potential -- reachability monotone agreement):
     bottleneck Phi non-increasing along accepted moves

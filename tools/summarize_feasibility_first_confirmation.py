@@ -283,7 +283,7 @@ def build(
 
 def main() -> None:
     protocol = Path(
-        "docs/research_protocols/"
+        "config/research_protocols/"
         "preregistered_feasibility_first_nonsaturated_v1.yaml")
     report = build(Path("artifacts/runs"), protocol)
     output = Path(

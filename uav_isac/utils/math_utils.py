@@ -95,7 +95,7 @@ def utility_from_D(D_q: np.ndarray, P_FA: float) -> np.ndarray:
     U_q(D_q) = -log(1 - P_D(D_q) + eps)
     Monotone increasing. NOTE: it is CONVEX (not concave) in P_D, and
     empirically NON-concave in D_q, so it does NOT make the P0 objective
-    submodular (see docs/KNOWN_ISSUES.md B8). The P0 greedy is heuristic.
+    submodular (see docs/CURRENT_SYSTEM_MODEL.md §6.3). The P0 greedy is heuristic.
 
     Args:
         D_q: Cumulative effective Deflection per target, shape (Q,)

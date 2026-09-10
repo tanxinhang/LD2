@@ -199,11 +199,11 @@ def main() -> None:
     write_csv(
         output / "training_budget_20epoch.csv",
         report["budget_sensitivity_20_epoch_rows"])
-    Path("docs/TRAINING_SEED_STABILITY.md").write_text(
+    Path("results/current/training_seed_stability.md").write_text(
         markdown(report), encoding="utf-8")
     print(f"wrote {output / 'summary.json'}")
     print(f"wrote {output / 'formal_training_seeds.csv'}")
-    print("wrote docs/TRAINING_SEED_STABILITY.md")
+    print("wrote results/current/training_seed_stability.md")
 
 
 if __name__ == "__main__":

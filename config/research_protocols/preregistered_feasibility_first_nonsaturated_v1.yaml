@@ -1,0 +1,18 @@
+schema_version: research-preregistration/v1
+name: temporal_cvar_feasibility_first_nonsaturated_v1
+status: historical_falsified
+question: Does scale-invariant feasibility restoration improve tail detection and CVaR control in a non-saturated regime?
+scope:
+  scenario: K2/Q2/T32
+  training_updates: 3
+  sensing_cap_w_per_uav: 0.15
+seeds:
+  training: [41001, 41002, 41003, 41004, 41005]
+  evaluation: [33001, 33002, 33003, 33004, 33005, 33006, 33007, 33008, 33009, 33010, 33011, 33012, 33013, 33014, 33015, 33016, 33017, 33018, 33019, 33020]
+statistics:
+  independent_unit: training_seed
+  paired_unit: common_evaluation_seed_nested_within_training_seed
+  primary_endpoint: candidate_minus_control_mean_eval_episode_worst_values
+  bootstrap_samples: 100000
+  bootstrap_seed: 9311
+decision_rule: Historical protocol retained only so the negative result remains reproducible; it is not an active promotion path.

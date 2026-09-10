@@ -544,6 +544,43 @@ def test_dynamic_distributed_coordination_uses_viewer_local_belief_targets():
     assert abs(movement[0][1]) <= 1.0e-10
 
 
+def test_common_model_uses_identical_owner_packets_and_rejects_missing_view():
+    cfg = load_config("config/exp_strict_distributed_no_truth_pilot.yaml")
+    env = UAVISACEnv(config=cfg, seed=726)
+    env.reset(seed=726)
+    core = env.core
+
+    # Give every target one unique public owner, then emulate delivery of the
+    # same immutable quantized owner packet to every viewer (including the
+    # owner's local loopback cache).
+    core._hyperedge_selected_set = tuple(
+        ((q + 1) % core.K, q % core.K, q) for q in range(core.Q)
+    )
+    for q in range(core.Q):
+        owner = q % core.K
+        packet_mean = np.asarray(
+            [100.0 + q, 200.0 + q, 1.0, -0.5, 0.0, 0.0],
+            dtype=np.float64,
+        )[:core._owner_posterior_state_dim]
+        packet_covariance = np.eye(
+            core._owner_posterior_state_dim, dtype=np.float64) * (q + 1.0)
+        core._owner_posterior_received_mean[:, owner, q] = packet_mean
+        core._owner_posterior_received_cov[:, owner, q] = packet_covariance
+        core._owner_posterior_received_frame[:, owner, q] = core.t
+
+    reference = core._common_owner_posterior_for_viewer(0)
+    assert reference is not None
+    for viewer in range(1, core.K):
+        candidate = core._common_owner_posterior_for_viewer(viewer)
+        assert candidate is not None
+        np.testing.assert_array_equal(candidate[0], reference[0])
+        np.testing.assert_array_equal(candidate[1], reference[1])
+
+    missing_owner = 0
+    core._owner_posterior_received_frame[1, missing_owner, 0] = -1
+    assert core._common_owner_posterior_for_viewer(1) is None
+
+
 def test_strict_local_coordination_never_falls_back_to_target_truth(monkeypatch):
     cfg = load_config(
         "config/exp_800_k10q10_distributed_tail40_safe_v2_"

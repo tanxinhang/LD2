@@ -59,6 +59,21 @@ def test_transition_is_bounded_and_advances_reflecting_target_cv():
     np.testing.assert_allclose(uv1[:, :2], (uav1[:, :2] - uav0[:, :2]) / 0.1)
 
 
+def test_transition_projects_crossing_uav_paths_to_safe_separation():
+    _dc, model, state = _fixture()
+    uav_pos, uav_vel, target_pos, target_vel = model.unpack_state(state)
+    uav_pos = uav_pos.copy()
+    uav_pos[0, :2] = [100.0, 100.0]
+    uav_pos[1, :2] = [121.0, 100.0]
+    target_pos = target_pos.copy()
+    target_pos[0, :2] = [130.0, 100.0]
+    target_pos[1, :2] = [90.0, 100.0]
+    close_state = model.pack_state(uav_pos, uav_vel, target_pos, target_vel)
+    next_state = model.transition(close_state, np.array([0, 1, 0, 1]), 0)
+    next_uav, _velocity, _target, _target_velocity = model.unpack_state(next_state)
+    assert np.linalg.norm(next_uav[0, :2] - next_uav[1, :2]) >= 20.0 - 1.0e-8
+
+
 def test_stage_evaluation_matches_explicit_expected_physics_and_exact_lp():
     dc, model, state = _fixture()
     result = model.evaluate(state)

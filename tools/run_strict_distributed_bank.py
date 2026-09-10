@@ -148,6 +148,11 @@ def bind_run_spec(
             "delivery_rate_min": 0.99,
             "deadline_violation_rate_max": 0.01,
             "closed_loop_p95_ms_max": 100.0,
+            "inter_uav_min_distance_m": 20.0,
+            "preexecution_swept_min_distance_m": 20.0,
+            "isac_power_budget_violation_w_max": 1.0e-9,
+            "minimum_battery_j_min": 0.0,
+            "energy_causality_violation_j_max": 0.0,
         },
     }
     manifest["run_spec"] = spec
@@ -199,6 +204,18 @@ def summarize(
         item["deadline_violation_rate"] for item in episodes]))
     worst_closed_loop_p95 = float(np.max([
         item["closed_loop_critical_path_p95_ms"] for item in episodes]))
+    minimum_inter_uav = float(np.min([
+        item["inter_uav_min_distance_m"] for item in episodes]))
+    minimum_swept_inter_uav = float(np.min([
+        item["inter_uav_swept_min_distance_m"] for item in episodes]))
+    minimum_preexecution_swept = float(np.min([
+        item["preexecution_swept_min_distance_m"] for item in episodes]))
+    maximum_power_violation = float(np.max([
+        item["isac_max_power_budget_violation_w"] for item in episodes]))
+    minimum_battery = float(np.min([
+        item["minimum_battery_j"] for item in episodes]))
+    maximum_energy_deficit = float(np.max([
+        item["energy_causality_violation_j"] for item in episodes]))
     return {
         "completed_episodes": count,
         "qos_successes": successes,
@@ -216,6 +233,18 @@ def summarize(
             episodes, "step_time_p95_ms"),
         "closed_loop_critical_path_p95_ms": _continuous_summary(
             episodes, "closed_loop_critical_path_p95_ms"),
+        "inter_uav_min_distance_m": _continuous_summary(
+            episodes, "inter_uav_min_distance_m"),
+        "inter_uav_swept_min_distance_m": _continuous_summary(
+            episodes, "inter_uav_swept_min_distance_m"),
+        "preexecution_swept_min_distance_m": _continuous_summary(
+            episodes, "preexecution_swept_min_distance_m"),
+        "isac_max_power_budget_violation_w": _continuous_summary(
+            episodes, "isac_max_power_budget_violation_w"),
+        "minimum_battery_j": _continuous_summary(
+            episodes, "minimum_battery_j"),
+        "energy_causality_violation_j": _continuous_summary(
+            episodes, "energy_causality_violation_j"),
         "delivery_rate_mean": delivery,
         "deadline_violation_rate_mean": deadline,
         "timing_claim_eligible": bool(timing_claim_eligible),
@@ -233,6 +262,19 @@ def summarize(
             "every_seed_closed_loop_p95_le_100ms": (
                 (worst_closed_loop_p95 <= 100.0)
                 if timing_claim_eligible else None),
+            "every_seed_inter_uav_distance_ge_20m": (
+                minimum_inter_uav >= 20.0 - 1.0e-8),
+            "every_seed_swept_inter_uav_distance_ge_20m": (
+                minimum_swept_inter_uav >= 20.0 - 1.0e-8),
+            "every_seed_preexecution_swept_certificate_ge_20m": (
+                minimum_preexecution_swept >= 20.0 - 1.0e-8),
+            "every_seed_isac_power_budget_valid": (
+                maximum_power_violation <= 1.0e-9),
+            # ``battery`` is a clamped state and remains a useful diagnostic;
+            # causality is certified by the pre-clamp raw deficit instead.
+            "every_seed_battery_nonnegative": minimum_battery >= 0.0,
+            "every_seed_energy_causality_valid": (
+                maximum_energy_deficit <= 0.0),
         },
     }
 
@@ -344,6 +386,24 @@ def run_bank(
         "strict-distributed-owner-posterior-bistatic-v4-process-parallel"
         if internal_parallel else
         "strict-distributed-owner-posterior-bistatic-v3")
+    if bool(getattr(
+        cfg.marl,
+        "distributed_replicated_power_common_model_certificate",
+        False,
+    )):
+        algorithm_version += "-common-model-certified"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_common_model_packet_reconstruction_enabled",
+        False,
+    )):
+        algorithm_version += "-packet-model-rendezvous"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_movement_preexecution_swept_certificate",
+        False,
+    )):
+        algorithm_version += "-aoi-swept-certified"
     manifest = build_run_manifest(
         cfg,
         config_path=config_path,

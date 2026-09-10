@@ -1,7 +1,7 @@
 # Controlled-density zero-shot scale audit (2026-08-16 v2: clean test bank).
 # Same as the v1 6/6 scale config, but eval_seed_bank_path points at the
 # rebuilt bank whose test split excludes the quarantined seeds
-# {795,747,105,860,2} (docs/KNOWN_ISSUES.md).  selection/confirmation/
+# {795,747,105,860,2} (docs/CURRENT_SYSTEM_MODEL.md).  selection/confirmation/
 # stress splits are unchanged from the original bank.
 extends: exp_800_q4_architecture_v2_maxmin_local_fusion_fullgraph_hold5_gate.yaml
 

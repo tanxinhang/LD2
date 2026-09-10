@@ -337,7 +337,7 @@ def markdown(report: dict[str, Any]) -> str:
         "seed123/456 replications show that it is not stable. Across three "
         "seeds, MAPPO, IPPO, and frozen mean worst are nearly identical, while "
         "both PPO variants have larger seed variance and lower mean CVaR/QoS. "
-        "See `docs/ALGORITHM_SEED_STABILITY.md` for the formal multi-seed "
+        "See `results/current/algorithm_seed_stability.md` for the formal multi-seed "
         "conclusion.",
         "",
         "## Excluded legacy runs",
@@ -360,12 +360,12 @@ def main() -> None:
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     write_csv(output / "algorithm_comparison.csv", report["formal_rows"])
     write_csv(output / "paired_differences.csv", paired_rows(report))
-    Path("docs/ALGORITHM_BASELINE_RESULTS.md").write_text(
+    Path("results/current/algorithm_baseline_results.md").write_text(
         markdown(report), encoding="utf-8")
     print(f"wrote {output / 'summary.json'}")
     print(f"wrote {output / 'algorithm_comparison.csv'}")
     print(f"wrote {output / 'paired_differences.csv'}")
-    print("wrote docs/ALGORITHM_BASELINE_RESULTS.md")
+    print("wrote results/current/algorithm_baseline_results.md")
 
 
 if __name__ == "__main__":

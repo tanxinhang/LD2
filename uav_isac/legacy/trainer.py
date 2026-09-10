@@ -636,14 +636,14 @@ def apply_cacsr_sensing_residual(
 
 
 # Seeds permanently isolated after the 2026-07-29 test-set contamination
-# event (see docs/ARCHITECTURE_V2_RESULTS.md:1764 and
-# docs/CURRENT_SYSTEM_STATUS.md:412-416).  The authoritative registry is
+# event (see docs/EXPERIMENT_LOG.md:1764 and
+# docs/CURRENT_SYSTEM_MODEL.md:412-416).  The authoritative registry is
 # config/quarantined_seeds.json; this constant is only the fail-closed
 # fallback when that file is missing or malformed.  Keep the two in sync
 # (tests/test_quarantined_seeds.py locks the documented set).
 QUARANTINED_SEEDS_FALLBACK: frozenset[int] = frozenset({795, 747, 105, 860, 2})
 _QUARANTINE_DOC_REF = (
-    "docs/ARCHITECTURE_V2_RESULTS.md:1764, docs/CURRENT_SYSTEM_STATUS.md:412-416")
+    "docs/EXPERIMENT_LOG.md:1764, docs/CURRENT_SYSTEM_MODEL.md:412-416")
 
 
 def _project_root() -> str:
@@ -932,7 +932,7 @@ def compute_robust_checkpoint_statistics(
         & (worst >= targets[2] - tol))
     successes = int(np.sum(feasible))
     p_hat = successes / n
-    # Audit 2026-08-25: the project convention (docs/README.md, tests) is the
+    # Audit 2026-08-25: the project convention (docs/CURRENT_SYSTEM_MODEL.md, tests) is the
     # 95% two-sided Wilson lower endpoint, z = inv_cdf(1-alpha/2) = 1.96, not
     # the one-sided z = inv_cdf(1-alpha) = 1.645.  The old one-sided value could
     # flip a 0.70 gate (e.g. 78/100 -> 0.705 vs 0.689) and disagreed with the

@@ -90,6 +90,24 @@ class TestActionExecution:
         np.testing.assert_allclose(uav.pos[:2], [0.5, 1.5])
         np.testing.assert_allclose(uav.vel[:2], [10.0, 20.0])
 
+    def test_battery_gate_retains_pre_clamp_energy_deficit(self):
+        uav = UAV(
+            uav_id=0,
+            initial_pos=np.asarray([10.0, 10.0, 100.0]),
+            B_max=1.0,
+            P_fly_static=20.0,
+            P_fly_coeff=0.0,
+            dt=0.1,
+            area_size=(100.0, 100.0),
+            height=100.0,
+        )
+
+        uav.apply_action(
+            np.zeros(2), role=2, account_radio_energy=False)
+
+        assert uav.battery == 0.0
+        assert uav.max_energy_deficit_j == pytest.approx(1.0)
+
     def test_action_space_clamp_is_unused_in_env_path(self):
         """ActionSpace.clamp() exists but env_core calls uav.apply_action directly."""
         from uav_isac.environment import env_core
@@ -302,9 +320,10 @@ class TestBeliefSemantics:
         assert np.trace(bm.cov[0, 0]) > old_cov_trace
         # Kalman update: cov shrinks, AoI resets
         ts = np.array([205.0, 200.0, 1.0, 0.0])
+        predicted_cov_trace = float(np.trace(bm.cov[0, 0]))
         bm.update_after_observation(0, 0, observed=True, true_state=ts)
         assert bm.aoi[0, 0] == 0
-        assert np.trace(bm.cov[0, 0]) < np.trace(bm.cov[0, 0]) + 1  # cov shrunk
+        assert float(np.trace(bm.cov[0, 0])) < predicted_cov_trace
 
     def test_belief_reset_preserves_constructor_std(self, seeded_rng):
         bm = BeliefManager(
@@ -467,29 +486,8 @@ class TestEnvStatistics:
             if term["__all__"]:
                 break
         rate = violations / max(steps, 1)
-        # P0 now assigns roles -> more valid pairs -> fewer violations
-        assert rate >= 0.0, f"violation rate={rate:.2f}"
-
-        env = UAVISACEnv(config=default_config, seed=42)
-        obs, _ = env.reset(seed=42)
-        violations = 0
-        steps = 0
-        for _ in range(100):
-            actions = {
-                str(k): {
-                    "delta_p": env.rng.uniform(-env.max_dp, env.max_dp, 2),
-                    "role": int(env.rng.integers(0, 3)),
-                }
-                for k in range(env.K)
-            }
-            _, _, term, _, info = env.step(actions)
-            violations += int(info["constraint_info"]["any_violation"])
-            steps += 1
-            if term["__all__"]:
-                break
-        rate = violations / max(steps, 1)
-        # P0 roles → more valid pairs → fewer violations
-        assert rate >= 0.0, f"violation rate={rate:.2f}"
+        assert np.isfinite(rate)
+        assert 0.0 <= rate <= 1.0
 
     def test_prev_pd_is_local_and_matches_next_observation(self, default_config):
         """Each next observation carries that UAV's latest local RX P_D."""
@@ -537,7 +535,8 @@ class TestEnvStatistics:
             prev_roles = roles
         # P0 now assigns roles consistently -> lower switch rate
         rate = switches / (env.K * 49)
-        assert rate >= 0.0, f"role switch rate={rate:.2f}"
+        assert np.isfinite(rate)
+        assert 0.0 <= rate <= 1.0
 
 
 # ---------------------------------------------------------------------------
