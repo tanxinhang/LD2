@@ -342,6 +342,9 @@ class MARLParams:
     # Reconstruct the LP model exclusively from immutable on-air endpoint
     # packets and unique-owner posterior packets, including sender loopback.
     distributed_common_model_packet_reconstruction_enabled: bool = False
+    # Make-before-break activation: a candidate structure remains pending
+    # until all viewers hold the same endpoint and owner-posterior packets.
+    distributed_atomic_decision_epoch_enabled: bool = False
     distributed_replicated_power_inertia: float = 0.0
     # Optional causal two-stage envelope for the private LP.  With a valid
     # previous local full-plan cache, target q receives the feasible reserve

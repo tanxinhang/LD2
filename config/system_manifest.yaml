@@ -79,10 +79,16 @@ marl:
   # per endpoint, hence 5 m for a pair.
   distributed_movement_safety_margin_per_age_m: 5.0
   distributed_movement_preexecution_swept_certificate: true
+  distributed_atomic_decision_epoch_enabled: true
   distributed_movement_execute_projected_public_action: true
   distributed_movement_local_assignment_cache_enabled: true
   distributed_movement_stale_fail_closed: true
   distributed_movement_independently_composable_safety: true
+  # Endpoint-split barriers form independent 2-D convex projection problems.
+  # Enumerating affine/box/speed-circle boundary candidates gives the exact
+  # projection; an empty candidate set proves per-frame infeasibility and
+  # returns the existing fail-closed hold without an iterative SLSQP retry.
+  distributed_movement_analytic_composable_projection_enabled: true
   # Scalar score-order quantization primitives exist, but the current learned
   # target-token decoder has no certified Lipschitz/action-margin bound.  A
   # distance-score margin therefore cannot prove that dropping or coarsening

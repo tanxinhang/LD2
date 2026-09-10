@@ -357,6 +357,7 @@ def test_periodic_control_carrier_reduces_airtime_without_disabling_protocol():
     # available only after the first executed allocation and therefore has a
     # deliberate one-carrier warm-up rather than a stationary 1/N bit ratio.
     cfg.marl.distributed_composable_certificate_enabled = False
+    cfg.marl.distributed_atomic_decision_epoch_enabled = False
     cfg.marl.distributed_owner_posterior_enabled = False
     cfg.scenario.T = 6
     every_frame = _episode(cfg, seed=7, tail_window=2, carrier_period=1)
@@ -371,6 +372,7 @@ def test_periodic_control_carrier_reduces_airtime_without_disabling_protocol():
 
 def test_composable_certificate_is_physically_billed_after_warmup():
     cfg = load_config(PILOT)
+    cfg.marl.distributed_atomic_decision_epoch_enabled = False
     cfg.scenario.T = 3
     enabled = _episode(cfg, seed=7, tail_window=2, carrier_period=1)
     cfg.marl.distributed_composable_certificate_enabled = False
@@ -453,6 +455,7 @@ def test_owner_posterior_ci_fuses_each_delivered_frame_once():
 
 def test_owner_posterior_payload_is_physically_billed_after_warmup():
     cfg = load_config(PILOT)
+    cfg.marl.distributed_atomic_decision_epoch_enabled = False
     cfg.marl.distributed_composable_certificate_enabled = False
     cfg.scenario.T = 3
     enabled = _episode(cfg, seed=7, tail_window=2, carrier_period=1)

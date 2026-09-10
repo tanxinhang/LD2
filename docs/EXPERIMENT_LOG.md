@@ -161,7 +161,9 @@ violation `<=0.01`。
 
 每个 episode 记录闭环关键路径逐帧时间，再取 P95；正式门槛要求每个 seed 的 P95 均
 `<=100 ms`。运行时声明必须来自 episode worker=1 的环境；多 episode 并行结果只可用于吞吐，
-不能作为单帧延迟证据。
+不能作为单帧延迟证据。K16 profile 将 power worker soft timeout 降为 55 ms，不再允许单个
+子求解器占满整个 100 ms；报告同时区分 simulator wall clock、node-local solver latency 和
+`max_i T_i` 的 distributed critical-node latency。
 
 ### 4.5 安全指标
 
@@ -255,58 +257,65 @@ coverage、唯一 owner 完整率、composable certificate complete fraction、p
 ### 7.3 清理后最终回归
 
 ```text
-1760 passed, 6 skipped, 7 warnings
+1768 passed, 6 skipped, 7 warnings
 Architecture V2: PASS
 JSON parse and git diff check: PASS
 ```
 
-测试数量减少源于退役完全依赖已清空历史 `results` 的 G2-1A bridge 测试，不是跳过当前主线
-失败。保留工具的依赖闭包经过 test collection 和全量回归验证。清理后重新生成的 current data
+相较上一稳定提交新增的 8 个测试覆盖 source-root 映射、唯一层归属、相对导入、依赖环、
+atomic epoch 的非载波 loopback/make-before-break，以及二维安全投影的正 AoI margin 与不可行
+短路。保留工具的依赖闭包经过 test collection 和全量回归验证。
+重新生成的 current data
 catalog 只登记 4 个现存结果文件，entrypoint catalog 登记 81 个现存入口；Architecture V2 的
 数据完整性与入口新鲜度检查均通过。正式门禁仍按预期失败，因为没有当前提交、clean tree 的
 blind-100 证据，不能把本节 smoke 伪装成正式结论。
 
 ## 8. 最新诊断实验
 
-### 8.1 K16/Q16 两种子、30 帧 smoke
+### 8.1 K16/Q16 十种子、30 帧独立诊断 smoke
 
 命令：
 
 ```powershell
-pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 11033,10361 --frames 30 --tail-window 20 --quiet
+pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 20001,20002,20003,20004,20005,20006,20007,20008,20009,20010 --frames 30 --tail-window 20 --quiet
 ```
 
 该运行使用 dirty tree，且帧数/种子数低于正式协议，故 `formal_eligible=false`。
 
-| 指标 | seed 11033 | seed 10361 | 聚合/门槛 |
-|---|---:|---:|---:|
-| delivery rate | 1.0 | 1.0 | mean 1.0 / `>=0.99` |
-| endpoint min distance | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
-| swept min distance | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
-| pre-execution swept certificate | 58.702 m | 32.621 m | min 32.621 m / `>=20` |
-| max RF violation | 0 W | 0 W | `<=10^-9 W` |
-| minimum battery | 49,669.368 J | 49,669.368 J | 诊断字段 |
-| pre-clamp energy deficit | 0 J | 0 J | `=0 J` |
-| common-model certificate | 0.3 | 0.3 | 部分通过 |
-| common-model safe fallback | 0.7 | 0.7 | 结构/后验纪元不齐时触发 |
+| 指标 | 十种子聚合/最坏值 | 门槛 |
+|---|---:|---:|
+| QoS success | 10/10 | diagnostic only |
+| delivery rate | mean 1.0 | `>=0.99` |
+| endpoint / swept / pre-execution minimum | 24.424 m | `>=20 m` |
+| max RF violation | 0 W | `<=10^-9 W` |
+| minimum battery | 49,669.367 J | 诊断字段 |
+| pre-clamp energy deficit | 0 J | `=0 J` |
+| common-model certificate | 每种子 0.9667 | 首帧 bootstrap 外全部通过 |
+| common-model safe fallback | 每种子 0 | 无协议诱导回退 |
+| closed-loop P95 | max 76.132 ms | `<=100 ms` |
+| closed-loop frame maximum | 89.520 ms | `<=100 ms`（诊断） |
+| online deadline miss | 每种子 0 | `=0` |
 
 聚合检测与通信：
 
 | 指标 | 数值 |
 |---|---:|
-| steady | 0.837721 |
-| weak3 | 0.684702 |
-| worst | 0.606968 |
-| short-window QoS rate | 0.5（1/2） |
-| bits/frame | 2412.8 |
+| steady | 0.961748 |
+| weak3 | 0.937515 |
+| worst | 0.924460 |
+| short-window QoS rate | 1.0（10/10） |
+| bits/frame | 2513.067 |
 | deadline violation | 0 |
-| hyperedge coverage | 1.0 |
+| hyperedge coverage | 0.9667（final=1.0） |
 
-解释：新能量门禁、安全、功率和 delivery 接线均通过。packet-model rendezvous 使两个 episode
-各有 30% 帧满足 byte-exact 公共模型证书，其余 70% 在结构 owner 更新而相应 posterior 尚未同纪元
-到达时安全回退；没有把私有 belief 拼入公共 LP。短窗 QoS 改善为 1/2，但证书覆盖仍不足以启动
-blind-100。下一步应把结构版本、owner 映射和 posterior 时间戳原子绑定，并保留逐行证书 fallback。
-多帧检测窗口 2 的 QoS 为 1.0 仍不能替代冻结的单帧 tail 指标。
+逐帧 trace 证明旧 0.30 模式的直接根因是：非载波帧只刷新了发送者本地 endpoint loopback，peer
+没有物理广播可接收，所以端点源帧和 dead-reckoned position 每三帧中有两帧分歧。修复后本地
+回环只有在 sender 实际广播时才更新。新结构先进入 pending epoch；owner posterior、endpoint
+payload、源帧和完整模型在所有 viewer 间一致后才 make-before-break commit。acquisition 阶段逐帧
+发载波并完整计费，首个 epoch 激活后恢复三帧周期。安全投影使用可分二维精确求解，并对速度界
+内不可行的 AoI barrier 直接 fail closed，避免 SLSQP 跑满迭代后才返回同一零动作。结果是首帧
+以外证书全通过、harmonic fallback 为 0、独立诊断 QoS 为 10/10，且十种子所有帧低于 100 ms；
+仍须 clean-tree blind-100 才能形成正式统计结论。
 
 ### 8.2 Markov/KNN 物理影子基准
 
@@ -346,12 +355,12 @@ blind-100。下一步应把结构版本、owner 映射和 posterior 时间戳原
 
 | 文件 | 内容 | 证据等级 |
 |---|---|---|
-| `results/current/strict_k16q16_smoke.json` | 两种子短闭环、安全/资源诊断 | diagnostic |
+| `results/current/strict_k16q16_smoke.json` | 十种子短闭环、安全/资源/运行时诊断 | diagnostic |
 | `results/current/markov_graph_shadow.json` | 32-case Markov 对 blind 配对基准 | shadow |
 | `results/current/fixed_lag_shadow.json` | 32-seed smoothing/forecast 机制筛查 | shadow |
 | `results/current/README.md` | 数据边界说明 | metadata |
 
-原始 smoke 运行保存在 `artifacts/runs/pilot-6c77b5083922176cb920/`。`results/current` 只保存小型
+原始 smoke 运行保存在 `artifacts/runs/pilot-8c1fa34d2ac28263fa3d/`。`results/current` 只保存小型
 可解释汇总，不替代受管 artifact 的 provenance。
 
 ## 10. 正式 blind-100 执行协议
@@ -385,11 +394,15 @@ Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 sum
 
 ## 11. 下一轮实验计划（按证据依赖排序）
 
-### P0：语义闭合与回归
+### P0：语义闭合与架构门禁回归（诊断与全量回归已完成）
 
-- 完成并测试 antenna-gain 单次计数、单广播 airtime、共同模型证书和截断前能量缺口。
-- 刷新两种子 smoke 与结果摘要；旧语义数据不得继续标为 current。
-- 构造近 20 m、迎面运动、交叉换位、边界反射、低电量和一节点消息陈旧压力测试。
+- atomic epoch 已把 structure、owner、endpoint state 与 owner posterior 作为同一候选纪元提交；
+  依赖不完整时保留旧完整纪元，启动期无旧纪元时 fail-closed。
+- architecture checker 已执行 `source_root` 全覆盖、exactly-one ownership、相对导入解析和层依赖
+  环检测；未迁移包显式归入 `legacy_runtime`，不再落在门禁之外。
+- 十种子 smoke 的共同模型证书均为 `0.9667`，协议 fallback 均为 `0`；首帧为显式 acquisition，
+  不是结构/后验错配。全量回归及既有构造安全/陈旧消息测试均通过；正式统计结论仍等待 clean
+  commit 的 blind-100。
 
 ### P1：当前确定性基线的 clean formal
 
@@ -397,32 +410,44 @@ Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 sum
 - 失败按 belief/structure/model-certificate/power/movement/communication/energy/runtime 分层归因，
   不查看 test seed 后调参；修复必须建立新 commit 与 evidence epoch。
 
-### P2：belief-robust SOCP
+### P1.5：最小 waveform / correlation calibration gate
+
+- 在不建设完整 transceiver 的前提下，对 same DD bin、adjacent DD bin、far DD bin 以及
+  `rho in {0, 0.1, 0.3, 0.5}` 做小规模 Monte Carlo。
+- 比较解析 `a_ijq -> D_q -> P_D`、波形级检测排序与相关证据模型
+  `mu_q^T Sigma_q^{-1} mu_q`；报告排序保持率、偏差和覆盖率。
+- 若 additive Deflection 明显偏乐观，先修正感知目标与证书；校准未通过时禁止进入稳健功率和
+  对偶结构优化，也禁止把当前结果外推为真实 OTFS 波形性能。
+
+### P2：primal-dual structural exchange
+
+- 固定当前 certified LP 为 incumbent，使用 target/RF/airtime/AoI 对偶价格筛选少量
+  one-edge / owner-exchange 候选。
+- 候选 reduced cost 只负责筛选；每个候选必须重新执行 exact LP 与全部协议、RF、能量和安全
+  门禁，只有真实改善才 atomic commit。
+- 先在小 K/Q joint oracle 上报告结构最优性 gap，再决定是否进入正式规模。
+
+### P3：belief-robust SOCP
 
 - 用 selection split 标定系数均值/协方差、`epsilon_q` 与 Gaussian/Cantelli 选择。
 - 对比 nominal LP、lower-bound LP、SOCP：机会约束违反率、worst `P_D`、保守损失、求解时间。
 - 先做小规模精确 Monte Carlo coverage；覆盖不足即停止，不进入 blind-100。
 
-### P3：对偶定价 hyperedge 与事件触发
-
-- 固定 SOCP/LP 功率块，逐项加入 target/RF/energy/airtime/AoI price。
-- 与固定周期 top-1 协议做同随机数配对，报告 bits、airtime、energy、AoI、QoS 与 fallback。
-- 只有 reduced-cost 事件触发同时降低资源且不破坏预注册 QoS，才进入主线。
-
 ### P4：对偶移动与安全 QP
 
-- 将 target price 传入 bottleneck movement，将 barrier price 纳入 QP；执行前验证 swept certificate。
+- 在 P2/P3 固化后，将 target price 传入 bottleneck movement，将 barrier price 纳入 QP；
+  执行前验证 swept certificate。
 - 压力测试报告安全余量、干预率、hold 率、能耗和检测收益，不以 endpoint 安全替代 swept 安全。
 
 ### P5：小规模联合 oracle
 
-- 在小 K/Q 上穷举或混合整数求联合结构—功率 oracle，量化 finite-round hyperedge + LP/SOCP 的
-  最优性差距；只把 gap 当诊断，不把小规模最优性外推到 K16/Q16。
+- 在 P2 开始时先作为结构算法诊断；此阶段扩展场景覆盖，量化 finite-round exchange + LP/SOCP
+  的最优性差距。只把 gap 当诊断，不把小规模最优性外推到 K16/Q16。
 
-### P6：波形级 DD 校准
+### P6：完整波形级 DD 验证
 
-- 分层覆盖同 bin、邻 bin、远离主瓣和相关多边证据；比较解析系数、Monte Carlo ROC 与相关矩阵。
-- 校准未通过时保留“几何充分统计量模拟”表述，禁止硬件/真实波形外推。
+- 在 P1.5 最小校准通过后，再扩展为多目标、clutter、DD sidelobe、残余干扰、振荡器/信道误差
+  下的完整波形实验，并复核解析模型适用域。
 
 Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为低优先级 shadow：除非
 上述主线出现明确瓶颈且支线先通过独立 falsification，否则不占用正式种子或主报告结论。
@@ -431,7 +456,7 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
 
 允许表述：
 
-- “两种子 smoke 中未观察到安全或 RF 预算违反。”
+- “十种子独立诊断 smoke 中未观察到安全或 RF 预算违反。”
 - “Markov graph 的 paired CI 跨 0，当前没有稳定优于 blind 的证据。”
 - “Fixed-lag 改善历史估计，但 white acceleration 下未证明预测收益。”
 
@@ -453,8 +478,8 @@ pytrch_ven\Scripts\python.exe tools/check_architecture_v2.py
 # 系统身份（dirty tree 会按设计失败）
 pytrch_ven\Scripts\python.exe tools/check_system_identity.py --manifest config/exp_strict_distributed_k16q16.yaml --strict
 
-# 两种子 diagnostic smoke
-pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 11033,10361 --frames 30 --tail-window 20 --quiet
+# 十种子 independent diagnostic smoke
+pytrch_ven\Scripts\python.exe -m uav_isac.interfaces.cli pilot -- --config config/exp_strict_distributed_k16q16.yaml --seeds 20001,20002,20003,20004,20005,20006,20007,20008,20009,20010 --frames 30 --tail-window 20 --quiet
 
 # 研究支线影子基准
 pytrch_ven\Scripts\python.exe tools/benchmark_markov_graph_assignment.py --cases 32 --cardinality 16 --neighbors 3 --blind-candidates 32 --output results/current/markov_graph_shadow.json

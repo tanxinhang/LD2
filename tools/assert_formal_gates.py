@@ -77,6 +77,9 @@ _ALLOWED_CURRENT_ALGORITHMS = {
     "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-aoi-swept-certified",
     "strict-distributed-owner-posterior-bistatic-v3-common-model-certified-packet-model-rendezvous-aoi-swept-certified",
     "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-packet-model-rendezvous-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v3-common-model-certified-packet-model-rendezvous-atomic-epoch-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-packet-model-rendezvous-atomic-epoch-aoi-swept-certified",
+    "strict-distributed-owner-posterior-bistatic-v4-process-parallel-common-model-certified-packet-model-rendezvous-atomic-epoch-aoi-swept-certified-separable-safe-qp",
 }
 
 # These files govern discovery, packaging, and evidence presentation but are

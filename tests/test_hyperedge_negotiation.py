@@ -576,9 +576,77 @@ def test_common_model_uses_identical_owner_packets_and_rejects_missing_view():
         np.testing.assert_array_equal(candidate[0], reference[0])
         np.testing.assert_array_equal(candidate[1], reference[1])
 
+    endpoint_packet = np.zeros(
+        (core.K, core.Q, core._hyperedge_protocol_dim), dtype=np.float64)
+    core._hyperedge_received_offer[:] = endpoint_packet[None, ...]
+    core._hyperedge_received_last_seen.fill(core.t)
+    assert core._atomic_epoch_dependencies_ready(
+        core._hyperedge_selected_set)
+
+    core._hyperedge_received_last_seen[1, 0, 0] = core.t - 1
+    assert not core._atomic_epoch_dependencies_ready(
+        core._hyperedge_selected_set)
+    core._hyperedge_received_last_seen.fill(core.t)
+
     missing_owner = 0
     core._owner_posterior_received_frame[1, missing_owner, 0] = -1
     assert core._common_owner_posterior_for_viewer(1) is None
+    assert not core._atomic_epoch_dependencies_ready(
+        core._hyperedge_selected_set)
+
+
+def test_noncarrier_prepared_offer_does_not_advance_sender_loopback():
+    cfg = load_config("config/exp_strict_distributed_no_truth_pilot.yaml")
+    env = UAVISACEnv(config=cfg, seed=727)
+    env.reset(seed=727)
+    core = env.core
+    core._prepare_hyperedge_submission()
+
+    positions = np.asarray(
+        [uav.pos for uav in core.uavs], dtype=np.float64)
+    core._process_learned_communications(positions)
+
+    assert np.all(core._hyperedge_received_last_seen < 0)
+
+
+def test_atomic_epoch_retains_old_structure_until_candidate_is_ready(
+    monkeypatch,
+):
+    cfg = load_config("config/exp_strict_distributed_no_truth_pilot.yaml")
+    env = UAVISACEnv(config=cfg, seed=728)
+    env.reset(seed=728)
+    core = env.core
+    active = tuple(
+        ((q + 1) % core.K, q % core.K, q) for q in range(core.Q)
+    )
+    candidate = tuple(
+        ((q + 2) % core.K, (q + 1) % core.K, q) for q in range(core.Q)
+    )
+    core._hyperedge_selected_set = active
+    core._hyperedge_pending_epoch_structure = candidate
+    core._hyperedge_pending_epoch_created_frame = core.t
+    epoch_id = core._hyperedge_active_epoch_id
+
+    monkeypatch.setattr(
+        core, "_atomic_epoch_dependencies_ready", lambda _structure: False)
+    selected, committed, retained = core._advance_atomic_epoch()
+    assert selected == active
+    assert core._hyperedge_selected_set == active
+    assert core._hyperedge_pending_epoch_structure == candidate
+    assert core._hyperedge_active_epoch_id == epoch_id
+    assert committed is False
+    assert retained is True
+
+    monkeypatch.setattr(
+        core, "_atomic_epoch_dependencies_ready", lambda _structure: True)
+    selected, committed, retained = core._advance_atomic_epoch()
+    assert selected == candidate
+    assert core._hyperedge_selected_set == candidate
+    assert core._hyperedge_pending_epoch_structure == tuple()
+    assert core._hyperedge_pending_epoch_created_frame < 0
+    assert core._hyperedge_active_epoch_id == epoch_id + 1
+    assert committed is True
+    assert retained is False
 
 
 def test_strict_local_coordination_never_falls_back_to_target_truth(monkeypatch):
@@ -864,7 +932,7 @@ def test_composable_linear_qp_reduction_is_exact_and_reported():
         positions, desired, analytic_composable_projection=True, **kwargs)
 
     assert reference_info['projection_solver'] == 'slsqp'
-    assert reduced_info['projection_solver'] == 'reduced_linear_qp'
+    assert reduced_info['projection_solver'] == 'separable_2d_qp'
     assert not reference_info['fail_closed']
     assert not reduced_info['fail_closed']
     np.testing.assert_allclose(reduced, reference, atol=1.0e-9, rtol=1.0e-9)
@@ -906,6 +974,46 @@ def test_composable_linear_qp_reduction_matches_randomized_full_problem():
         )[np.triu_indices(positions.shape[0], k=1)]
         assert np.min(pair_distance) >= 20.0 - 1.0e-7
         assert np.max(np.linalg.norm(reduced, axis=1)) <= 2.5 + 1.0e-7
+
+
+def test_composable_2d_projection_handles_positive_aoi_margin_exactly():
+    positions = np.asarray([[30.0, 50.0], [57.0, 50.0]])
+    desired = np.asarray([[2.5, 0.0], [-2.5, 0.0]])
+    kwargs = dict(
+        minimum_distance_m=30.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+        independently_composable=True,
+        return_diagnostics=True,
+    )
+    reference, reference_info = project_pairwise_safe_movement(
+        positions, desired, analytic_composable_projection=False, **kwargs)
+    projected, projected_info = project_pairwise_safe_movement(
+        positions, desired, analytic_composable_projection=True, **kwargs)
+
+    assert not reference_info['fail_closed']
+    assert not projected_info['fail_closed']
+    assert projected_info['projection_solver'] == 'separable_2d_qp'
+    np.testing.assert_allclose(projected, reference, atol=1.0e-9, rtol=1.0e-9)
+
+
+def test_composable_2d_projection_short_circuits_proven_infeasibility():
+    positions = np.asarray([[30.0, 50.0], [51.0, 50.0]])
+    desired = np.asarray([[2.5, 0.0], [-2.5, 0.0]])
+    projected, diagnostics = project_pairwise_safe_movement(
+        positions,
+        desired,
+        minimum_distance_m=30.0,
+        maximum_step_m=2.5,
+        area_size_xy=(100.0, 100.0),
+        independently_composable=True,
+        analytic_composable_projection=True,
+        return_diagnostics=True,
+    )
+
+    np.testing.assert_array_equal(projected, np.zeros_like(desired))
+    assert diagnostics['fail_closed']
+    assert diagnostics['projection_solver'] == 'separable_2d_infeasible'
 
 
 def test_inverse_square_endpoint_capability_is_bounded_and_physical():

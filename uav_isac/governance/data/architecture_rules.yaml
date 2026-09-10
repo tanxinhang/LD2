@@ -50,8 +50,24 @@ layers:
       - uav_isac.environment
       - uav_isac.agents
       - uav_isac.evaluation
+  legacy_runtime:
+    paths:
+      - uav_isac/__init__.py
+      - uav_isac/acceleration
+      - uav_isac/agents
+      - uav_isac/coordination
+      - uav_isac/environment
+      - uav_isac/evaluation
+      - uav_isac/legacy
+      - uav_isac/optimization
+      - uav_isac/physical
+      - uav_isac/prediction
+      - uav_isac/utils
+    enforce_module_size: false
+    forbidden_imports: []
   legacy_coordination:
     paths: [uav_isac/coordination]
+    owns_paths: false
     enforce_module_size: false
     forbidden_imports:
       - uav_isac.environment
@@ -60,6 +76,7 @@ layers:
     allowed_imports: []
   legacy_physical:
     paths: [uav_isac/physical]
+    owns_paths: false
     enforce_module_size: false
     forbidden_imports:
       - uav_isac.coordination
@@ -70,6 +87,7 @@ layers:
       - {path: uav_isac/physical/feasibility_oracle.py, module: uav_isac.coordination.maxmin_power}
   legacy_environment:
     paths: [uav_isac/environment]
+    owns_paths: false
     enforce_module_size: false
     forbidden_imports:
       - uav_isac.agents
@@ -77,6 +95,7 @@ layers:
     allowed_imports: []
   legacy_agents:
     paths: [uav_isac/agents]
+    owns_paths: false
     enforce_module_size: false
     forbidden_imports:
       - uav_isac.environment
@@ -87,6 +106,7 @@ layers:
     allowed_imports: []
   legacy_boundary:
     paths: [uav_isac]
+    owns_paths: false
     enforce_module_size: false
     forbidden_imports:
       - uav_isac.legacy

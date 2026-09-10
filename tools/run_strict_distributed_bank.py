@@ -400,10 +400,22 @@ def run_bank(
         algorithm_version += "-packet-model-rendezvous"
     if bool(getattr(
         cfg.marl,
+        "distributed_atomic_decision_epoch_enabled",
+        False,
+    )):
+        algorithm_version += "-atomic-epoch"
+    if bool(getattr(
+        cfg.marl,
         "distributed_movement_preexecution_swept_certificate",
         False,
     )):
         algorithm_version += "-aoi-swept-certified"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_movement_analytic_composable_projection_enabled",
+        False,
+    )):
+        algorithm_version += "-separable-safe-qp"
     manifest = build_run_manifest(
         cfg,
         config_path=config_path,

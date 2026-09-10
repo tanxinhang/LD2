@@ -3,6 +3,8 @@
 from typing import NamedTuple, Optional, List, Tuple
 import numpy as np
 
+from uav_isac.domain.action import Action
+
 
 class Position3D(NamedTuple):
     x: float
@@ -36,16 +38,6 @@ class BeliefState(NamedTuple):
     mean: np.ndarray         # (4,) estimated [x, y, vx, vy]
     cov_diag: np.ndarray     # (4,) diagonal of covariance matrix
     aoi: int                 # age of information (frames since last observation)
-
-
-class Action(NamedTuple):
-    """Action for one UAV: trajectory increment and role."""
-    delta_p: np.ndarray     # (2,) position increment [dx, dy] (z fixed)
-    role: int               # 0=tx, 1=rx, 2=idle
-
-    @staticmethod
-    def create(delta_p: np.ndarray, role: int) -> "Action":
-        return Action(delta_p=np.asarray(delta_p, dtype=np.float64), role=int(role))
 
 
 class DeflectionEntry(NamedTuple):

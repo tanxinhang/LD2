@@ -11,7 +11,7 @@
 
 本系统研究无地面融合链路条件下，多架无人机如何仅依靠本地目标 belief 与实际送达的 U2U
 消息，联合完成双基地感知结构选择、感知功率分配和安全移动。当前实现表明：严格分布式解析
-基线可以把信息来源、通信代价、功率约束和运动安全统一放入一个可审计闭环；本轮两种子
+基线可以把信息来源、通信代价、功率约束和运动安全统一放入一个可审计闭环；本轮十种子
 smoke 验证了新接入的硬安全与资源门禁，但尚不足以证明当前版本的统计性能。
 
 结论边界如下：
@@ -428,7 +428,19 @@ r_ij^T u_i >= b_ij/2
 两式相加恢复联合 barrier。当前处于安全不变集时 `b_ij<=0`，因此陈旧节点执行零位移仍是可行
 动作。视图过期、投影失败或返回非有限值时强制 hold。
 
-### 9.3 为什么还测 swept distance
+### 9.3 可分二维精确投影
+
+endpoint-split 后，每条约束只包含一个节点的二维位移，联合可行域是 `K` 个二维凸集的笛卡尔积，
+平方距离目标也按节点可加。因此 32 维整队投影可严格分解为 16 个独立二维投影。每个二维集合由
+仿射半空间、区域 box 与速度圆盘相交构成；最优点只能是：未修改的期望点、单条仿射边界上的
+正交投影、两条仿射边界交点或仿射边界与速度圆的交点。枚举这些有限候选并取距离期望点最近者
+即为精确解。
+
+若候选集合为空，则该 public view 的 AoI 膨胀 barrier 在单帧速度界内不可行，系统直接返回
+fail-closed hold。旧实现仍调用 SLSQP 直到迭代结束，最后也返回同一 hold；新实现删除了这段无效
+延迟，但不放宽 barrier、速度、区域或 swept 约束。
+
+### 9.4 为什么还测 swept distance
 
 端点安全不自动排除两架 UAV 在帧内直线路径相交。正式 runner 对每对线段
 `r(t)=r_0+t*du, t∈[0,1]` 解析计算：
@@ -489,23 +501,39 @@ energy_causality_violation = max_i,t delta_E,i,t
 输入：各节点自状态、本地 target belief、缓存消息、上一有效结构/功率
 
 1. belief predict/update；删除超龄信息
-2. 每 3 帧建立控制载波，编码 endpoint、target token、certificate、owner posterior
+2. 正常阶段每 3 帧建立控制载波；尚无完整 epoch 时进入逐帧 acquisition carrier
 3. 物理 U2U 广播；按 SNR、容量、deadline 和可靠性决定逐链路 delivery
 4. 各节点从实际 inbox 重建 public view
-5. 若到达结构更新帧：执行一轮 finite-round hyperedge negotiation
-6. 验证角色、唯一 owner、全目标覆盖和公共视图一致性
-7. 计算每条有效边的 a_ijq；核验公共模型证书
-8. 证书通过则精确求解同一 max–min LP；否则执行逐行 composable harmonic fallback
-9. 每 20 帧用 Tx/Rx-aware bistatic bottleneck matching 更新移动责任
-10. 将期望位移投影到可独立组合的 pairwise-safe 集合
-11. 执行投影位移与功率，推进目标真值和测量过程
-12. 计算 D_q、P_D,q、通信、时延、能耗、endpoint/swept 安全与运行时指标
+5. 若到达结构更新帧：执行一轮 finite-round hyperedge negotiation，结果先进入 pending epoch
+6. 仅当 structure、owner map、endpoint packet、owner posterior 和源帧在所有 viewer 间逐字节一致时原子激活
+7. 新 epoch 不完整则继续使用上一 active epoch；首次启动无 active epoch 时保持空结构 fail closed
+8. 计算 active epoch 每条有效边的 a_ijq；再次核验完整增益张量的公共模型证书
+9. 证书通过则精确求解同一 max–min LP；否则执行逐行 composable harmonic fallback
+10. 每 20 帧用 Tx/Rx-aware bistatic bottleneck matching 更新移动责任
+11. 将期望位移投影到可独立组合的 pairwise-safe 集合
+12. 执行投影位移与功率，推进目标真值和测量过程
+13. 计算 D_q、P_D,q、通信、时延、能耗、endpoint/swept 安全与运行时指标
 
 输出：下一状态、检测指标、完整审计字段与 provenance
 ```
 
 该流程中，策略提交的 movement 是 hold；实际移动来自解析 bottleneck 控制器。报告中不得把结果
 称为 learned-policy 性能。
+
+### 11.1 Atomic epoch 与软件架构边界
+
+Atomic epoch 是 make-before-break 状态机，而不是仅添加一个整数标签。候选结构 `e` 只有在唯一
+owner、完整量化端点包、对应 owner posterior、非未来且未超龄的源帧以及全部模型生成输入逐字节
+一致时才 commit；随后派生 coefficient tensor 仍须通过独立 byte-exact 证书才能执行 LP，否则进入
+逐行安全 fallback。依赖不完整时 active epoch `e-1` 保持可见。发送者回环只有在实际存在物理
+广播时才能更新，禁止“本地准备了新 payload”被误当成“已经发到空口”。启动阶段额外载波会被
+正常计入 bits、airtime、RF 功率和能量。
+
+Architecture V2 当前准确状态是“边界已建立、核心迁移未完成”。checker 现在读取 `source_root`，
+要求其中每个 Python 模块恰好属于一个 ownership layer；横切 legacy 约束使用非归属 layer，避免
+重复所有权。相对导入先解析成绝对模块再检查，并对实际层依赖图检测环。`acceleration`、`agents`、
+`coordination`、`environment`、`evaluation`、`legacy`、`optimization`、`physical`、`prediction` 和
+`utils` 明确归入 `legacy_runtime`；后续采用 strangler seam 逐步迁移，不把当前状态写成重构完成。
 
 ## 12. 活动研究支线
 
@@ -572,16 +600,20 @@ m_t|T = m_t|t + J_t(m_t+1|T - m_t+1|t)
 
 ## 14. 当前数据与结论
 
-### 14.1 K16/Q16 两种子 smoke
+### 14.1 K16/Q16 十种子独立诊断 smoke
 
-packet-model rendezvous 接入后重新运行两种子、30 帧、tail 20：delivery=1.0，deadline
-violation=0，平均 bits/frame=2412.8；跨种子最小 endpoint、执行后 swept 与执行前 swept
-证书均为 32.621 m；最大联合功率违反与截断前能量缺口均为 0。公共模型证书通过率从 0 提升为
-0.3，安全 harmonic fallback 比例从 1.0 降为 0.7；steady/weak3/worst 为
-0.837721/0.684702/0.606968，短窗 QoS 为 1/2。剩余失败主要出现在结构 owner 已更新、对应
-owner posterior 尚未在同一协议纪元到达的帧：系统拒绝把旧 owner 包与新结构拼接，而非使用
-私有 belief 冒充公共模型。该 smoke 仍不是正式证据；blind-100 应等结构与 posterior 的原子纪元
-绑定完成并通过 clean-tree 回归后再启动。
+Atomic epoch 闭合后，使用不属于正式 blind bank 的 `20001--20010` 十个独立诊断种子，每个
+30 帧、tail 20。delivery=1.0，通信 deadline violation=0，平均 bits/frame=2513.067；每个种子的
+公共模型证书均为 0.9667，唯一未通过帧是首帧 fail-closed bootstrap，激活后没有
+protocol-induced harmonic fallback。聚合 steady/weak3/worst 为
+0.961748/0.937515/0.924460，短窗 QoS 为 10/10。
+
+安全投影进一步利用 endpoint-split barrier 的可分性，将原 32 维 SLSQP 严格分解为 16 个二维
+凸集投影；仿射边界、box 与 speed circle 的有限候选给出精确投影，无候选则证明该帧速度界内
+不可行并直接 fail closed。跨种子 endpoint、执行后 swept 和执行前 swept minimum 均为
+24.424 m，功率违反与截断前能量缺口均为 0。最大 per-seed closed-loop P95 为 76.132 ms，
+最大单帧为 89.520 ms，所有种子的 online deadline miss 均为 0。该 smoke 达到了 P0 诊断目标，
+但仍不是 clean-tree blind-100 正式证据。
 
 ### 14.2 Markov 影子基准
 
@@ -597,7 +629,8 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-最终全量回归为 `1758 passed, 6 skipped, 7 warnings`，Architecture V2 检查通过。strict
+本轮全量回归为 `1768 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
+source-root、唯一归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。
 
@@ -609,6 +642,7 @@ identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒�
 - 100 个 episode success 的单侧 95% Wilson lower bound `>=0.80`；
 - 平均 delivery `>=0.99`，平均 deadline violation `<=0.01`；
 - 每个 seed 的 closed-loop critical-path P95 `<=100 ms`；
+- K16 power-worker soft timeout 为 55 ms；其余 45 ms 留给 belief、协议、系数重建、安全与序列化；
 - 每个 seed endpoint 和 swept UAV 最小距离均 `>=20 m`；
 - 最大联合 RF 功率违反 `<=10^-9 W`；截断前最大能量缺口 `=0 J`；
 - 最小电量只作诊断，不再作为能量因果性的充分证据；

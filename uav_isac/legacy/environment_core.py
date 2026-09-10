@@ -591,6 +591,18 @@ class EnvironmentCore:
             'distributed_common_model_packet_reconstruction_enabled',
             False,
         ))
+        self._distributed_atomic_decision_epoch_enabled = bool(getattr(
+            ma, 'distributed_atomic_decision_epoch_enabled', False))
+        if (
+            self._distributed_atomic_decision_epoch_enabled
+            and (
+                not self._distributed_common_model_packet_reconstruction
+                or not self._owner_posterior_enabled
+            )
+        ):
+            raise ValueError(
+                'atomic decision epochs require packet-model reconstruction '
+                'and owner-posterior transport')
         if (self._distributed_primal_dual_power_enabled
                 and self._distributed_replicated_power_enabled):
             raise ValueError(
@@ -1929,6 +1941,10 @@ class EnvironmentCore:
             (self.K, self.K, self.Q), dtype=np.int64)
         self._hyperedge_selected_set: Tuple[Tuple[int, int, int], ...] = tuple()
         self._hyperedge_last_update_frame = FRAME_NOT_APPLICABLE
+        self._hyperedge_pending_epoch_structure: Tuple[
+            Tuple[int, int, int], ...] = tuple()
+        self._hyperedge_pending_epoch_created_frame = FRAME_NOT_APPLICABLE
+        self._hyperedge_active_epoch_id = 0
         self._hyperedge_metrics: Dict[str, object] = {}
         self._hyperedge_public_gain_views = np.zeros(
             (self.K, self.K, self.Q), dtype=np.float64)
@@ -2368,6 +2384,9 @@ class EnvironmentCore:
             (self.K, self.K, self.Q), dtype=np.int64)
         self._hyperedge_selected_set = tuple()
         self._hyperedge_last_update_frame = FRAME_NOT_APPLICABLE
+        self._hyperedge_pending_epoch_structure = tuple()
+        self._hyperedge_pending_epoch_created_frame = FRAME_NOT_APPLICABLE
+        self._hyperedge_active_epoch_id = 0
         self._hyperedge_metrics = {}
         self._hyperedge_golden_snapshot = {}
         self._hyperedge_public_gain_views = np.zeros(
@@ -3250,6 +3269,7 @@ class EnvironmentCore:
     def _common_owner_posterior_for_viewer(
         self,
         viewer: int,
+        structure: Tuple[Tuple[int, int, int], ...] | None = None,
     ) -> tuple[np.ndarray, np.ndarray] | None:
         """Return one physically shared owner-posterior model, if complete.
 
@@ -3261,11 +3281,16 @@ class EnvironmentCore:
         if (
             not self._distributed_common_model_packet_reconstruction
             or not self._owner_posterior_enabled
-            or not self._hyperedge_selected_set
+            or not (
+                self._hyperedge_selected_set
+                if structure is None else structure)
         ):
             return None
+        selected_structure = (
+            self._hyperedge_selected_set
+            if structure is None else tuple(structure))
         owners = np.full(self.Q, -1, dtype=np.int64)
-        for _transmitter, receiver, target in self._hyperedge_selected_set:
+        for _transmitter, receiver, target in selected_structure:
             j, q = int(receiver), int(target)
             if owners[q] not in (-1, j):
                 return None
@@ -3303,6 +3328,71 @@ class EnvironmentCore:
         ):
             return None
         return mean, covariance
+
+    def _atomic_epoch_dependencies_ready(
+        self,
+        structure: Tuple[Tuple[int, int, int], ...],
+    ) -> bool:
+        """Certify that every viewer can activate one identical packet epoch."""
+        if not structure:
+            return False
+        frames = np.asarray(
+            self._hyperedge_received_last_seen, dtype=np.int64)
+        valid = frames > FRAME_NEVER
+        ages = self.t - frames
+        if (
+            not np.all(valid)
+            or np.any(ages < 0)
+            or np.any(ages > self._comm_message_ttl_frames)
+            or not np.array_equal(
+                frames, np.broadcast_to(frames[0], frames.shape))
+            or not np.array_equal(
+                self._hyperedge_received_offer,
+                np.broadcast_to(
+                    self._hyperedge_received_offer[0],
+                    self._hyperedge_received_offer.shape,
+                ),
+            )
+        ):
+            return False
+        reference = self._common_owner_posterior_for_viewer(
+            0, structure=structure)
+        if reference is None:
+            return False
+        for viewer in range(1, self.K):
+            candidate = self._common_owner_posterior_for_viewer(
+                viewer, structure=structure)
+            if (
+                candidate is None
+                or not np.array_equal(candidate[0], reference[0])
+                or not np.array_equal(candidate[1], reference[1])
+            ):
+                return False
+        return True
+
+    def _advance_atomic_epoch(
+        self,
+    ) -> tuple[Tuple[Tuple[int, int, int], ...], bool, bool]:
+        """Commit one ready candidate or retain the complete active epoch.
+
+        Returns ``(active_structure, committed, retained)``.  Keeping this
+        transition separate from proposal generation makes the
+        make-before-break invariant directly testable: a failed readiness
+        check cannot mutate either the active or pending epoch.
+        """
+        active = tuple(self._hyperedge_selected_set)
+        pending = tuple(self._hyperedge_pending_epoch_structure)
+        if not self._distributed_atomic_decision_epoch_enabled or not pending:
+            return active, False, False
+        if not self._atomic_epoch_dependencies_ready(pending):
+            return active, False, bool(active)
+
+        self._hyperedge_selected_set = pending
+        self._hyperedge_pending_epoch_structure = tuple()
+        self._hyperedge_pending_epoch_created_frame = FRAME_NOT_APPLICABLE
+        self._hyperedge_last_update_frame = int(self.t)
+        self._hyperedge_active_epoch_id += 1
+        return pending, True, False
 
     def _coordination_target_state_for_viewer(
         self,
@@ -5158,6 +5248,11 @@ class EnvironmentCore:
         quantized_hyperedge_protocol: Dict[int, np.ndarray] = {}
         if self._hyperedge_enabled:
             for sender, protocol in self._pending_hyperedge_protocol.items():
+                # A locally prepared protocol is not an on-air packet.  On a
+                # non-carrier frame there is no sender delivery, so neither
+                # peers nor the sender's packet-model loopback may advance.
+                if sender not in self._pending_comm_messages:
+                    continue
                 mask = np.asarray(self._pending_comm_token_masks.get(
                     sender, np.ones(self.Q)), dtype=np.float64)
                 active_targets = int(np.sum(mask > 0.5))
@@ -6093,12 +6188,46 @@ class EnvironmentCore:
         protocol may not inspect the environment's true feasible-edge set to
         erase the mistake before execution.
         """
-        held = tuple(self._hyperedge_selected_set)
+        held, atomic_epoch_committed, atomic_epoch_retained = (
+            self._advance_atomic_epoch())
+        atomic_epoch_staged = False
+        pending = tuple(self._hyperedge_pending_epoch_structure)
+        if (
+            self._distributed_atomic_decision_epoch_enabled
+            and pending
+            and not atomic_epoch_committed
+            and not held
+        ):
+            # Bootstrap is fail-closed: the first candidate may cause
+            # posterior broadcasts, but cannot execute before all packet
+            # dependencies form one common model.
+            self._hyperedge_public_gain_views.fill(0.0)
+            self._composable_certificate_gain_views.fill(0.0)
+            self._composable_certificate_gain_upper_views.fill(0.0)
+            self._hyperedge_public_full_views.fill(False)
+            self._hyperedge_metrics = {
+                **self._hyperedge_metrics,
+                'hyperedge_enabled': 1.0,
+                'hyperedge_active_edges': 0.0,
+                'hyperedge_target_coverage': 0.0,
+                'hyperedge_protocol_used': 0.0,
+                'hyperedge_atomic_epoch_pending': 1.0,
+                'hyperedge_atomic_epoch_retained': 0.0,
+                'hyperedge_atomic_epoch_committed': 0.0,
+                'hyperedge_atomic_epoch_id': float(
+                    self._hyperedge_active_epoch_id),
+            }
+            self._last_isac_metrics.update(self._hyperedge_metrics)
+            return tuple()
         hold_active = bool(
             held
             and len(held) == len(self._hyperedge_selected_set)
-            and self.t - self._hyperedge_last_update_frame
-            < self._hyperedge_assignment_hold_frames
+            and (
+                atomic_epoch_committed
+                or atomic_epoch_retained
+                or self.t - self._hyperedge_last_update_frame
+                < self._hyperedge_assignment_hold_frames
+            )
         )
         if hold_active and not self._distributed_replicated_power_enabled:
             coverage = float(len({
@@ -6876,6 +7005,20 @@ class EnvironmentCore:
             use_protocol = True
         else:
             selected = active if use_protocol else tuple()
+            if self._distributed_atomic_decision_epoch_enabled:
+                candidate = tuple(selected)
+                if candidate and candidate != held:
+                    self._hyperedge_pending_epoch_structure = candidate
+                    self._hyperedge_pending_epoch_created_frame = int(self.t)
+                    atomic_epoch_staged = True
+                # Make before break: the candidate is never visible to power,
+                # sensing, or movement until every dependency is certified.
+                selected = held
+                active = held
+                coverage = float(len({
+                    target for _, _, target in held
+                }) / max(self.Q, 1))
+                use_protocol = bool(held)
         self._hyperedge_selected_set = selected
         if selected_batch_coefficients is not None and len(selected) > 0:
             try:
@@ -7084,6 +7227,14 @@ class EnvironmentCore:
                 if hold_active else 0),
             'hyperedge_assignment_hold_frames': float(
                 self._hyperedge_assignment_hold_frames),
+            'hyperedge_atomic_epoch_pending': float(bool(
+                self._hyperedge_pending_epoch_structure)),
+            'hyperedge_atomic_epoch_staged': float(atomic_epoch_staged),
+            'hyperedge_atomic_epoch_retained': float(atomic_epoch_retained),
+            'hyperedge_atomic_epoch_committed': float(
+                atomic_epoch_committed),
+            'hyperedge_atomic_epoch_id': float(
+                self._hyperedge_active_epoch_id),
             'hyperedge_consensus_rounds': float(
                 self._hyperedge_consensus_rounds),
             'hyperedge_pair_score_mode': self._hyperedge_pair_score_mode,
@@ -8491,7 +8642,8 @@ class EnvironmentCore:
                 bool(item['intervened'])
                 for item in safety_diagnostics))
             reduced_linear_calls = int(sum(
-                item.get('projection_solver') == 'reduced_linear_qp'
+                item.get('projection_solver') in {
+                    'reduced_linear_qp', 'separable_2d_qp'}
                 for item in safety_diagnostics))
             self._last_movement_safety_metrics.update({
                 'movement_safety_projection_calls': float(
@@ -8848,6 +9000,10 @@ class EnvironmentCore:
             intervention_calls = int(sum(
                 bool(item['intervened'])
                 for item in safety_diagnostics))
+            reduced_linear_calls = int(sum(
+                item.get('projection_solver') in {
+                    'reduced_linear_qp', 'separable_2d_qp'}
+                for item in safety_diagnostics))
             self._last_movement_safety_metrics.update({
                 'movement_safety_projection_calls': float(
                     len(safety_diagnostics)),
@@ -8866,6 +9022,10 @@ class EnvironmentCore:
                     float(item['pairwise_constraint_count'])
                     for item in safety_diagnostics
                 ])),
+                'movement_safety_reduced_linear_qp_calls': float(
+                    reduced_linear_calls),
+                'movement_safety_reduced_linear_qp_rate': float(
+                    reduced_linear_calls / len(safety_diagnostics)),
             })
         self._last_movement_safety_metrics.update({
             'movement_public_view_stale_fail_closed_viewers': float(
@@ -9307,6 +9467,10 @@ class EnvironmentCore:
             intervention_calls = int(sum(
                 bool(item['intervened'])
                 for item in safety_diagnostics))
+            separable_projection_calls = int(sum(
+                item.get('projection_solver') in {
+                    'reduced_linear_qp', 'separable_2d_qp'}
+                for item in safety_diagnostics))
             self._last_movement_safety_metrics.update({
                 'movement_safety_projection_calls': float(
                     len(safety_diagnostics)),
@@ -9331,6 +9495,10 @@ class EnvironmentCore:
                     float(item['pairwise_constraint_count'])
                     for item in safety_diagnostics
                 ])),
+                'movement_safety_reduced_linear_qp_calls': float(
+                    separable_projection_calls),
+                'movement_safety_reduced_linear_qp_rate': float(
+                    separable_projection_calls / len(safety_diagnostics)),
             })
         self._last_movement_safety_metrics.update({
             'movement_public_view_stale_fail_closed_viewers': float(
@@ -10854,6 +11022,18 @@ class EnvironmentCore:
                 for edge in p0_solution.selected_set
             )
             budget = np.sum(self._current_sensing_power_w, axis=1)
+            # Analytical sensing-power ownership must also hold while an
+            # atomic protocol epoch is still acquiring its first complete
+            # structure.  Otherwise the no-structure branch would retain the
+            # actor's target weights for one frame even though this controller
+            # advertises that the learned sensing head is overridden.  Use a
+            # deterministic fail-closed split until a valid gain matrix exists;
+            # a successful analytical solve below replaces it immediately.
+            self._current_sensing_power_w = np.repeat(
+                (budget / max(self.Q, 1))[:, None],
+                self.Q,
+                axis=1,
+            )
             reserve = None
             if self._analytical_sensing_power_reserve_pd > 0.0:
                 reserve = minimum_deflection_for_detection_probability(
@@ -12314,10 +12494,19 @@ class EnvironmentCore:
             # owner for this frame.  Snapshot only its causal filter state;
             # the packet is quantized, delayed and charged on the next U2U
             # carrier by _process_learned_communications().
-            self._prepare_owner_posterior_submission(tuple(
-                (int(i), int(j), int(q))
-                for i, j, q in p0_solution.selected_set
-            ))
+            posterior_structure = (
+                self._hyperedge_pending_epoch_structure
+                if (
+                    self._distributed_atomic_decision_epoch_enabled
+                    and self._hyperedge_pending_epoch_structure
+                )
+                else tuple(
+                    (int(i), int(j), int(q))
+                    for i, j, q in p0_solution.selected_set
+                )
+            )
+            self._prepare_owner_posterior_submission(
+                tuple(posterior_structure))
 
             true_position = true_states[:, :2]
             belief_position_error = (
@@ -12984,6 +13173,12 @@ class EnvironmentCore:
                 self._hyperedge_selected_set),
             'hyperedge_last_update_frame': int(
                 self._hyperedge_last_update_frame),
+            'hyperedge_pending_epoch_structure': tuple(
+                self._hyperedge_pending_epoch_structure),
+            'hyperedge_pending_epoch_created_frame': int(
+                self._hyperedge_pending_epoch_created_frame),
+            'hyperedge_active_epoch_id': int(
+                self._hyperedge_active_epoch_id),
             'hyperedge_metrics': copy.deepcopy(self._hyperedge_metrics),
             'hyperedge_public_gain_views': (
                 self._hyperedge_public_gain_views.copy()),
@@ -13256,6 +13451,13 @@ class EnvironmentCore:
             for edge in state.get('hyperedge_selected_set', ()))
         self._hyperedge_last_update_frame = int(state.get(
             'hyperedge_last_update_frame', FRAME_NOT_APPLICABLE))
+        self._hyperedge_pending_epoch_structure = tuple(
+            tuple(int(value) for value in edge)
+            for edge in state.get('hyperedge_pending_epoch_structure', ()))
+        self._hyperedge_pending_epoch_created_frame = int(state.get(
+            'hyperedge_pending_epoch_created_frame', FRAME_NOT_APPLICABLE))
+        self._hyperedge_active_epoch_id = int(state.get(
+            'hyperedge_active_epoch_id', 0))
         self._hyperedge_metrics = copy.deepcopy(state.get(
             'hyperedge_metrics', {}))
         self._hyperedge_public_gain_views = np.asarray(state.get(

@@ -89,6 +89,7 @@ marl:
   # coefficient views; otherwise execute the composable row-safe fallback.
   distributed_replicated_power_common_model_certificate: true
   distributed_common_model_packet_reconstruction_enabled: true
+  distributed_atomic_decision_epoch_enabled: true
   # Compose the executed private rows at deterministic target responsibility
   # nodes. Reports are downward-quantized lower contributions and their exact
   # payload is billed to the same physical U2U carrier.

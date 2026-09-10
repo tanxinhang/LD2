@@ -812,11 +812,13 @@ def project_pairwise_safe_movement(
     frame.  The strictly convex least-change objective preserves the sensing
     movement whenever it is already safe.  Per-node Euclidean speed balls and
     rectangular flight bounds are enforced exactly.  With endpoint-split
-    constraints containing zero, ``analytic_composable_projection`` uses the
-    projection variational inequality to prove that the speed balls are
-    redundant, reducing the nonlinear program exactly to a linearly
-    constrained quadratic projection. Failed proof premises retain the full
-    SLSQP problem.
+    constraints, ``analytic_composable_projection`` exploits their Cartesian
+    product structure and solves one exact two-dimensional projection per
+    node.  Its finite candidate set contains affine-boundary projections,
+    affine intersections and affine/speed-circle intersections.  When zero is
+    feasible, the projection variational inequality additionally proves the
+    speed ball redundant.  An empty candidate set certifies infeasibility and
+    returns the same fail-closed hold without an iterative SLSQP retry.
     """
     from time import perf_counter
 
@@ -1002,6 +1004,105 @@ def project_pairwise_safe_movement(
     )
 
     projected: np.ndarray | None = None
+    separable_2d_qp = bool(
+        analytic_composable_projection and independently_composable)
+
+    if separable_2d_qp:
+        projection_solver = 'separable_2d_qp'
+        # Endpoint-split barrier rows contain variables from exactly one node,
+        # so the fleet projection is the Cartesian product of K two-dimensional
+        # convex sets.  Their boundaries are affine segments and the speed
+        # circle.  The closest point is therefore the reference itself, a
+        # projection onto one boundary, or an intersection of two boundaries.
+        # Enumerating those candidates is an exact replacement for the
+        # separable 32-D SLSQP, including positive AoI safety margins where
+        # the speed ball is not redundant.
+        projected_rows = np.zeros((K, 2), dtype=np.float64)
+        analytic_ok = True
+        feasibility_tolerance = 1.0e-9
+        for node in range(K):
+            local_matrix = matrix[:, 2 * node:2 * node + 2]
+            active_rows = np.linalg.norm(local_matrix, axis=1) > 1.0e-15
+            local_matrix = local_matrix[active_rows]
+            local_rhs = rhs[active_rows]
+            local_matrix = np.vstack((
+                local_matrix,
+                np.asarray([
+                    [1.0, 0.0], [-1.0, 0.0],
+                    [0.0, 1.0], [0.0, -1.0],
+                ], dtype=np.float64),
+            ))
+            local_rhs = np.concatenate((
+                local_rhs,
+                np.asarray([
+                    lower_bound[2 * node], -upper_bound[2 * node],
+                    lower_bound[2 * node + 1], -upper_bound[2 * node + 1],
+                ], dtype=np.float64),
+            ))
+            reference = recovery_reference[node]
+
+            def local_feasible(value: np.ndarray) -> bool:
+                return bool(
+                    np.all(
+                        local_matrix @ value
+                        >= local_rhs - feasibility_tolerance)
+                    and np.linalg.norm(value) <= step + feasibility_tolerance
+                )
+
+            candidates = []
+            if local_feasible(reference):
+                candidates.append(reference.copy())
+            for row, bound in zip(local_matrix, local_rhs):
+                norm_sq = float(row @ row)
+                if norm_sq <= 1.0e-24:
+                    continue
+                candidate = reference + (
+                    (float(bound) - float(row @ reference)) / norm_sq
+                ) * row
+                if local_feasible(candidate):
+                    candidates.append(candidate)
+                # Intersections between this affine boundary and the speed
+                # circle cover optima where both constraints are active.
+                closest_to_origin = float(bound) * row / norm_sq
+                radius_sq = float(step * step - (
+                    closest_to_origin @ closest_to_origin))
+                if radius_sq >= -1.0e-10:
+                    tangent = np.asarray([-row[1], row[0]]) / np.sqrt(norm_sq)
+                    offset = np.sqrt(max(radius_sq, 0.0)) * tangent
+                    for circle_candidate in (
+                        closest_to_origin + offset,
+                        closest_to_origin - offset,
+                    ):
+                        if local_feasible(circle_candidate):
+                            candidates.append(circle_candidate)
+            for first in range(local_matrix.shape[0]):
+                for second in range(first + 1, local_matrix.shape[0]):
+                    pair = local_matrix[[first, second]]
+                    determinant = float(np.linalg.det(pair))
+                    if abs(determinant) <= 1.0e-12:
+                        continue
+                    candidate = np.linalg.solve(
+                        pair, local_rhs[[first, second]])
+                    if local_feasible(candidate):
+                        candidates.append(candidate)
+            if not candidates:
+                analytic_ok = False
+                break
+            projected_rows[node] = min(
+                candidates,
+                key=lambda value: float(np.sum((value - reference) ** 2)),
+            )
+        if analytic_ok:
+            projected = projected_rows
+        else:
+            # The two-dimensional candidate set is exhaustive for an
+            # intersection of affine half-planes, a box and a disk.  No
+            # candidate therefore certifies that the endpoint-split problem
+            # is infeasible within this frame's speed bound.  Preserve the
+            # existing fail-closed zero action without spending a full SLSQP
+            # iteration budget to rediscover the same infeasibility.
+            projection_solver = 'separable_2d_infeasible'
+            projected = np.zeros((K, 2), dtype=np.float64)
 
     if projected is None:
         from scipy.optimize import minimize

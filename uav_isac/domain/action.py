@@ -6,8 +6,21 @@ Each UAV action: a_k = (delta_p, role)
 """
 
 import numpy as np
-from typing import Dict, Optional
-from uav_isac.utils.types import Action
+from typing import NamedTuple, Optional
+
+
+class Action(NamedTuple):
+    """One UAV command: a planar displacement and a discrete role."""
+
+    delta_p: np.ndarray
+    role: int
+
+    @staticmethod
+    def create(delta_p: np.ndarray, role: int) -> "Action":
+        return Action(
+            delta_p=np.asarray(delta_p, dtype=np.float64),
+            role=int(role),
+        )
 
 # Movement-action parameterizations (B5 / advice 014, 2026-08-17).
 #   radial_clip: Gaussian -> tanh box -> scale -> radial projection onto the disk.

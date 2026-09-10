@@ -221,10 +221,22 @@ def _algorithm_version(cfg: Any) -> str:
         version += "-packet-model-rendezvous"
     if bool(getattr(
         cfg.marl,
+        "distributed_atomic_decision_epoch_enabled",
+        False,
+    )):
+        version += "-atomic-epoch"
+    if bool(getattr(
+        cfg.marl,
         "distributed_movement_preexecution_swept_certificate",
         False,
     )):
         version += "-aoi-swept-certified"
+    if bool(getattr(
+        cfg.marl,
+        "distributed_movement_analytic_composable_projection_enabled",
+        False,
+    )):
+        version += "-separable-safe-qp"
     robust_mix = float(getattr(
         cfg.marl, "distributed_replicated_power_robust_gain_mix", 0.0))
     if robust_mix > 0.0:
@@ -265,8 +277,12 @@ def validate_strict_config(cfg: Any) -> None:
             ma.distributed_replicated_power_common_model_certificate),
         "distributed_common_model_packet_reconstruction_enabled": (
             ma.distributed_common_model_packet_reconstruction_enabled),
+        "distributed_atomic_decision_epoch_enabled": (
+            ma.distributed_atomic_decision_epoch_enabled),
         "distributed_movement_preexecution_swept_certificate": (
             ma.distributed_movement_preexecution_swept_certificate),
+        "distributed_movement_analytic_composable_projection_enabled": (
+            ma.distributed_movement_analytic_composable_projection_enabled),
         "distributed_owner_posterior_enabled": (
             ma.distributed_owner_posterior_enabled),
         "analytical_sensing_power_enabled": ma.analytical_sensing_power_enabled,
@@ -317,6 +333,7 @@ def _episode(
     tail_window: int,
     carrier_period: int = DEFAULT_CARRIER_PERIOD,
     include_trace: bool = False,
+    include_timing_trace: bool = False,
     fault_inject_power_timeout_frame: int | None = None,
     fault_inject_power_timeout_duration: int = 1,
 ) -> dict[str, Any]:
@@ -376,6 +393,11 @@ def _episode(
     hyperedge_acceleration_backend: list[str] = []
     deflection_materialization_backend: list[str] = []
     controller_compute_ms: list[float] = []
+    controller_movement_compute_ms: list[float] = []
+    controller_structure_compute_ms: list[float] = []
+    movement_projection_solve_ms: list[float] = []
+    movement_projection_calls: list[float] = []
+    movement_reduced_qp_rate: list[float] = []
     radio_critical_path_ms: list[float] = []
     closed_loop_critical_path_ms: list[float] = []
     step_seconds: list[float] = []
@@ -399,7 +421,15 @@ def _episode(
             # endpoint-state payload and the ordinary transport charges the
             # configured power, serialization delay, loss, and energy.
             core = env.core
-            if frame % int(carrier_period) == 0:
+            acquisition_carrier = bool(
+                getattr(
+                    core,
+                    "_distributed_atomic_decision_epoch_enabled",
+                    False,
+                )
+                and not core._hyperedge_selected_set
+            )
+            if frame % int(carrier_period) == 0 or acquisition_carrier:
                 carrier_fraction = float(np.clip(
                     float(cfg.marl.comm_tx_power_w)
                     / max(float(cfg.uav.P_isac_total), 1.0e-12),
@@ -680,6 +710,16 @@ def _episode(
                 "deflection_materialization_backend", "unknown")))
             controller_compute_ms.append(1000.0 * float(info.get(
                 "timing_controller_compute_critical_path_s", 0.0)))
+            controller_movement_compute_ms.append(1000.0 * float(info.get(
+                "timing_controller_movement_compute_s", 0.0)))
+            controller_structure_compute_ms.append(1000.0 * float(info.get(
+                "timing_controller_structure_compute_s", 0.0)))
+            movement_projection_solve_ms.append(1000.0 * float(info.get(
+                "movement_safety_solve_time_s", 0.0)))
+            movement_projection_calls.append(float(info.get(
+                "movement_safety_projection_calls", 0.0)))
+            movement_reduced_qp_rate.append(float(info.get(
+                "movement_safety_reduced_linear_qp_rate", 0.0)))
             radio_critical_path_ms.append(1000.0 * float(info.get(
                 "timing_radio_serialization_critical_path_s", 0.0)))
             closed_loop_critical_path_ms.append(1000.0 * float(info.get(
@@ -890,6 +930,10 @@ def _episode(
             "bits": list(bits),
             "delivery": list(delivery),
             "hyperedge_coverage": list(coverage),
+            "power_common_model_certificate": list(
+                power_common_model_certificate),
+            "power_common_model_fallback_fraction": list(
+                power_common_model_fallback),
             "actual_worst_pd": np.min(values, axis=1).tolist(),
             "certificate_complete_fraction": list(certificate_complete),
             "certificate_worst_pd_lower": list(certificate_worst_pd_lower),
@@ -913,6 +957,24 @@ def _episode(
             "power_deadline_shadow_harmonic_approximation_ratio": list(
                 power_deadline_shadow_harmonic_ratio),
         }
+    if include_timing_trace:
+        result["timing_trace_ms"] = {
+            "movement_compute": list(controller_movement_compute_ms),
+            "structure_compute": list(controller_structure_compute_ms),
+            "movement_projection_solve": list(
+                movement_projection_solve_ms),
+            "movement_projection_calls": list(movement_projection_calls),
+            "movement_reduced_qp_rate": list(movement_reduced_qp_rate),
+            "power_parallel": list(power_parallel_critical_path_ms),
+            "controller_critical_path": list(controller_compute_ms),
+            "radio_serialization_critical_path": list(
+                radio_critical_path_ms),
+            "closed_loop_critical_path": list(
+                closed_loop_critical_path_ms),
+            "simulator_step_wall": [
+                1000.0 * value for value in step_seconds
+            ],
+        }
     return result
 
 
@@ -926,6 +988,7 @@ def run(
     fault_inject_power_timeout_frame: int | None = None,
     fault_inject_power_timeout_duration: int = 1,
     include_trace: bool = False,
+    include_timing_trace: bool = False,
 ) -> dict[str, Any]:
     cfg = load_config(config)
     if frames is not None:
@@ -968,6 +1031,7 @@ def run(
             tail_window,
             carrier_period,
             include_trace=include_trace,
+            include_timing_trace=include_timing_trace,
             fault_inject_power_timeout_frame=(
                 fault_inject_power_timeout_frame),
             fault_inject_power_timeout_duration=(
@@ -1102,6 +1166,9 @@ def main(argv: list[str] | None = None) -> int:
         "--include-trace", action="store_true",
         help="include frame-level diagnostic traces in the result JSON")
     parser.add_argument(
+        "--include-timing-trace", action="store_true",
+        help="include lightweight per-frame timing without golden-state traces")
+    parser.add_argument(
         "--teacher-output", default=None,
         help="directly export a native-objective teacher NPZ in memory")
     parser.add_argument(
@@ -1126,12 +1193,15 @@ def main(argv: list[str] | None = None) -> int:
         args.config,
         seeds,
         args.tail_window,
-        args.carrier_period,
-        args.formal,
-        args.frames,
-        args.fault_inject_power_timeout_frame,
-        args.fault_inject_power_timeout_duration,
-        bool(args.include_trace or args.teacher_output),
+        carrier_period=args.carrier_period,
+        formal=args.formal,
+        frames=args.frames,
+        fault_inject_power_timeout_frame=(
+            args.fault_inject_power_timeout_frame),
+        fault_inject_power_timeout_duration=(
+            args.fault_inject_power_timeout_duration),
+        include_trace=bool(args.include_trace or args.teacher_output),
+        include_timing_trace=bool(args.include_timing_trace),
     )
     if args.teacher_output:
         from tools.export_predictive_teacher_dataset import (
