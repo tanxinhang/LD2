@@ -4,6 +4,11 @@
 系统身份：K16/Q16、U2U-only、严格分布式、解析控制基线
 正式状态：`algorithm_research`；当前提交尚无新的 blind-100 正式证据
 
+最新用户任务门槛：800 m（当前诊断按两条双基地腿各 800 m）、每节点共享 RF 功率不超过 1 W、
+检测概率严格 `P_D>0.8`，虚警设计点暂沿用 `P_FA=0.001`。下文旧配置和历史结果中的 0.2 为旧
+诊断门槛，不构成新要求下的达标证据。新 800 m 审计已使用 0.8；正式 profile 的既有身份仍保留，
+不能把单目标理想审计的通过写成 K16/Q16 正式验收。
+
 冻结语义清单为 `config/system_manifest.yaml`，可执行正式 profile 为
 `config/exp_strict_distributed_k16q16.yaml`。
 
@@ -358,6 +363,49 @@ falsification。它没有接入在线控制器或 packet path，不能外推为�
 其 H0/H1 covariance 明显不同，故选择 `Sigma_0` fallback，并在独立 trace 上验证 subset 排序。
 当前 waveform 的 2x2 消融中 aware/unaware 都选择 `(2,3)`，selection gain 为 0；因此物理相关
 存在，但主选择机制尚未激活，不能把合成 rho-grid 的优势升级为系统结论。
+
+### 6.8 一般资源与可分性契约（离线）
+
+`physical/sensing_resource.py` 在现有目标功率 LP 之前增加一个不改变在线行为的薄层。一般模型先
+记录实际物理流在 `(UAV,stream,time,frequency)` 网格上的占用、每流能量和保守功率包络；code 与
+space 只保留为标签，不能因为量纲不同仍与时频面积相乘成一个“总资源数”。时频开销按各流占用的
+并集计算，同时发射功率按同一时隙内活动流的包络求和。
+
+共享 ISAC 波形的总 RF 能量和总功率包络必须来自实际复基带波形；不能把同一焦耳同时记作
+sensing 与 communication 后再相加。只有两种物理分量确实可加且无交叉项时，才采用分账相加
+模式，并把通信功率包络逐时隙加到感知包络后检查共享 PA 峰值。缺少非零通信能量对应的功率轨迹
+时 fail closed。当前审计仍是流级包络，不替代后续 sample-level PAPR、PA 非线性或带外泄漏检查。
+
+所谓 `target_separable` 只允许绑定运行时可观测的 hypothesis/resolution-cell ID，不允许绑定仿真
+target truth。它也不是可分性证书。给定假设签名矩阵 `S` 和噪声协方差 `C_n`，先白化并逐列归一：
+
+```text
+S_w = L^-1 S,  C_n = L L^H,
+K = diag(S_w^H S_w)^-1/2 (S_w^H S_w) diag(S_w^H S_w)^-1/2.
+```
+
+之后才报告 mutual coherence、`||K-I||_F/sqrt(H)`、最小特征值、条件数和数值秩，并由调用者显式
+给出门槛。`K=I` 是白化归一后的正交参考，不是任意检测器的性能上界；非正交泄漏可能被联合检测
+利用，也可能造成干扰，必须由检测模型与 held-out ROC 判定。只有资源审计和可分性证书都通过后，
+目标可分特例才可映射回现有 `p_iq=E_iq/T_epoch`；本阶段没有做这一步在线接线。
+
+映射资格由同一次调用绑定资源输入与签名输入，不能把另一个占用方案的资源通过结果拼接到当前
+Gram。只有 `target_separable`、hypothesis 与 LP 列一一对应、资源审计通过且 Gram 门槛通过时，
+才返回等效平均功率；否则返回失败原因且功率为空。`common_probe` 即使能量和峰值完全可行，也没有
+逐目标 LP 映射。复现实验 `tools/audit_lp_specialization_contract.py` 固定包含 common probe、近重复
+签名和通信峰值挤占三个反例，仍不执行在线 LP。
+
+以下 C9 仅为代数记账反例：2 倍由能量公式直接计算，资源时长/带宽尚未绑定波形 numerology，
+不能认定为公平波形级对照或物理 LP 的充分证书。Gram 与资源门槛只是必要筛查，仍需验证
+固定检测器的 Deflection 对实际分配能量线性、噪声归一化及流到接收签名的对应关系。
+
+该代数反例使用一个理想 DD impulse common probe 和两个整数 DD hypothesis。通信占前
+`1/4` epoch、感知占后 `3/4`，两种模式均为 `0.3 J` sensing、`0.1 J` communication、`0.4 W`
+共享 PA 峰值和相同 `864857.9 bit` Shannon capacity 上界。在无 clutter、相干相位、单位路径签名、
+定向流无额外波束增益且完全隔离时，common probe 的一次 `0.3 J` 广播同时照射两个格点；二路
+target-separable 流则各得 `0.15 J`，所以解析 Deflection 分别为 `[0.6,0.294]` 与
+`[0.3,0.147]`。这是否证“common energy 必须均分到 q”，而不是证明 common probe 普遍更优。
+通信数值只是理想 AWGN 容量上界，不是有限码长 delivery/deadline QoS 证书。
 
 ## 7. 联合功率约束与精确 max–min LP
 
@@ -804,8 +852,10 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-本轮全量回归为 `1803 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
-source-root、唯一归属、相对导入和依赖环。strict
+当前开发树全量回归为 `1818 passed, 2 failed, 6 skipped, 7 warnings`。两项失败分别是已有的
+Windows 子进程 OpenMP 重复运行库，以及 entropic-dual error-bound monotonicity；本轮新增资源
+定向测试 `27 passed`，Architecture V2 通过。Architecture V2 检查现在还覆盖 source-root、唯一
+归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。
 

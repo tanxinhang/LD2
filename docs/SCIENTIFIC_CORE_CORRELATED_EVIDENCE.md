@@ -167,7 +167,39 @@ selection gain 为 `0`，aware fusion 仅增加约 `0.0005 P_D`。因此当前 w
 相关，却没有激活 correlation-aware selection；Survival Gate 当前状态是 `NOT_ACTIVATED`。
 不得通过调 clutter loading 或弱化 baseline 把这个负结果“优化掉”。
 
+## 从一般物理模型到现有 LP 的层级
+
+当前推导顺序固定为：接收机总观测 `Y_j`，再到可审计的时频占用与能量守恒，再到本地证据及
+H0-Deflection，最后才是目标可分条件下的等效平均功率 LP。线性单次散射点目标模型是当前研究
+边界，不应称为覆盖多次散射、扩展目标和非线性 RF 的“普适母模型”。
+
+common probe 与 target-separable stream 都必须先按实际 RF 波形计费。后者的流标签只能表示
+运行时可构造的检测假设格点，不能用真实目标编号偷渡 oracle 信息；而且声明 separable 并不代表
+真的可分。证书使用噪声白化、列归一后的 Hermitian Gram，避免原始 `||S^H S-I||` 随发射幅度变化
+而失去意义。时、频资源可用 Hz·s 计量，code/space 仍是离散结构约束，四者不得无量纲地相乘。
+
+共享通信—感知波形只记一次实际总 RF 能量，并使用总功率包络检查共享 PA；分离波形也必须提供
+与非零通信能量一致的逐时隙功率包络。通信 QoS/rate 尚未接入这个薄层，因此它目前只是
+ISAC 资源守恒的必要条件，而不是完整 communication-sensing Pareto 证明。现有 LP 仍为冻结特例，
+`p_iq=E_iq/T_epoch` 的映射只有在资源和可分性门禁通过后才有物理解释。所有这些接口均保持离线，
+correlation-aware Survival Gate 继续为 `NOT_ACTIVATED`。
+
+现已加入 fail-closed LP specialization certificate。它把 occupancy、能量/功率、通信占用和签名
+诊断放在同一次验证中，避免跨方案拼接证书；只有一一对应的 hypothesis columns 才返回 `E/T`。
+这只是证明现有 LP 在某个特殊数据模型下可被调用，不证明该特殊模型优于 common probe。
+
+C9 是条件性的代数反例，尚未完成资源表到物理波形的绑定；其中 2 倍也未由总接收观测独立验证。
+它提示广播探测的一次物理能量可以同时作用于多个可分 DD cell，不能
+为了套用逐目标 LP 而把同一能量人为均分。理想两格点案例中 common/separable 的 Deflection 比为
+2，但该比值来自两路等分以及“无波束增益、完全隔离”的受控假设，不具有一般最优性。真实比较
+必须加入 fractional DD leakage、clutter、波束增益/旁瓣、PAPR 与有限码长通信门禁。
+
 ## 不可违反的开发规则
+
+新增离线非白杂波诊断使用已知 `C=I+rho*c*c^H` 白化并投影消除另一目标的未知复幅度，再以
+输出能量检测随机相位目标。独立 H0 校准阈值后，held-out P_D 与非中心卡方预测一致；近重合
+格点和杂波都明显降低检测能力。该结果仅适用于固定假设模板、已知协方差，不证明运行时协方差
+估计可行；扫描多个未知位置时还必须重新控制整体虚警率。详细数值见实验日志 C11。
 
 1. Detection threshold 只由 calibration H0 决定；主结果固定 `P_FA` 比较 `P_D`。
 2. Runtime 禁止 target truth、future sample 和 validation label。
