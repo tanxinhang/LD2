@@ -539,6 +539,26 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
   不变率为 1；各 seed 的 Gram/LP/单节点重建/协议时延合计约 `25.8--38.9 ms`。这加强了短程
   运行时可行性证据，但仍不是 packet-local 或正式统计门禁。
 
+### 2026-09-11：C1 科学主线收缩与 Correlation x Budget 门禁
+
+- 新增 `physical/correlated_soft_evidence.py`，用同一个共同协方差高斯模型给出精确线性融合
+  `D=delta^T Sigma^-1 delta`、`w=Sigma^-1 delta` 和 Schur-complement conditional gain。随机 SPD
+  测试验证边际公式与直接重算一致；独立极限严格退化为 local Deflection。
+- 研究主线收缩为 local evidence、task-oriented selection、soft fusion。现有 atomic/provenance/
+  replay 继续保留代码和门禁，但降级为 assurance shell；不再新增 lineage 协议。当前 evidence
+  路由只有 receiver source-local broadcast，没有 multi-hop fused-evidence forwarding 接口。
+- `tools/audit_correlation_budget_mechanism.py` 在 32 个配对 case 上扫描
+  `rho={0,0.2,0.5,0.8,0.95}` 和五级 bit budget。`rho=0` 时 proposed 与 correlation-unaware 的
+  `Delta P_D` 精确为 0；在 `rho=0.8`、204/307 bit 时平均 `Delta P_D` 分别为
+  `0.1144/0.1337`，95% paired bootstrap CI 为 `[0.1043,0.1255]` 和
+  `[0.1177,0.1497]`；`rho=0.95` 时分别为 `0.1343/0.1657`，CI 为
+  `[0.1230,0.1459]` 和 `[0.1473,0.1839]`。
+- 在当前离散预算网格上达到平均 `P_D>=0.90`，`rho=0.8/0.95` 的 unaware baseline 需要
+  409 bit，conditional-information selector 需要 204 bit，节省 205 bit；所有上述点 proposed
+  与 exhaustive oracle 数值一致。但这是有意激活冗余的 synthetic mechanism evidence，不能外推
+  为真实 OTFS/channel 性能。artifact 为
+  `artifacts/diagnostic/correlation_budget_mechanism_v1.json`。
+
 ## 12. 结果解释与禁止表述
 
 允许表述：

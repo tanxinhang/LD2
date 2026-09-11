@@ -304,6 +304,24 @@ D_joint,q >= ||mu_q||_2^2 / lambda_max(R_q)
 配置组合被显式拒绝，不能把 selected-edge 的因子冒充其证书。该 profile 仍是诊断候选，不改变
 冻结基线；在 waveform/ROC 校准和 paired blind gate 通过前，不声称它是真实接收机的精确相关矩阵。
 
+### 6.6 收缩后的相关软证据科学内核
+
+当前研究主线已收缩为 `OTFS local evidence -> conditional-information selection -> soft fusion`。
+对共同协方差的高斯软统计，直接使用
+
+```text
+D(S)=delta_S^T Sigma_S^-1 delta_S,
+w_S=Sigma_S^-1 delta_S.
+```
+
+候选 `j` 的增量由 Schur complement 精确给出；当 `Sigma_jS=0` 时严格退化为 local Deflection，
+从理论上解释低相关场景与 quality Top-K 的小差距。实现位于
+`physical/correlated_soft_evidence.py`，目前只用于机制审计，不替换在线检测器。通信 bits、deadline
+和 reliability 是约束/排序输入；atomic、provenance 与 replay 降级为 assurance shell。
+
+空口 evidence 保持单跳 source-local：同一 generation 内不得把已融合 evidence 再包装成新源。
+详细假设、baseline 和可证伪门禁见 `docs/SCIENTIFIC_CORE_CORRELATED_EVIDENCE.md`。
+
 ## 7. 联合功率约束与精确 max–min LP
 
 ### 7.1 可用感知预算
@@ -749,7 +767,7 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-本轮全量回归为 `1784 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
+本轮全量回归为 `1795 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
 source-root、唯一归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。
