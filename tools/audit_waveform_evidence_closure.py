@@ -22,6 +22,12 @@ from uav_isac.physical.evidence_calibration import (  # noqa: E402
     fixed_linear_detector_validation,
     subset_surrogate_rank_validation,
 )
+from uav_isac.physical.correlated_soft_evidence import (  # noqa: E402
+    conditional_information_greedy,
+    correlation_unaware_greedy,
+    exact_budgeted_selection,
+    optimal_linear_soft_fusion,
+)
 from uav_isac.physical.waveform_evidence import (  # noqa: E402
     MinimalOTFSWaveform,
     WaveformEvidenceScenario,
@@ -43,7 +49,10 @@ def _scenario(config: MinimalOTFSWaveform) -> WaveformEvidenceScenario:
         target_amplitude=amplitude,
         common_clutter_delay_bin=np.full(4, 2.15),
         common_clutter_doppler_bin=np.full(4, 1.1),
-        common_clutter_loading=np.array([1.0, 0.9, 0.15, 0.05]),
+        # Equal path loading: heterogeneous evidence correlation must emerge
+        # from DD-template overlap, rather than being inserted as a covariance
+        # coefficient or hand-tuned receiver attenuation.
+        common_clutter_loading=np.ones(4),
         common_clutter_std=0.25,
         local_clutter_delay_bin=np.array([3.1, 3.3, 7.2, 9.4]),
         local_clutter_doppler_bin=np.array([0.2, 0.3, -1.3, 3.4]),
@@ -54,6 +63,79 @@ def _scenario(config: MinimalOTFSWaveform) -> WaveformEvidenceScenario:
     )
 
 
+def _selection_fusion_ablation(
+    calibration,
+    covariance_choice,
+    calibration_h0: np.ndarray,
+    validation_h0: np.ndarray,
+    validation_h1: np.ndarray,
+    *,
+    p_fa: float,
+) -> dict[str, object]:
+    source_count = calibration.mean_shift.size
+    bits = np.full(source_count, 64, dtype=np.int64)
+    budget = 128
+    aware = conditional_information_greedy(
+        calibration.mean_shift,
+        covariance_choice.covariance,
+        bits,
+        budget,
+    )
+    unaware = correlation_unaware_greedy(
+        calibration.mean_shift,
+        covariance_choice.covariance,
+        bits,
+        budget,
+    )
+    exhaustive = exact_budgeted_selection(
+        calibration.mean_shift,
+        covariance_choice.covariance,
+        bits,
+        budget,
+    )
+    diagonal = np.diag(np.diag(covariance_choice.covariance))
+    values: dict[str, float] = {}
+    for selection_name, selected in (
+        ("unaware", unaware.selected),
+        ("aware", aware.selected),
+    ):
+        for fusion_name, covariance in (
+            ("unaware", diagonal),
+            ("aware", covariance_choice.covariance),
+        ):
+            _, weights = optimal_linear_soft_fusion(
+                calibration.mean_shift, covariance, selected)
+            validation = fixed_linear_detector_validation(
+                calibration_h0,
+                validation_h0,
+                validation_h1,
+                weights,
+                p_fa=p_fa,
+            )
+            values[f"selection_{selection_name}__fusion_{fusion_name}"] = float(
+                validation["validation_pd"])
+    baseline = values["selection_unaware__fusion_unaware"]
+    full = values["selection_aware__fusion_aware"]
+    activated = bool(aware.selected != unaware.selected and full > baseline + 0.01)
+    return {
+        "budget_bits": budget,
+        "bits_per_source": 64,
+        "aware_selected": list(aware.selected),
+        "unaware_selected": list(unaware.selected),
+        "exhaustive_selected": list(exhaustive.selected),
+        "pd": values,
+        "selection_gain_with_unaware_fusion": float(
+            values["selection_aware__fusion_unaware"] - baseline),
+        "fusion_gain_with_unaware_selection": float(
+            values["selection_unaware__fusion_aware"] - baseline),
+        "joint_gain": float(full - baseline),
+        "mechanism_activated": activated,
+        "survival_status": "SUPPORTED" if activated else "NOT_ACTIVATED",
+        "interpretation": (
+            "Heterogeneous correlation alone is insufficient: the strongest "
+            "quality-only choices must also contain avoidable redundancy."
+        ),
+    }
 def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
     started = perf_counter()
     config = MinimalOTFSWaveform()
@@ -109,6 +191,14 @@ def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
         val1,
         p_fa=p_fa,
     )
+    ablation = _selection_fusion_ablation(
+        calibration,
+        choice,
+        cal0,
+        val0,
+        val1,
+        p_fa=p_fa,
+    )
 
     # A target-amplitude fluctuation is a deliberate counterexample to the
     # equal-covariance model.  Passing this control means the policy falls back
@@ -125,10 +215,80 @@ def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
         maximum_condition_number=1.0e4,
     )
 
+    unknown_phase = replace(
+        scenario,
+        target_phase_mode="random_per_trial",
+        target_fluctuation_std=0.0,
+    )
+    unknown_cal0 = generate_local_evidence_trace(
+        config, unknown_phase, trials=samples, hypothesis=0,
+        seed=seed + 60, evidence_mode="noncoherent_energy")
+    unknown_cal1 = generate_local_evidence_trace(
+        config, unknown_phase, trials=samples, hypothesis=1,
+        seed=seed + 61, evidence_mode="noncoherent_energy")
+    unknown_val0 = generate_local_evidence_trace(
+        config, unknown_phase, trials=samples, hypothesis=0,
+        seed=seed + 62, evidence_mode="noncoherent_energy")
+    unknown_val1 = generate_local_evidence_trace(
+        config, unknown_phase, trials=samples, hypothesis=1,
+        seed=seed + 63, evidence_mode="noncoherent_energy")
+    unknown_calibration = calibrate_gaussian_evidence(
+        unknown_cal0, unknown_cal1)
+    unknown_choice = choose_detection_covariance(
+        unknown_calibration,
+        equal_covariance_tolerance=0.15,
+        maximum_condition_number=1.0e4,
+    )
+    unknown_weights = np.linalg.solve(
+        unknown_choice.covariance, unknown_calibration.mean_shift)
+    unknown_detector = fixed_linear_detector_validation(
+        unknown_cal0,
+        unknown_val0,
+        unknown_val1,
+        unknown_weights,
+        p_fa=p_fa,
+    )
+    unknown_pd_sweep: list[float] = []
+    for index, scale in enumerate(snr_scale):
+        scaled = replace(
+            unknown_phase,
+            target_amplitude=np.asarray(unknown_phase.target_amplitude) * scale,
+        )
+        scaled_h1 = generate_local_evidence_trace(
+            config,
+            scaled,
+            trials=samples,
+            hypothesis=1,
+            seed=seed + 70 + index,
+            evidence_mode="noncoherent_energy",
+        )
+        result = fixed_linear_detector_validation(
+            unknown_cal0,
+            unknown_val0,
+            scaled_h1,
+            unknown_weights,
+            p_fa=p_fa,
+        )
+        unknown_pd_sweep.append(float(result["validation_pd"]))
+    unknown_ranking = subset_surrogate_rank_validation(
+        unknown_calibration,
+        unknown_choice,
+        unknown_cal0,
+        unknown_val0,
+        unknown_val1,
+        p_fa=p_fa,
+    )
+    pfa_tolerance = float(
+        4.0 * np.sqrt(p_fa * (1.0 - p_fa) / float(samples)))
+
+    def pfa_is_controlled(value: float) -> bool:
+        return bool(
+            max(0.0, p_fa - pfa_tolerance) <= float(value)
+            <= p_fa + pfa_tolerance)
+
     checks = {
-        "g1_h0_threshold_controls_pfa": bool(
-            0.5 * p_fa <= float(detector["validation_pfa"])
-            <= p_fa + 0.005),
+        "g1_h0_threshold_controls_pfa": pfa_is_controlled(
+            float(detector["validation_pfa"])),
         "g1_pd_monotone_with_target_amplitude": bool(
             np.all(np.diff(pd_sweep) >= -0.005)),
         "g2_equal_covariance_supported": bool(
@@ -140,6 +300,14 @@ def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
         "g3_surrogate_rank_valid": bool(float(ranking["spearman_r"]) >= 0.8),
         "unequal_covariance_control_uses_h0_fallback": bool(
             control_choice.policy == "h0_fixed_pfa_fallback"),
+        "unknown_phase_h0_threshold_controls_pfa": pfa_is_controlled(
+            float(unknown_detector["validation_pfa"])),
+        "unknown_phase_pd_monotone_with_target_amplitude": bool(
+            np.all(np.diff(unknown_pd_sweep) >= -0.005)),
+        "unknown_phase_uses_h0_fallback": bool(
+            unknown_choice.policy == "h0_fixed_pfa_fallback"),
+        "unknown_phase_surrogate_rank_valid": bool(
+            float(unknown_ranking["spearman_r"]) >= 0.8),
     }
     failures = [name for name, passed in checks.items() if not passed]
     return {
@@ -158,6 +326,7 @@ def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
             "delta_f_hz": config.delta_f_hz,
             "samples_per_hypothesis_split": samples,
             "p_fa": p_fa,
+            "pfa_absolute_tolerance_4sigma": pfa_tolerance,
             "calibration_seed": seed,
             "validation_seed": seed + 2,
         },
@@ -183,6 +352,20 @@ def run_audit(*, samples: int, p_fa: float, seed: int) -> dict[str, object]:
             "unequal_covariance_control_policy": control_choice.policy,
         },
         "g3": ranking,
+        "selection_fusion_ablation": ablation,
+        "unknown_phase_stress": {
+            "evidence_mode": "noncoherent_energy",
+            "target_phase_mode": "random_per_trial",
+            "validation_pfa": float(unknown_detector["validation_pfa"]),
+            "validation_pd": float(unknown_detector["validation_pd"]),
+            "target_amplitude_scale": list(snr_scale),
+            "validation_pd_sweep": unknown_pd_sweep,
+            "equal_covariance_relative_error": float(
+                unknown_calibration.equal_covariance_relative_error),
+            "covariance_policy": unknown_choice.policy,
+            "subset_spearman_r": float(unknown_ranking["spearman_r"]),
+            "subset_spearman_pvalue": float(unknown_ranking["spearman_pvalue"]),
+        },
         "elapsed_s": float(perf_counter() - started),
     }
 

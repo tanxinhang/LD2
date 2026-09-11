@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -26,7 +28,7 @@ def _scenario(*, fluctuation: float = 0.0) -> WaveformEvidenceScenario:
         target_amplitude=np.array([0.16, 0.15, 0.14, 0.13]),
         common_clutter_delay_bin=np.full(count, 2.15),
         common_clutter_doppler_bin=np.full(count, 1.1),
-        common_clutter_loading=np.array([1.0, 0.9, 0.15, 0.05]),
+        common_clutter_loading=np.ones(count),
         common_clutter_std=0.25,
         local_clutter_delay_bin=np.array([3.1, 3.3, 7.2, 9.4]),
         local_clutter_doppler_bin=np.array([0.2, 0.3, -1.3, 3.4]),
@@ -87,6 +89,42 @@ def test_equal_covariance_gate_uses_h0_fallback_for_fluctuating_target():
     choice = choose_detection_covariance(
         calibration, equal_covariance_tolerance=0.15)
     assert calibration.equal_covariance_relative_error > 0.15
+    assert choice.policy == "h0_fixed_pfa_fallback"
+
+
+def test_unknown_phase_requires_energy_evidence_and_h0_fallback():
+    config = MinimalOTFSWaveform()
+    scenario = _scenario()
+    scenario = replace(scenario, target_phase_mode="random_per_trial")
+    coherent0 = generate_local_evidence_trace(
+        config, scenario, trials=4000, hypothesis=0, seed=211)
+    coherent1 = generate_local_evidence_trace(
+        config, scenario, trials=4000, hypothesis=1, seed=212)
+    energy0 = generate_local_evidence_trace(
+        config,
+        scenario,
+        trials=4000,
+        hypothesis=0,
+        seed=213,
+        evidence_mode="noncoherent_energy",
+    )
+    energy1 = generate_local_evidence_trace(
+        config,
+        scenario,
+        trials=4000,
+        hypothesis=1,
+        seed=214,
+        evidence_mode="noncoherent_energy",
+    )
+    # Random phase destroys the coherent mean shift, while energy retains a
+    # target-dependent mean. The energy statistic is heteroscedastic, so the
+    # equal-covariance model must not be silently retained.
+    coherent_shift = np.mean(coherent1, axis=0) - np.mean(coherent0, axis=0)
+    energy_calibration = calibrate_gaussian_evidence(energy0, energy1)
+    choice = choose_detection_covariance(
+        energy_calibration, equal_covariance_tolerance=0.15)
+    assert np.max(np.abs(coherent_shift)) < 0.2
+    assert np.all(energy_calibration.mean_shift > 0.5)
     assert choice.policy == "h0_fixed_pfa_fallback"
 
 

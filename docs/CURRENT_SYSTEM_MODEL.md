@@ -333,6 +333,11 @@ fallback，不宣称这是异方差检测的最优解。
 该闭环不含 CP/pulse shaping、同步与 RF 缺陷，也假设 coherent phase；目前只属于离线
 falsification。它没有接入在线控制器或 packet path，不能外推为真实 OTFS 或通信 Pareto 结果。
 
+未知相位压力路径使用 matched-output energy，而不把随机相位强行塞入 coherent Gaussian 模型。
+其 H0/H1 covariance 明显不同，故选择 `Sigma_0` fallback，并在独立 trace 上验证 subset 排序。
+当前 waveform 的 2x2 消融中 aware/unaware 都选择 `(2,3)`，selection gain 为 0；因此物理相关
+存在，但主选择机制尚未激活，不能把合成 rho-grid 的优势升级为系统结论。
+
 ## 7. 联合功率约束与精确 max–min LP
 
 ### 7.1 可用感知预算
@@ -778,7 +783,7 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-本轮全量回归为 `1802 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
+本轮全量回归为 `1803 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
 source-root、唯一归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。

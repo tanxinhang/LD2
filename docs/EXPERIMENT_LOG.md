@@ -581,6 +581,23 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
   coherent target phase 和人为 common-clutter loadings，且 `P_FA=0.01` 不是正式 `10^-3` 门禁；
   因此只证明链条内部自洽，不证明真实传播中 Survival Gate A 已通过。
 
+### 2026-09-11：C3 未知相位、`P_FA=10^-3` 与负机制消融
+
+- 移除 receiver-specific common-clutter loading，全部置 1；相似/远 DD template 的 H0 correlation
+  仍为 `0.6746/-0.2136`，说明异质性由 waveform template overlap 产生，而非直接注入 pairwise
+  rho 或 receiver attenuation。clutter path placement 仍是人工 stress geometry。
+- 对随机 target phase 使用 matched-output energy。equal-covariance mismatch 为 `0.9690`，按规则
+  切换到 H0 fixed-PFA fallback；validation `P_FA=0.0101`，幅度扫描 P_D 为
+  `0.0602/0.2555/0.6364/0.9152`，15-subset Spearman 为 `0.9714`。
+- 以 100,000 samples/hypothesis/split 重跑 `P_FA=10^-3`。二项四 sigma 绝对容差为 `0.0003998`；
+  coherent/noncoherent validation PFA 为 `0.00094/0.00077`，基准幅度 P_D 为
+  `0.80237/0.35787`。artifact 为
+  `artifacts/diagnostic/waveform_evidence_closure_pfa1e3_v2.json`。
+- 128-bit 2x2 消融给出负结果：aware/unaware selection 均选 `(2,3)`，selection gain `0`；aware
+  fusion 仅带来约 `0.0005 P_D`。共同 clutter 已使相关 pair 的单点质量下降，强 quality baseline
+  本身会避开冗余节点。故当前只能保留 waveform/statistical closure，correlation-aware selection
+  的 Survival Gate 标记为 `NOT_ACTIVATED`，不得通过调场景或弱化 baseline 追求正结果。
+
 ## 12. 结果解释与禁止表述
 
 允许表述：

@@ -58,6 +58,7 @@ class WaveformEvidenceScenario:
     target_secondary_delay_offset_bin: float = 0.0
     target_secondary_doppler_offset_bin: float = 0.0
     target_fluctuation_std: float = 0.0
+    target_phase_mode: str = "coherent"
 
     @property
     def receiver_count(self) -> int:
@@ -103,6 +104,9 @@ class WaveformEvidenceScenario:
             raise ValueError("clutter/target fluctuation scales must be non-negative")
         if not np.isfinite(self.target_secondary_relative_gain):
             raise ValueError("secondary path gain must be finite")
+        if str(self.target_phase_mode) not in {"coherent", "random_per_trial"}:
+            raise ValueError(
+                "target_phase_mode must be coherent or random_per_trial")
         return self
 
 
@@ -223,6 +227,7 @@ def generate_local_evidence_trace(
     hypothesis: int,
     seed: int,
     batch_size: int = 512,
+    evidence_mode: str = "coherent_real",
 ) -> np.ndarray:
     """Generate receiver-local coherent DD matched-filter statistics.
 
@@ -234,6 +239,10 @@ def generate_local_evidence_trace(
     config.validate()
     scenario.validated()
     count = int(trials)
+    mode = str(evidence_mode)
+    if mode not in {"coherent_real", "noncoherent_energy"}:
+        raise ValueError(
+            "evidence_mode must be coherent_real or noncoherent_energy")
     if count < 2 or int(hypothesis) not in (0, 1) or int(batch_size) < 1:
         raise ValueError("trials, hypothesis or batch_size is invalid")
     pilot = qpsk_dd_pilot(config)
@@ -302,12 +311,17 @@ def generate_local_evidence_trace(
             * local_response[None, :, :, :]
         )
         if int(hypothesis) == 1:
+            target_phase = (
+                np.ones((current, K), dtype=np.complex128)
+                if scenario.target_phase_mode == "coherent"
+                else np.exp(2j * np.pi * rng.random((current, K)))
+            )
             fluctuation = (
                 float(scenario.target_fluctuation_std)
                 * _complex_standard_normal(rng, (current, K))
             )
             received_dd = received_dd + (
-                target_amplitude[None, :] + fluctuation
+                target_amplitude[None, :] * target_phase + fluctuation
             )[:, :, None, None] * target_response[None, :, :, :]
         noise_time = (
             np.sqrt(float(config.noise_variance))
@@ -324,5 +338,11 @@ def generate_local_evidence_trace(
             unit_target.conj()[None, :, :, :] * received_dd,
             axis=(-2, -1),
         )
-        output[start:stop] = np.sqrt(2.0) * projection.real
+        if mode == "coherent_real":
+            output[start:stop] = np.sqrt(2.0) * projection.real
+        else:
+            # Unknown-phase GLRT-like sufficient statistic. Its distribution
+            # is generally non-Gaussian and heteroscedastic; downstream gates
+            # must validate, rather than assume, the Gaussian-D surrogate.
+            output[start:stop] = np.square(np.abs(projection))
     return output

@@ -107,16 +107,17 @@ covariance；否则使用 `Sigma_0` 作为 fixed-P_FA 线性 fallback。若条�
 diagonal shrinkage，并继续用 linear solve/Cholesky，不显式求逆。H0 fallback 不是 QDA 最优性
 声明，必须另过 held-out ROC 排序门禁。
 
-10,000-sample/split 的诊断结果为：固定校准阈值在 validation 上得到 `P_FA=0.0069`（目标
+10,000-sample/split 的诊断结果为：固定校准阈值在 validation 上得到 `P_FA=0.0070`（目标
 `0.01`）；目标幅度 scale `0.4/0.7/1.0/1.3` 的 `P_D` 为
-`0.2009/0.6202/0.9291/0.9952`。共同杂波产生 `rho_01=0.6641`，而 `rho_03=-0.0131`；H0/H1
-covariance 相对误差 `0.0113`，calibration/held-out H0 covariance 相对误差 `0.0251`。15 个非空
+`0.2239/0.6541/0.9487/0.9972`。共同杂波产生 `rho_01=0.6746`，而 `rho_03=-0.2136`；H0/H1
+covariance 相对误差 `0.0104`，calibration/held-out H0 covariance 相对误差 `0.0237`。15 个非空
 subset 的 calibrated `D` 与 held-out `P_D` Spearman correlation 为 `0.9964`。加入 target
-amplitude fluctuation 的反例使 covariance mismatch 达 `1.5148`，实现正确切换到 H0 fallback。
+amplitude fluctuation 的反例使 covariance mismatch 达 `1.3854`，实现正确切换到 H0 fallback。
 
 这些数值属于 `ideal_cyclic_coherent_otfs_offline_calibration`，仍有以下硬质疑：
 
-- 共同杂波 loading 是人为构造的机制场景，不能证明真实几何自然产生相同异质性；
+- receiver clutter loading 已统一为 1，相关差异来自 DD-template overlap；但 clutter 路径位置仍是
+  人为构造的机制场景，不能证明真实几何自然产生相同异质性；
 - coherent statistic 假设目标相位已校准，尚未覆盖 unknown-phase GLRT 及其非高斯统计；
 - circular fractional delay 隐含充分 cyclic extension，尚未验证 CP 不足、脉冲成形和同步误差；
 - `P_FA=0.01` 是受 10,000 样本尾部精度限制的诊断点，不等于正式配置的 `10^-3` 认证；
@@ -126,6 +127,24 @@ amplitude fluctuation 的反例使 covariance mismatch 达 `1.5148`，实现正�
 因此 Survival Gate A 只完成了“可执行性证明”，没有完成外部物理有效性证明。下一步应使用冻结、
 不含 test truth 的多几何 waveform trace，加入 unknown-phase detector，并以至少能稳定估计
 `P_FA=10^-3` 的样本量重复 covariance 异质性、稳定性和 subset ranking 门禁。
+
+### 未知相位与正式虚警点压力测试
+
+随机化每次 trial 的 target phase 后，coherent mean-shift 不再适用，因此改用 matched-output
+energy 作为 GLRT-like local evidence。该证据非高斯且明显异方差：10,000-sample 诊断的 H0/H1
+covariance mismatch 为 `0.9690`，实现按规则使用 `Sigma_0`；validation `P_FA=0.0101`，幅度
+scale `0.4/0.7/1.0/1.3` 的 `P_D` 为 `0.0602/0.2555/0.6364/0.9152`，subset ranking Spearman
+仍为 `0.9714`。
+
+进一步在正式虚警点 `P_FA=10^-3` 使用 100,000 samples/hypothesis/split，并按二项尾部标准误设置
+四 sigma 容差。coherent/noncoherent validation PFA 分别为 `0.00094/0.00077`；对应基准幅度的
+P_D 为 `0.80237/0.35787`，两条幅度扫描均单调。该结果支持阈值与 surrogate 的数值闭环，但未知
+相位造成的性能下降是真实代价，不能用 coherent 结果替代。
+
+最关键的负结果来自 128-bit 2x2 消融：aware 与 unaware selection 都选择 source `(2,3)`，
+selection gain 为 `0`，aware fusion 仅增加约 `0.0005 P_D`。因此当前 waveform 场景虽存在异质
+相关，却没有激活 correlation-aware selection；Survival Gate 当前状态是 `NOT_ACTIVATED`。
+不得通过调 clutter loading 或弱化 baseline 把这个负结果“优化掉”。
 
 ## 不可违反的开发规则
 
