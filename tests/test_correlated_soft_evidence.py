@@ -3,9 +3,9 @@ import pytest
 
 from uav_isac.physical.correlated_soft_evidence import (
     conditional_deflection_gain,
-    conditional_information_greedy,
+    conditional_deflection_greedy,
     correlation_unaware_greedy,
-    exact_budgeted_selection,
+    exhaustive_budgeted_reference,
     optimal_linear_soft_fusion,
 )
 
@@ -25,6 +25,24 @@ def test_soft_fusion_matches_direct_deflection_and_weights():
     assert np.allclose(weights[index], expected_weights)
     assert weights[1] == 0.0
     assert value == pytest.approx(float(delta[index] @ expected_weights))
+
+
+def test_h0_deflection_weight_dominates_arbitrary_linear_weights():
+    """The Sigma0 solve is valid without assuming an H1 covariance."""
+    delta = np.array([0.7, -1.1, 0.4])
+    sigma0 = np.array([
+        [1.4, 0.2, -0.1],
+        [0.2, 0.9, 0.15],
+        [-0.1, 0.15, 1.2],
+    ])
+    optimum, weights = optimal_linear_soft_fusion(delta, sigma0)
+    rng = np.random.default_rng(913)
+    for candidate in rng.normal(size=(100, delta.size)):
+        candidate_d0 = float(candidate @ delta) ** 2 / float(
+            candidate @ sigma0 @ candidate)
+        assert candidate_d0 <= optimum + 1.0e-12
+    achieved = float(weights @ delta) ** 2 / float(weights @ sigma0 @ weights)
+    assert achieved == pytest.approx(optimum)
 
 
 def test_schur_gain_is_exact_difference_for_random_spd_models():
@@ -64,23 +82,25 @@ def test_conditional_selection_rejects_high_quality_redundant_peer():
         [0.0, 0.0, 1.0],
     ])
     bits = np.array([10, 10, 10])
-    proposed = conditional_information_greedy(
+    proposed = conditional_deflection_greedy(
         delta, covariance, bits, budget_bits=20)
     unaware = correlation_unaware_greedy(
         delta, covariance, bits, budget_bits=20)
-    oracle = exact_budgeted_selection(
+    oracle = exhaustive_budgeted_reference(
         delta, covariance, bits, budget_bits=20)
     assert proposed.selected == (0, 2)
     assert unaware.selected == (0, 1)
     assert proposed.deflection > unaware.deflection
     assert proposed.deflection == pytest.approx(oracle.deflection)
+    assert proposed.rule == "conditional_deflection_greedy"
+    assert oracle.rule == "exhaustive_budgeted_reference"
 
 
 def test_low_correlation_reduces_to_quality_selection():
     delta = np.sqrt(np.array([4.0, 3.6, 3.0, 2.8]))
     covariance = np.eye(4)
     bits = np.full(4, 8)
-    proposed = conditional_information_greedy(
+    proposed = conditional_deflection_greedy(
         delta, covariance, bits, budget_bits=16)
     unaware = correlation_unaware_greedy(
         delta, covariance, bits, budget_bits=16)
@@ -91,7 +111,7 @@ def test_low_correlation_reduces_to_quality_selection():
 def test_local_initial_evidence_is_free_and_always_retained():
     delta = np.sqrt(np.array([2.0, 4.0, 3.0]))
     covariance = np.eye(3)
-    result = conditional_information_greedy(
+    result = conditional_deflection_greedy(
         delta,
         covariance,
         bits=np.array([0, 8, 8]),
@@ -106,7 +126,7 @@ def test_local_initial_evidence_is_free_and_always_retained():
 def test_native_deadline_and_reliability_affect_schedule_without_unit_mixing():
     delta = np.sqrt(np.array([4.0, 3.0, 2.0]))
     covariance = np.eye(3)
-    result = conditional_information_greedy(
+    result = conditional_deflection_greedy(
         delta,
         covariance,
         bits=np.array([8, 8, 8]),
@@ -129,10 +149,10 @@ def test_invalid_or_singular_covariance_fails_closed():
             np.ones(2), np.array([[1.0, 0.2], [0.1, 1.0]]))
 
 
-def test_exact_oracle_respects_heterogeneous_bit_budget():
+def test_exhaustive_reference_respects_heterogeneous_bit_budget():
     delta = np.sqrt(np.array([5.0, 4.0, 3.0]))
     covariance = np.eye(3)
-    result = exact_budgeted_selection(
+    result = exhaustive_budgeted_reference(
         delta, covariance, bits=np.array([9, 5, 5]), budget_bits=10)
     assert result.selected == (1, 2)
     assert result.communication_bits == 10
@@ -141,8 +161,8 @@ def test_exact_oracle_respects_heterogeneous_bit_budget():
 
 def test_fractional_bit_counts_are_not_silently_truncated():
     with pytest.raises(ValueError, match="integer"):
-        conditional_information_greedy(
+        conditional_deflection_greedy(
             np.ones(2), np.eye(2), np.array([4.5, 8.0]), budget_bits=8)
     with pytest.raises(ValueError, match="budget"):
-        exact_budgeted_selection(
+        exhaustive_budgeted_reference(
             np.ones(2), np.eye(2), np.array([4, 8]), budget_bits=8.5)

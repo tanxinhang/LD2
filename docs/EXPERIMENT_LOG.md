@@ -553,14 +553,17 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
   replay 继续保留代码和门禁，但降级为 assurance shell；不再新增 lineage 协议。当前 evidence
   路由只有 receiver source-local broadcast，没有 multi-hop fused-evidence forwarding 接口。
 - `tools/audit_correlation_budget_mechanism.py` 在 32 个配对 case 上扫描
-  `rho={0,0.2,0.5,0.8,0.95}` 和五级 bit budget。`rho=0` 时 proposed 与 correlation-unaware 的
-  `Delta P_D` 精确为 0；在 `rho=0.8`、204/307 bit 时平均 `Delta P_D` 分别为
-  `0.1144/0.1337`，95% paired bootstrap CI 为 `[0.1043,0.1255]` 和
-  `[0.1177,0.1497]`；`rho=0.95` 时分别为 `0.1343/0.1657`，CI 为
-  `[0.1230,0.1459]` 和 `[0.1473,0.1839]`。
-- 在当前离散预算网格上达到平均 `P_D>=0.90`，`rho=0.8/0.95` 的 unaware baseline 需要
-  409 bit，conditional-information selector 需要 204 bit，节省 205 bit；所有上述点 proposed
-  与 exhaustive oracle 数值一致。但这是有意激活冗余的 synthetic mechanism evidence，不能外推
+  `rho={0,0.2,0.5,0.8,0.95}`。原先由预算比例向下取整产生的 `102/204/307/409 bit` 不是
+  64-bit evidence 的可实现包长，现改为整数 evidence 网格
+  `{64,128,192,256,320,384,448,512}` bit。`rho=0` 时 proposed 与 correlation-unaware 的
+  `Delta P_D` 精确为 0；在 `rho=0.8`、192/256 bit 时平均 `Delta P_D` 分别为
+  `0.1144/0.1337`，95% paired bootstrap CI 为 `[0.1042,0.1256]` 和
+  `[0.1180,0.1505]`；`rho=0.95` 时分别为 `0.1343/0.1657`，CI 为
+  `[0.1236,0.1460]` 和 `[0.1464,0.1844]`。
+- 在校正后的离散预算网格上达到平均 `P_D>=0.90`，`rho=0.8/0.95` 的 unaware baseline 需要
+  320 bit，conditional-Deflection selector 需要 192 bit，合成网格节省 128 bit；原“409 对
+  204、节省 205 bit”结论撤回。所有上述点 proposed 与 exhaustive reference 数值一致。但这是
+  有意激活冗余的 synthetic mechanism evidence，不能外推
   为真实 OTFS/channel 性能。artifact 为
   `artifacts/diagnostic/correlation_budget_mechanism_v1.json`。
 
@@ -597,6 +600,44 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
   fusion 仅带来约 `0.0005 P_D`。共同 clutter 已使相关 pair 的单点质量下降，强 quality baseline
   本身会避开冗余节点。故当前只能保留 waveform/statistical closure，correlation-aware selection
   的 Survival Gate 标记为 `NOT_ACTIVATED`，不得通过调场景或弱化 baseline 追求正结果。
+
+### 2026-09-11：C4 双基地几何—OTFS 波形物理桥
+
+- 新增 `physical/bistatic_waveform.py`，严格复用既有双基地 `tau/nu/alpha`，不另造传播模型。
+  映射使用 `delay_bin=tau*M*Delta_f`、`doppler_bin=nu*N/Delta_f`，接收路径功率满足双基地
+  距离律并对 `p_iq` 线性。
+- 针对性测试验证：两段传播距离同时加倍时路径幅度降至约 `1/4`、发射功率加倍时接收功率
+  加倍、DD bin 映射与 OTFS 分辨率一致、未调度 edge component 不能进入 `Y_j`。
+- 该桥不接受人为 `desired_local_deflection`。现有 C3 受控场景仍保留为 diagnostic，但不能作为
+  geometry-grounded 结果；correlation-aware Survival Gate 继续保持 `NOT_ACTIVATED`。
+- 多发射机 MAC/正交 resource 尚未冻结，所以本阶段不改变在线 sensing airtime，也不声称多个
+  `(i,q)` 波形可免费共享同一 OTFS 块。
+
+### 2026-09-11：C5 解析—波形 detector 归一化与单边距离门禁
+
+- 冻结 detector 保持 `real_gaussian_shift,c_det=1`，不修改历史在线口径。新增显式换算
+  `sigma_complex^2=2*P_noise(real-equivalent)`；由此 ideal coherent waveform 与解析
+  `D=MN*p*G*|alpha|^2/P_noise` 完全一致。
+- 在默认 `M=64,N=16,P_FA=10^-3` 和 20,000 samples/hypothesis 下，对称双基地单腿距离
+  `100/300/500/800 m` 的解析 Deflection 为 `2345.37/28.96/3.75/0.573`；波形 Monte Carlo
+  最大相对误差为 `1.30%`，解析交叉检查误差低于 `2e-16`。
+- 对应单边 `P_D` 为 `1.000/0.989/0.124/0.0098`。因此当前 `P_D_min=0.2` 只在该对称、单边、
+  无 clutter 理想模型约 `464 m` 单腿距离内可达；500 m 和 800 m 不满足预期。该负结论不能用
+  correlation-aware selection 修饰，必须依靠经资源计费的多边融合、功率/几何改善，或下调任务需求。
+
+### 2026-09-11：C6 单 Tx / passive-Rx 随机几何性能边界
+
+- 使用 500 个未按结果筛选的 `1130 m x 1130 m` 均匀随机几何；每个 case 只有一个 Tx 对一个
+  target 发射一次满额 25.1 mW 波形，其余 UAV 被动接收，所以感知功率和 `1.024 ms` 时钟只计
+  一次。该实验无 common clutter、blockage、量化或 packet loss，且假设连续 DD 模板已知。
+- K=8 时 best-single 的平均 `P_D=0.6595`、达到 `P_D>=0.2` 的几何比例为 `77.0%`；七个 passive
+  Rx 在独立热噪声假设下全部融合后为 `0.8340/94.8%`。paired `Delta P_D=0.1745`，95% CI
+  `[0.1556,0.1930]`，但仍有 26/500 个几何连理想 all-passive reference 都未达 floor。
+- K=16 时 best-single 为 `0.8257/94.0%`，all-passive 为 `0.9721/99.8%`，paired gain `0.1464`，
+  95% CI `[0.1255,0.1681]`；仍有 1/500 个理想几何未达 floor。
+- 这说明 passive cooperation 在物理量级上有价值，但尚不能宣布系统性能满足预期：结果只有一个
+  target 使用整笔 Tx sensing power。Q16 同时服务时受 `sum_q p_iq<=25.1 mW` 和波形资源约束，
+  不能把该单目标结果复制 16 次；相关 clutter 和真实 evidence transport 也只会降低该理想上界。
 
 ## 12. 结果解释与禁止表述
 

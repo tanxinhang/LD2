@@ -306,16 +306,18 @@ D_joint,q >= ||mu_q||_2^2 / lambda_max(R_q)
 
 ### 6.6 收缩后的相关软证据科学内核
 
-当前研究主线已收缩为 `OTFS local evidence -> conditional-information selection -> soft fusion`。
-对共同协方差的高斯软统计，直接使用
+当前研究主线已收缩为 `OTFS local evidence -> conditional-Deflection selection -> soft fusion`。
+令 `Sigma_0` 为 H0 evidence covariance，线性 H0-Deflection 使用
 
 ```text
-D(S)=delta_S^T Sigma_S^-1 delta_S,
-w_S=Sigma_S^-1 delta_S.
+D_0(S)=delta_S^T Sigma_0,S^-1 delta_S,
+w_S=Sigma_0,S^-1 delta_S.
 ```
 
-候选 `j` 的增量由 Schur complement 精确给出；当 `Sigma_jS=0` 时严格退化为 local Deflection，
-从理论上解释低相关场景与 quality Top-K 的小差距。实现位于
+候选 `j` 的增量由 Schur complement 精确给出；当 `Sigma_0,jS=0` 时严格退化为 local
+Deflection，从理论上解释低相关场景与 quality Top-K 的小差距。该准则不要求高斯或 H0/H1
+等协方差，但这两项不满足时解析 Gaussian ROC 无效，最终性能只由 held-out fixed-P_FA ROC
+认定。实现位于
 `physical/correlated_soft_evidence.py`，目前只用于机制审计，不替换在线检测器。通信 bits、deadline
 和 reliability 是约束/排序输入；atomic、provenance 与 replay 降级为 assurance shell。
 
@@ -329,6 +331,25 @@ common/local clutter、AWGN、demodulation 和 coherent DD matching 生成 recei
 split 上再估计 `mu_0,mu_1,Sigma_0,Sigma_1`，验证 fixed-P_FA ROC、covariance 异质性/稳定性和
 `D(S)` 对 held-out `P_D` 的 subset 排序。equal-covariance 失败时只切换到 H0-covariance 线性
 fallback，不宣称这是异方差检测的最优解。
+
+`physical/bistatic_waveform.py` 现作为唯一几何实现与上述离线波形之间的审计桥。它复用
+`physical/geometry.py` 的 `tau/nu/alpha`，不重新定义传播公式，并按
+
+```text
+delay_bin = tau * (M * Delta_f)
+doppler_bin = nu * N / Delta_f
+|a_rx,ijq| = sqrt(p_iq * G_tx * G_rx) * |alpha_ijq|
+```
+
+生成连续 DD 栅格参数。有效路径若超出 `[0,M)` delay 或 `[-N/2,N/2)` Doppler 无模糊区间，
+严格模式直接拒绝。`(i,j,q)` 分量只允许作为仿真内部记账；detector 只能读取接收机总叠加
+`Y_j=sum_iq Y_ijq`，未调度边出现非零信号时 fail closed。该桥尚未定义多发射机的 MAC/正交
+资源，因此不改变在线 `1.024 ms` 时钟，也不为多波形可分离性背书。
+
+复基带波形使用 `CN(0,sigma_c^2)` 噪声，而冻结在线 detector 使用
+`real_gaussian_shift,c_det=1`。两者通过显式契约 `sigma_c^2=2*P_noise(real-equivalent)` 对齐；
+此时 coherent statistic `sqrt(2) Re<s,y>` 的 Deflection 恰为 `E_s/P_noise`。禁止把复噪声方差
+直接等同于 real-equivalent noise power，否则会无声引入 2 倍 Deflection。
 
 该闭环不含 CP/pulse shaping、同步与 RF 缺陷，也假设 coherent phase；目前只属于离线
 falsification。它没有接入在线控制器或 packet path，不能外推为真实 OTFS 或通信 Pareto 结果。

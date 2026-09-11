@@ -23,9 +23,9 @@ from uav_isac.physical.evidence_calibration import (  # noqa: E402
     subset_surrogate_rank_validation,
 )
 from uav_isac.physical.correlated_soft_evidence import (  # noqa: E402
-    conditional_information_greedy,
+    conditional_deflection_greedy,
     correlation_unaware_greedy,
-    exact_budgeted_selection,
+    exhaustive_budgeted_reference,
     optimal_linear_soft_fusion,
 )
 from uav_isac.physical.waveform_evidence import (  # noqa: E402
@@ -75,7 +75,7 @@ def _selection_fusion_ablation(
     source_count = calibration.mean_shift.size
     bits = np.full(source_count, 64, dtype=np.int64)
     budget = 128
-    aware = conditional_information_greedy(
+    aware = conditional_deflection_greedy(
         calibration.mean_shift,
         covariance_choice.covariance,
         bits,
@@ -87,7 +87,7 @@ def _selection_fusion_ablation(
         bits,
         budget,
     )
-    exhaustive = exact_budgeted_selection(
+    exhaustive = exhaustive_budgeted_reference(
         calibration.mean_shift,
         covariance_choice.covariance,
         bits,

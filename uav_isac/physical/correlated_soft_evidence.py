@@ -1,16 +1,21 @@
 """Scientific core for communication-limited correlated soft evidence.
 
-For a delivered evidence set ``S`` with a common covariance under both
-hypotheses, the optimal linear detector has
+For a delivered evidence set ``S``, let ``Sigma0`` be the evidence covariance
+under ``H0``.  The linear detector that maximizes H0-Deflection has
 
-    D(S) = delta_S.T @ Sigma_S^{-1} @ delta_S,
-    w_S  = Sigma_S^{-1} @ delta_S.
+    D0(S) = delta_S.T @ Sigma0_S^{-1} @ delta_S,
+    w_S   = Sigma0_S^{-1} @ delta_S.
 
 The marginal value of adding source ``j`` follows from the Schur complement:
 
     Delta D_j(S) =
-      (delta_j - Sigma_jS Sigma_S^{-1} delta_S)^2
-      / (Sigma_jj - Sigma_jS Sigma_S^{-1} Sigma_Sj).
+      (delta_j - Sigma0_jS Sigma0_S^{-1} delta_S)^2
+      / (Sigma0_jj - Sigma0_jS Sigma0_S^{-1} Sigma0_Sj).
+
+This H0-Deflection result does not require Gaussian evidence or equal H0/H1
+covariances.  Those stronger assumptions are needed only for an analytical
+Gaussian ROC; non-Gaussian or unequal-covariance cases must retain held-out
+fixed-P_FA validation.
 
 This module deliberately contains no epoch, commit, provenance or replay
 logic.  Those are assurance-shell concerns.  Selection uses only source-local
@@ -75,7 +80,7 @@ def optimal_linear_soft_fusion(
     covariance: np.ndarray,
     selected: Sequence[int] | None = None,
 ) -> tuple[float, np.ndarray]:
-    """Return exact Deflection and full-length optimal linear weights.
+    """Return exact H0-Deflection and full-length optimal linear weights.
 
     A Cholesky solve is used instead of explicitly forming ``Sigma^{-1}``.
     Weights use the canonical scale ``w=Sigma^{-1} delta``; multiplying them
@@ -173,7 +178,7 @@ def _validated_transport(
     return cost, success, latency, eligible
 
 
-def conditional_information_greedy(
+def conditional_deflection_greedy(
     mean_shift: np.ndarray,
     covariance: np.ndarray,
     bits: np.ndarray,
@@ -185,7 +190,7 @@ def conditional_information_greedy(
     deadline_s: float | None = None,
     latency_price_bits_per_s: float = 0.0,
 ) -> EvidenceSelectionResult:
-    """Greedily schedule the largest conditional information per cost.
+    """Greedily schedule the largest conditional H0-Deflection per cost.
 
     Reliability multiplies the one-step gain and latency may enter the ranking
     denominator after conversion to bit-equivalent cost.  This ranking is a
@@ -233,7 +238,7 @@ def conditional_information_greedy(
         selected=chosen,
         deflection=value,
         communication_bits=used,
-        rule="conditional_information_greedy",
+        rule="conditional_deflection_greedy",
     )
 
 
@@ -247,7 +252,7 @@ def correlation_unaware_greedy(
     """Ablation: select under diagonal covariance, fuse under the true model."""
     delta, sigma = _validated_model(mean_shift, covariance)
     diagonal = np.diag(np.diag(sigma))
-    scheduled = conditional_information_greedy(
+    scheduled = conditional_deflection_greedy(
         delta, diagonal, bits, budget_bits, **kwargs)
     value, _ = optimal_linear_soft_fusion(delta, sigma, scheduled.selected)
     return EvidenceSelectionResult(
@@ -258,7 +263,7 @@ def correlation_unaware_greedy(
     )
 
 
-def exact_budgeted_selection(
+def exhaustive_budgeted_reference(
     mean_shift: np.ndarray,
     covariance: np.ndarray,
     bits: np.ndarray,
@@ -269,7 +274,12 @@ def exact_budgeted_selection(
     deadline_s: float | None = None,
     maximum_optional_sources: int = 20,
 ) -> EvidenceSelectionResult:
-    """Exhaustive small-scale oracle for the exact delivered-set objective."""
+    """Exhaustive small-scale reference for the delivered-set objective.
+
+    This routine has no privileged channel state or test labels.  It is a
+    reference only because it enumerates every feasible subset under exactly
+    the same inputs and constraints as the greedy selector.
+    """
     delta, sigma = _validated_model(mean_shift, covariance)
     cost, _, _, eligible = _validated_transport(
         delta.size, bits, None, latency_s, deadline_s)
@@ -286,7 +296,7 @@ def exact_budgeted_selection(
     if any(cost[index] <= 0 for index in optional):
         raise ValueError("non-local candidate evidence must have positive bits")
     if len(optional) > int(maximum_optional_sources):
-        raise ValueError("exact oracle optional-source limit exceeded")
+        raise ValueError("exhaustive reference optional-source limit exceeded")
     best_selected = initial
     best_value, _ = optimal_linear_soft_fusion(delta, sigma, initial)
     best_bits = 0
@@ -311,5 +321,12 @@ def exact_budgeted_selection(
         selected=best_selected,
         deflection=float(best_value),
         communication_bits=int(best_bits),
-        rule="exact_budgeted_oracle",
+        rule="exhaustive_budgeted_reference",
     )
+
+
+# Backwards-compatible import aliases.  New code and reported method names use
+# Deflection/reference terminology; these aliases prevent an audit-only naming
+# correction from breaking archived scripts or external callers.
+conditional_information_greedy = conditional_deflection_greedy
+exact_budgeted_selection = exhaustive_budgeted_reference

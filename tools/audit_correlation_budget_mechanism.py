@@ -2,9 +2,9 @@
 
 This diagnostic intentionally removes trajectory, atomic commit and provenance
 effects.  It asks one narrow question: when high-quality evidence becomes
-redundant, does conditional-information selection outperform a strong
+redundant, does conditional-Deflection selection outperform a strong
 correlation-unaware baseline at the same transmitted bits while approaching a
-small-scale exact oracle?
+small-scale exhaustive reference?
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from uav_isac.physical.correlated_soft_evidence import (
-    conditional_information_greedy,
+    conditional_deflection_greedy,
     correlation_unaware_greedy,
-    exact_budgeted_selection,
+    exhaustive_budgeted_reference,
     optimal_linear_soft_fusion,
 )
 from uav_isac.physical.detection import compute_detection_probabilities
@@ -72,7 +72,7 @@ def audit(
     *,
     cases: int,
     correlations: tuple[float, ...],
-    budget_fractions: tuple[float, ...],
+    budget_evidence_counts: tuple[int, ...],
     bits_per_evidence: int,
     p_fa: float,
     target_pd: float,
@@ -84,16 +84,16 @@ def audit(
     rows: list[dict[str, object]] = []
     mechanism_failures: list[str] = []
     for rho_index, rho in enumerate(correlations):
-        for budget_index, fraction in enumerate(budget_fractions):
-            budget = min(all_bits, int(np.floor(float(fraction) * all_bits)))
+        for budget_index, evidence_count in enumerate(budget_evidence_counts):
+            budget = int(evidence_count) * int(bits_per_evidence)
             proposed_pd: list[float] = []
             unaware_pd: list[float] = []
-            oracle_pd: list[float] = []
+            reference_pd: list[float] = []
             single_pd: list[float] = []
             all_neighbor_pd: list[float] = []
             proposed_d: list[float] = []
             unaware_d: list[float] = []
-            oracle_d: list[float] = []
+            reference_d: list[float] = []
             single_d: list[float] = []
             all_neighbor_d: list[float] = []
             exact_matches = 0
@@ -101,26 +101,27 @@ def audit(
                 delta, covariance = _controlled_model(
                     rho, int(seed_offset) + case)
                 bits = np.full(n_sources, int(bits_per_evidence), dtype=np.int64)
-                proposed = conditional_information_greedy(
+                proposed = conditional_deflection_greedy(
                     delta, covariance, bits, budget)
                 unaware = correlation_unaware_greedy(
                     delta, covariance, bits, budget)
-                oracle = exact_budgeted_selection(
+                reference = exhaustive_budgeted_reference(
                     delta, covariance, bits, budget)
                 local_values = np.square(delta) / np.diag(covariance)
                 single_value = float(np.max(local_values))
                 all_value, _ = optimal_linear_soft_fusion(
                     delta, covariance, tuple(range(n_sources)))
-                if proposed.deflection > oracle.deflection + 1.0e-9:
+                if proposed.deflection > reference.deflection + 1.0e-9:
                     mechanism_failures.append(
-                        f"proposed exceeds oracle at rho={rho}, budget={fraction}, case={case}")
+                        "proposed exceeds exhaustive reference at "
+                        f"rho={rho}, evidence_count={evidence_count}, case={case}")
                 exact_matches += int(
-                    abs(proposed.deflection - oracle.deflection) <= 1.0e-9)
+                    abs(proposed.deflection - reference.deflection) <= 1.0e-9)
                 p_values = compute_detection_probabilities(
                     np.array([
                         proposed.deflection,
                         unaware.deflection,
-                        oracle.deflection,
+                        reference.deflection,
                         single_value,
                         all_value,
                     ]),
@@ -128,12 +129,12 @@ def audit(
                 )
                 proposed_pd.append(float(p_values[0]))
                 unaware_pd.append(float(p_values[1]))
-                oracle_pd.append(float(p_values[2]))
+                reference_pd.append(float(p_values[2]))
                 single_pd.append(float(p_values[3]))
                 all_neighbor_pd.append(float(p_values[4]))
                 proposed_d.append(float(proposed.deflection))
                 unaware_d.append(float(unaware.deflection))
-                oracle_d.append(float(oracle.deflection))
+                reference_d.append(float(reference.deflection))
                 single_d.append(single_value)
                 all_neighbor_d.append(all_value)
             pd_delta = np.asarray(proposed_pd) - np.asarray(unaware_pd)
@@ -144,24 +145,25 @@ def audit(
             )
             rows.append({
                 "rho": float(rho),
-                "budget_fraction_requested": float(fraction),
+                "budget_evidence_count": int(evidence_count),
                 "budget_bits": int(budget),
-                "budget_fraction_realized": float(budget / all_bits),
+                "budget_fraction": float(budget / all_bits),
                 "proposed_pd_mean": float(np.mean(proposed_pd)),
                 "correlation_unaware_pd_mean": float(np.mean(unaware_pd)),
-                "oracle_pd_mean": float(np.mean(oracle_pd)),
+                "exhaustive_reference_pd_mean": float(np.mean(reference_pd)),
                 "single_uav_pd_mean": float(np.mean(single_pd)),
                 "all_neighbor_pd_mean": float(np.mean(all_neighbor_pd)),
                 "proposed_minus_unaware_pd_mean": float(np.mean(pd_delta)),
                 "proposed_minus_unaware_pd_ci95": [ci[0], ci[1]],
                 "proposed_deflection_mean": float(np.mean(proposed_d)),
                 "correlation_unaware_deflection_mean": float(np.mean(unaware_d)),
-                "oracle_deflection_mean": float(np.mean(oracle_d)),
+                "exhaustive_reference_deflection_mean": float(
+                    np.mean(reference_d)),
                 "single_uav_deflection_mean": float(np.mean(single_d)),
                 "all_neighbor_deflection_mean": float(np.mean(all_neighbor_d)),
                 "all_neighbor_communication_bits": int(all_bits),
                 "proposed_minus_unaware_deflection_mean": float(np.mean(d_delta)),
-                "proposed_oracle_exact_match_rate": float(exact_matches / int(cases)),
+                "proposed_reference_exact_match_rate": float(exact_matches / int(cases)),
             })
 
     pareto: list[dict[str, object]] = []
@@ -179,13 +181,13 @@ def audit(
 
         proposed_bits = first_bits("proposed_pd_mean")
         unaware_bits = first_bits("correlation_unaware_pd_mean")
-        oracle_bits = first_bits("oracle_pd_mean")
+        reference_bits = first_bits("exhaustive_reference_pd_mean")
         pareto.append({
             "rho": float(rho),
             "target_pd": float(target_pd),
             "proposed_minimum_grid_bits": proposed_bits,
             "correlation_unaware_minimum_grid_bits": unaware_bits,
-            "oracle_minimum_grid_bits": oracle_bits,
+            "exhaustive_reference_minimum_grid_bits": reference_bits,
             "proposed_bit_saving_vs_unaware": (
                 None if proposed_bits is None or unaware_bits is None
                 else int(unaware_bits - proposed_bits)
@@ -202,7 +204,7 @@ def audit(
     high_interior = [
         row for row in rows
         if row["rho"] == high_rho
-        and 0.0 < float(row["budget_fraction_realized"]) < 1.0
+        and 0.0 < float(row["budget_fraction"]) < 1.0
         and int(row["budget_bits"]) >= 2 * int(bits_per_evidence)
     ]
     if not any(
@@ -221,7 +223,7 @@ def audit(
         "status": "PASS" if not mechanism_failures else "FAIL",
         "evidence_class": "DIAGNOSTIC_ONLY",
         "scientific_question": (
-            "conditional-information evidence selection versus correlation-"
+            "conditional-Deflection evidence selection versus correlation-"
             "unaware selection at equal delivered bits"),
         "model": {
             "sources": n_sources,
@@ -239,8 +241,9 @@ def audit(
                 for row in high_interior)),
             "high_rho_saves_bits_at_target_pd": bool(
                 high_saving is not None and int(high_saving) > 0),
-            "proposed_never_exceeds_oracle": not any(
-                "exceeds oracle" in failure for failure in mechanism_failures),
+            "proposed_never_exceeds_exhaustive_reference": not any(
+                "exceeds exhaustive reference" in failure
+                for failure in mechanism_failures),
         },
         "failure_reasons": mechanism_failures,
         "pareto_target": pareto,
@@ -260,7 +263,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=int, default=32)
     parser.add_argument("--correlations", default="0,0.2,0.5,0.8,0.95")
-    parser.add_argument("--budget-fractions", default="0.2,0.4,0.6,0.8,1.0")
+    parser.add_argument(
+        "--budget-evidence-counts", default="1,2,3,4,5,6,7,8",
+        help="exact numbers of fixed-size evidence entries allowed")
     parser.add_argument("--bits-per-evidence", type=int, default=64)
     parser.add_argument("--p-fa", type=float, default=1.0e-3)
     parser.add_argument("--target-pd", type=float, default=0.9)
@@ -269,11 +274,12 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
     correlations = _csv_tuple(args.correlations, float)
-    fractions = _csv_tuple(args.budget_fractions, float)
+    evidence_counts = _csv_tuple(args.budget_evidence_counts, int)
     if (
         args.cases < 1 or args.bits_per_evidence < 1
         or any(value < 0.0 or value >= 1.0 for value in correlations)
-        or any(value <= 0.0 or value > 1.0 for value in fractions)
+        or any(value < 1 or value > 8 for value in evidence_counts)
+        or len(set(evidence_counts)) != len(evidence_counts)
         or not 0.0 < args.p_fa < 1.0
         or not args.p_fa < args.target_pd < 1.0
     ):
@@ -281,7 +287,7 @@ def main() -> int:
     result = audit(
         cases=args.cases,
         correlations=correlations,
-        budget_fractions=fractions,
+        budget_evidence_counts=evidence_counts,
         bits_per_evidence=args.bits_per_evidence,
         p_fa=args.p_fa,
         target_pd=args.target_pd,
