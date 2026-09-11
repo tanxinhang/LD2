@@ -94,3 +94,48 @@ correlation-unaware 和 exact oracle。门禁要求：
 从 OTFS 波形或单独校准 trace 估计 `delta` 与 `Sigma`，在不复用评估数据的条件下冻结 calibration
 artifact；随后让 owner 仅以实际送达的 `EvidencePacket` 构造集合并运行相同融合器。若真实高相关
 工作点仍不能产生可重复的 Pareto 改善，则停止把 correlation-aware selection 作为主创新。
+
+## 最小 waveform-to-evidence 闭环（G1--G3）
+
+`physical/waveform_evidence.py` 增加了一个离线、理想循环块模型：QPSK DD pilot 经 unitary ISFFT、
+OFDM 调制、双分数 delay/Doppler 路径、OFDM 解调与 SFFT 后形成 DD response；多径、共同杂波、
+本地杂波和复 AWGN 显式进入 receiver-local coherent matched statistic。该模型不接在线环境。
+
+`physical/evidence_calibration.py` 在独立 calibration/validation split 上估计
+`mu_0,mu_1,Sigma_0,Sigma_1`。只有相对 covariance mismatch 通过预设门槛时才使用 pooled
+covariance；否则使用 `Sigma_0` 作为 fixed-P_FA 线性 fallback。若条件数过大，只做最小的
+diagonal shrinkage，并继续用 linear solve/Cholesky，不显式求逆。H0 fallback 不是 QDA 最优性
+声明，必须另过 held-out ROC 排序门禁。
+
+10,000-sample/split 的诊断结果为：固定校准阈值在 validation 上得到 `P_FA=0.0069`（目标
+`0.01`）；目标幅度 scale `0.4/0.7/1.0/1.3` 的 `P_D` 为
+`0.2009/0.6202/0.9291/0.9952`。共同杂波产生 `rho_01=0.6641`，而 `rho_03=-0.0131`；H0/H1
+covariance 相对误差 `0.0113`，calibration/held-out H0 covariance 相对误差 `0.0251`。15 个非空
+subset 的 calibrated `D` 与 held-out `P_D` Spearman correlation 为 `0.9964`。加入 target
+amplitude fluctuation 的反例使 covariance mismatch 达 `1.5148`，实现正确切换到 H0 fallback。
+
+这些数值属于 `ideal_cyclic_coherent_otfs_offline_calibration`，仍有以下硬质疑：
+
+- 共同杂波 loading 是人为构造的机制场景，不能证明真实几何自然产生相同异质性；
+- coherent statistic 假设目标相位已校准，尚未覆盖 unknown-phase GLRT 及其非高斯统计；
+- circular fractional delay 隐含充分 cyclic extension，尚未验证 CP 不足、脉冲成形和同步误差；
+- `P_FA=0.01` 是受 10,000 样本尾部精度限制的诊断点，不等于正式配置的 `10^-3` 认证；
+- calibration 使用受控 H0/H1 标签合理，但 runtime context 尚未证明完全不含 target truth；
+- 尚未进入 actual packet delivery，不能据此报告真实 airtime 或链路可靠性收益。
+
+因此 Survival Gate A 只完成了“可执行性证明”，没有完成外部物理有效性证明。下一步应使用冻结、
+不含 test truth 的多几何 waveform trace，加入 unknown-phase detector，并以至少能稳定估计
+`P_FA=10^-3` 的样本量重复 covariance 异质性、稳定性和 subset ranking 门禁。
+
+## 不可违反的开发规则
+
+1. Detection threshold 只由 calibration H0 决定；主结果固定 `P_FA` 比较 `P_D`。
+2. Runtime 禁止 target truth、future sample 和 validation label。
+3. 只融合实际送达、同 generation、去重后的 source-local evidence。
+4. 发送失败仍计 attempted bits/airtime/energy。
+5. Airtime 公式必须先声明 MAC；串行正交才允许直接求和。
+6. Runtime covariance 只能来自冻结 calibration 与可观测 context，不能按 test truth 查表。
+7. 同 generation 的 fused evidence 不得递归转发。
+8. Exhaustive reference 与 proposed 信息集完全相同，唯一优势只能是组合枚举。
+9. 相关矩阵病态或失配时降级，不用裸矩阵逆掩盖问题。
+10. 新模块若不能产生独立、可统计认证的 Pareto 改善，应删除或降级。

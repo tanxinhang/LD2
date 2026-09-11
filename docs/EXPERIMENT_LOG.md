@@ -394,6 +394,11 @@ Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 sum
 
 ## 11. 下一轮实验计划（按证据依赖排序）
 
+> 2026-09-11 收缩说明：下列 P2--P6 是历史预注册路线，目前全部冻结。C1/C2 后的有效顺序只有
+> waveform-to-evidence 外部有效性、actual orthogonal packet realization、以及前两项存活后才允许
+> 开始的 quantization/rate allocation。不得继续并行推进结构、SOCP、移动或联合 oracle 来“救”
+> correlation-aware 结果。
+
 ### P0：语义闭合与架构门禁回归（诊断与全量回归已完成）
 
 - atomic epoch 已把 structure、owner、endpoint state 与 owner posterior 作为同一候选纪元提交；
@@ -410,7 +415,7 @@ Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 sum
 - 失败按 belief/structure/model-certificate/power/movement/communication/energy/runtime 分层归因，
   不查看 test seed 后调参；修复必须建立新 commit 与 evidence epoch。
 
-### P1.5：最小 waveform / correlation calibration gate
+### P1.5：最小 waveform / correlation calibration gate（初始诊断已由 C2 完成）
 
 - 在不建设完整 transceiver 的前提下，对 same DD bin、adjacent DD bin、far DD bin 以及
   `rho in {0, 0.1, 0.3, 0.5}` 做小规模 Monte Carlo。
@@ -558,6 +563,23 @@ Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为�
   与 exhaustive oracle 数值一致。但这是有意激活冗余的 synthetic mechanism evidence，不能外推
   为真实 OTFS/channel 性能。artifact 为
   `artifacts/diagnostic/correlation_budget_mechanism_v1.json`。
+
+### 2026-09-11：C2 ideal-cyclic OTFS waveform-to-evidence G1--G3
+
+- 新增最小 unitary OTFS block 和双分数 DD circular channel；显式加入 deterministic multipath、
+  shared common clutter、receiver-local clutter 与 complex AWGN，再从每个 receiver 自己的 DD
+  observation 提取 coherent matched statistic。该模块是 offline falsification，不接在线路径。
+- 10,000 samples/hypothesis/split、独立 calibration/validation seeds 下，目标 `P_FA=0.01` 的
+  validation PFA 为 `0.0069`；目标幅度 scale `0.4/0.7/1.0/1.3` 的 P_D 单调为
+  `0.2009/0.6202/0.9291/0.9952`。
+- H0 evidence 中相似视角 pair 的样本相关为 `0.6641`，远视角为 `-0.0131`。equal-covariance
+  相对误差 `0.0113`，held-out H0 covariance 相对误差 `0.0251`；15 个 subset 的 calibrated D
+  与 validation P_D 的 Spearman `rho=0.9964`。
+- target amplitude fluctuation 反例产生 `1.5148` covariance mismatch，成功触发 H0 fixed-PFA
+  fallback，证明实现没有无条件套用 pooled covariance。
+- 以上 artifact 为 `artifacts/diagnostic/waveform_evidence_closure_v1.json`。它仍依赖理想循环块、
+  coherent target phase 和人为 common-clutter loadings，且 `P_FA=0.01` 不是正式 `10^-3` 门禁；
+  因此只证明链条内部自洽，不证明真实传播中 Survival Gate A 已通过。
 
 ## 12. 结果解释与禁止表述
 

@@ -322,6 +322,17 @@ w_S=Sigma_S^-1 delta_S.
 空口 evidence 保持单跳 source-local：同一 generation 内不得把已融合 evidence 再包装成新源。
 详细假设、baseline 和可证伪门禁见 `docs/SCIENTIFIC_CORE_CORRELATED_EVIDENCE.md`。
 
+### 6.7 最小物理—统计闭环
+
+新增离线 ideal-cyclic OTFS block，将 DD pilot 经 modulation、fractional delay/Doppler multipath、
+common/local clutter、AWGN、demodulation 和 coherent DD matching 生成 receiver-local `z`。独立
+split 上再估计 `mu_0,mu_1,Sigma_0,Sigma_1`，验证 fixed-P_FA ROC、covariance 异质性/稳定性和
+`D(S)` 对 held-out `P_D` 的 subset 排序。equal-covariance 失败时只切换到 H0-covariance 线性
+fallback，不宣称这是异方差检测的最优解。
+
+该闭环不含 CP/pulse shaping、同步与 RF 缺陷，也假设 coherent phase；目前只属于离线
+falsification。它没有接入在线控制器或 packet path，不能外推为真实 OTFS 或通信 Pareto 结果。
+
 ## 7. 联合功率约束与精确 max–min LP
 
 ### 7.1 可用感知预算
@@ -767,7 +778,7 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-本轮全量回归为 `1795 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
+本轮全量回归为 `1802 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
 source-root、唯一归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。
