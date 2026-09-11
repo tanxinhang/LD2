@@ -146,6 +146,12 @@ class DetectionParams:
     #   continuous  -- physical ``I_support * |A(tau,nu)|^2`` gain (canonical
     #                  post-G2 manifest; all new formal runs use this).
     dd_gain_mode: str = "binary"
+    # Correlation model for fusing multiple selected OTFS edge statistics.
+    # ``independent`` preserves the historical additive Deflection model.
+    # ``otfs_gram_lower_bound`` builds the finite DD-template Gram matrix R_q
+    # and uses sum_e a_e p_e / lambda_max(R_q), a certified lower bound on
+    # mu^H R_q^{-1} mu that keeps the fixed-structure power problem linear.
+    fusion_correlation_mode: str = "independent"
     K_q_max: int = 3
     B_q: int = 64
     # Long-term fairness floor (constraint D4). 0.8 was unreachable even for the
@@ -1036,6 +1042,13 @@ class MARLParams:
     hyperedge_assignment_hold_frames: int = 1
     hyperedge_min_target_coverage: float = 1.0
     hyperedge_safety_fallback_enabled: bool = True
+    # Research-only correlation-aware exchange audit. It may reconstruct and
+    # certify a counterfactual candidate but has no pending/active epoch write
+    # handle, so enabling it cannot change the executed structure or power.
+    correlation_exchange_shadow_enabled: bool = False
+    correlation_exchange_shadow_period_frames: int = 3
+    correlation_exchange_shadow_top_m: int = 12
+    correlation_exchange_shadow_weak_target_count: int = 2
     # Diagnostic architecture gate: replace the average-utility greedy P0 with
     # an exact single-role max-min MILP. Optionally bypass the learned local
     # commitment filter to separate graph loss from solver-objective loss.
@@ -1713,6 +1726,10 @@ class MasterConfig:
         _require_choice(
             "config.detection.dd_gain_mode", detection.dd_gain_mode,
             {"binary", "continuous"})
+        _require_choice(
+            "config.detection.fusion_correlation_mode",
+            detection.fusion_correlation_mode,
+            {"independent", "otfs_gram_lower_bound"})
         _require_positive("config.detection.K_q_max", detection.K_q_max)
         if (not allow_target_weight_resize
                 and detection.K_q_max > scenario.K):
@@ -1852,6 +1869,32 @@ class MasterConfig:
             raise ValueError(
                 "distributed_primal_dual_power_enabled cannot be combined "
                 "with distributed_replicated_power_enabled")
+        _require_positive(
+            "config.marl.correlation_exchange_shadow_period_frames",
+            marl.correlation_exchange_shadow_period_frames)
+        _require_positive(
+            "config.marl.correlation_exchange_shadow_top_m",
+            marl.correlation_exchange_shadow_top_m)
+        _require_positive(
+            "config.marl.correlation_exchange_shadow_weak_target_count",
+            marl.correlation_exchange_shadow_weak_target_count)
+        if marl.correlation_exchange_shadow_enabled:
+            if detection.fusion_correlation_mode != "otfs_gram_lower_bound":
+                raise ValueError(
+                    "correlation_exchange_shadow_enabled requires "
+                    "otfs_gram_lower_bound fusion")
+            if not marl.analytical_sensing_power_enabled:
+                raise ValueError(
+                    "correlation_exchange_shadow_enabled requires "
+                    "analytical_sensing_power_enabled")
+            if not marl.hyperedge_negotiation_enabled:
+                raise ValueError(
+                    "correlation_exchange_shadow_enabled requires "
+                    "hyperedge_negotiation_enabled")
+            if not marl.distributed_atomic_decision_epoch_enabled:
+                raise ValueError(
+                    "correlation_exchange_shadow_enabled requires "
+                    "distributed_atomic_decision_epoch_enabled")
         _require_positive(
             "config.marl.temporal_unrolled_power_horizon",
             marl.temporal_unrolled_power_horizon)

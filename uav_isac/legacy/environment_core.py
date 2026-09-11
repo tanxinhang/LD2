@@ -50,6 +50,17 @@ from uav_isac.environment.reward import (
 )
 from uav_isac.environment.constraints import ConstraintChecker
 from uav_isac.physical.deflection import DeflectionComputer
+from uav_isac.physical.correlation_calibration import (
+    apply_target_correlation_factors,
+    calibrate_selected_entries,
+    selected_otfs_correlation_factors,
+)
+from uav_isac.coordination.correlation_candidate_commit import (
+    evaluate_correlation_exchange_shadow,
+)
+from uav_isac.coordination.local_exchange_oracle import (
+    role_owner_from_structure,
+)
 from uav_isac.physical.otfs import (
     compute_dd_phys_gain_batch,
 )
@@ -542,6 +553,16 @@ class EnvironmentCore:
                 'joint_isac_power_enabled requires learned_comm_mode=cost_aware')
         self._analytical_sensing_power_enabled = bool(getattr(
             ma, 'analytical_sensing_power_enabled', False))
+        self._fusion_correlation_mode = str(getattr(
+            de, 'fusion_correlation_mode', 'independent'))
+        if (
+            self._fusion_correlation_mode == 'otfs_gram_lower_bound'
+            and self._passive_multireceiver_evidence_enabled
+        ):
+            raise ValueError(
+                'OTFS Gram calibration currently requires selected-only '
+                'receiver evidence; passive multireceiver fusion has a '
+                'different covariance dimension')
         if self._analytical_sensing_power_enabled and not self._joint_isac_power_enabled:
             raise ValueError(
                 'analytical_sensing_power_enabled requires joint_isac_power_enabled')
@@ -1424,6 +1445,15 @@ class EnvironmentCore:
             ma, 'qpd_override_sensing_weights', True))
         self._hyperedge_enabled = bool(getattr(
             ma, 'hyperedge_negotiation_enabled', False))
+        self._correlation_exchange_shadow_enabled = bool(getattr(
+            ma, 'correlation_exchange_shadow_enabled', False))
+        self._correlation_exchange_shadow_period_frames = max(1, int(getattr(
+            ma, 'correlation_exchange_shadow_period_frames', 3)))
+        self._correlation_exchange_shadow_top_m = max(1, int(getattr(
+            ma, 'correlation_exchange_shadow_top_m', 12)))
+        self._correlation_exchange_shadow_weak_target_count = max(
+            1, int(getattr(
+                ma, 'correlation_exchange_shadow_weak_target_count', 2)))
         self._hyperedge_acceleration = (
             create_hyperedge_acceleration_service(getattr(
                 ma, 'hyperedge_acceleration_backend', 'numpy'))
@@ -11003,6 +11033,11 @@ class EnvironmentCore:
             else p0_solution.selected_set
         )
 
+        # Targetwise correction retained through power and realized detection.
+        # It stays one in the historical independent-evidence model.
+        correlation_factors = np.ones(self.Q, dtype=np.float64)
+        correlation_source_entries = deflection_entries
+
         # ── D0.89: analytical inner sensing power ──
         # The learned per-target sensing head is ignored for execution; after
         # P0 fixes role/owner/edge, the fixed-owner max-min power LP allocates
@@ -11091,6 +11126,27 @@ class EnvironmentCore:
                     "invalid fixed-owner state for analytical sensing power"
                 ) from error
             if gain is not None:
+                if self._fusion_correlation_mode == 'otfs_gram_lower_bound':
+                    if true_unit_deflection_dense is not None:
+                        correlation_source_entries = (
+                            self._deflection_materialization.materialize(
+                                true_unit_deflection_dense))
+                    elif true_unit_deflection_entries is not None:
+                        correlation_source_entries = (
+                            true_unit_deflection_entries)
+                    else:
+                        correlation_source_entries = deflection_entries
+                    correlation_factors = selected_otfs_correlation_factors(
+                        selected,
+                        correlation_source_entries,
+                        num_targets=self.Q,
+                        delay_size=self.deflection_computer.M,
+                        doppler_size=self.deflection_computer.N,
+                        delta_f_hz=self.deflection_computer.delta_f,
+                        symbol_time_s=self.deflection_computer.T_sym,
+                    )
+                    gain = apply_target_correlation_factors(
+                        gain, correlation_factors)
                 self._last_analytical_gain = gain.copy()
                 self._last_analytical_budget = budget.copy()
                 actor_sensing_power_proposal = (
@@ -11809,6 +11865,153 @@ class EnvironmentCore:
                 self._last_deflection_entries = deflection_entries
             self._finalize_analytical_power_accounting(budget)
 
+        # Research-only counterfactual.  This block has no write path to the
+        # pending or active atomic epoch and runs only on its declared period.
+        # It uses the already-built finite physical tensor, then independently
+        # reconstructs the accepted candidate at every participant and bills
+        # a separate three-round commit against the remaining frame deadline.
+        if self._correlation_exchange_shadow_enabled:
+            shadow_metrics = {
+                'correlation_exchange_shadow_enabled': 1.0,
+                'correlation_exchange_shadow_input_scope': (
+                    'centralized_physical_diagnostic'),
+                'correlation_exchange_shadow_attempted': 0.0,
+                'correlation_exchange_shadow_exact_accepted': 0.0,
+                'correlation_exchange_shadow_would_commit': 0.0,
+                'correlation_exchange_shadow_active_unchanged': 1.0,
+            }
+            should_shadow = bool(
+                (self.t - 1) % self._correlation_exchange_shadow_period_frames == 0
+                and p0_solution.selected_set
+                and true_unit_deflection_dense is not None
+                and self._inter_uav_comm is not None
+                and np.any(self._current_comm_power_w > 0.0)
+            )
+            if should_shadow:
+                try:
+                    active_mask = np.zeros(
+                        (self.K, self.K, self.Q), dtype=bool)
+                    for transmitter, receiver, target in p0_solution.selected_set:
+                        active_mask[int(transmitter), int(receiver), int(target)] = True
+                    shadow_role, shadow_owner = role_owner_from_structure(
+                        active_mask,
+                        fallback_role=np.full(self.K, -1, dtype=np.int8),
+                    )
+                    # Every target must have a unique current owner before the
+                    # fixed-structure LP and atomic closure are meaningful.
+                    if np.any(shadow_owner < 0):
+                        raise ValueError('active structure is incomplete')
+                    dependency_ready = self._atomic_epoch_dependencies_ready(
+                        tuple(tuple(int(value) for value in edge)
+                              for edge in p0_solution.selected_set))
+                    dependency_versions = (
+                        np.asarray(
+                            self._hyperedge_received_last_seen[0],
+                            dtype=np.uint64,
+                        ).reshape(-1).copy()
+                        if dependency_ready
+                        else np.zeros(self.K, dtype=np.uint64)
+                    )
+                    reports_per_receiver = (
+                        max(1, int(
+                            self.cfg.p0_solver.capacity_per_rx
+                            // max(self.cfg.detection.B_q, 1)))
+                        if self.ground_communication_enabled
+                        else self.Q * self.cfg.detection.K_q_max
+                    )
+                    shadow = evaluate_correlation_exchange_shadow(
+                        active_mask,
+                        shadow_role,
+                        shadow_owner,
+                        coefficient,
+                        np.asarray(true_unit_deflection_dense.valid, dtype=bool)
+                        & (coefficient > 0.0),
+                        budget,
+                        true_unit_deflection_dense.tau,
+                        true_unit_deflection_dense.nu,
+                        generation_id=int(self._hyperedge_active_epoch_id + 1),
+                        dependency_versions=dependency_versions,
+                        dependency_ready=dependency_ready,
+                        positions=uav_positions,
+                        comm_power_w=self._current_comm_power_w,
+                        communication_model=self._inter_uav_comm,
+                        delay_size=self.deflection_computer.M,
+                        doppler_size=self.deflection_computer.N,
+                        delta_f_hz=self.deflection_computer.delta_f,
+                        symbol_time_s=self.deflection_computer.T_sym,
+                        target_pair_limit=self.cfg.detection.K_q_max,
+                        reports_per_receiver=reports_per_receiver,
+                        top_m=self._correlation_exchange_shadow_top_m,
+                        weak_target_count=(
+                            self._correlation_exchange_shadow_weak_target_count),
+                        minimum_deflection=reserve,
+                        total_power_w=self._isac_total_power_w,
+                        remaining_deadline_s=max(
+                            float(self.cfg.scenario.dt)
+                            - float(comm_stats.max_latency_s),
+                            0.0,
+                        ),
+                    )
+                    shadow_metrics.update({
+                        'correlation_exchange_shadow_attempted': float(
+                            shadow.attempted),
+                        'correlation_exchange_shadow_exact_accepted': float(
+                            shadow.accepted_by_exact_lp),
+                        'correlation_exchange_shadow_would_commit': float(
+                            shadow.would_commit),
+                        'correlation_exchange_shadow_replica_agreement': float(
+                            shadow.replica_agreement),
+                        'correlation_exchange_shadow_active_unchanged': float(
+                            shadow.active_structure_unchanged),
+                        'correlation_exchange_shadow_improvement': float(
+                            shadow.improvement),
+                        'correlation_exchange_shadow_baseline_worst_deflection': float(
+                            shadow.baseline_worst_deflection),
+                        'correlation_exchange_shadow_candidate_worst_deflection': float(
+                            shadow.candidate_worst_deflection),
+                        'correlation_exchange_shadow_candidate_count': float(
+                            shadow.candidate_count),
+                        'correlation_exchange_shadow_dual_pruned_count': float(
+                            shadow.dual_upper_pruned_count),
+                        'correlation_exchange_shadow_raw_upper_pruned_count': float(
+                            shadow.raw_gain_upper_pruned_count),
+                        'correlation_exchange_shadow_physical_prefilter_rejected_count': float(
+                            shadow.physical_prefilter_rejected_count),
+                        'correlation_exchange_shadow_exact_lp_count': float(
+                            shadow.exact_verification_count),
+                        'correlation_exchange_shadow_gram_time_s': float(
+                            shadow.gram_compute_time_s),
+                        'correlation_exchange_shadow_lp_time_s': float(
+                            shadow.exact_lp_time_s),
+                        'correlation_exchange_shadow_factor_cache_hits': float(
+                            shadow.correlation_factor_cache_hits),
+                        'correlation_exchange_shadow_factor_cache_misses': float(
+                            shadow.correlation_factor_cache_misses),
+                        'correlation_exchange_shadow_dual_early_stop': float(
+                            shadow.dual_bound_early_stopped),
+                        'correlation_exchange_shadow_rebuild_total_time_s': float(
+                            shadow.reconstruction_total_time_s),
+                        'correlation_exchange_shadow_rebuild_critical_path_s': float(
+                            shadow.reconstruction_parallel_critical_path_s),
+                        'correlation_exchange_shadow_record_bytes': float(
+                            shadow.canonical_record_bytes),
+                        'correlation_exchange_shadow_protocol_bits': float(
+                            shadow.protocol_over_air_bits),
+                        'correlation_exchange_shadow_protocol_latency_s': float(
+                            shadow.protocol_latency_s),
+                        'correlation_exchange_shadow_protocol_energy_j': float(
+                            shadow.protocol_energy_j),
+                        'correlation_exchange_shadow_failure_reason': (
+                            shadow.failure_reason or ''),
+                    })
+                except (RuntimeError, ValueError) as error:
+                    shadow_metrics.update({
+                        'correlation_exchange_shadow_attempted': 1.0,
+                        'correlation_exchange_shadow_failure_reason': (
+                            f'{type(error).__name__}:{error}'),
+                    })
+            self._last_isac_metrics.update(shadow_metrics)
+
         # Realized per-target deflection = TRUE d_eff of the SELECTED pairs.
         d_true = {
             (int(e.i), int(e.j), int(e.q)): float(e.d_eff)
@@ -11949,6 +12152,49 @@ class EnvironmentCore:
                         probe_triggered = True
                         probe_target = q_star
                         self._probe_miss_count[q_star] = 0
+
+        # A selected set with correlated normalized matched-filter statistics
+        # has joint Deflection mu^H R^-1 mu.  The Rayleigh bound
+        #   mu^H R^-1 mu >= ||mu||^2 / lambda_max(R)
+        # turns the legacy additive sum into a conservative, still-linear
+        # statistic. Recompute after optional probing because probing may add
+        # one scheduled edge after the power solve.
+        if self._fusion_correlation_mode == 'otfs_gram_lower_bound':
+            correlation_factors = selected_otfs_correlation_factors(
+                p0_solution.selected_set,
+                correlation_source_entries,
+                num_targets=self.Q,
+                delay_size=self.deflection_computer.M,
+                doppler_size=self.deflection_computer.N,
+                delta_f_hz=self.deflection_computer.delta_f,
+                symbol_time_s=self.deflection_computer.T_sym,
+            )
+            deflection_entries = calibrate_selected_entries(
+                deflection_entries,
+                p0_solution.selected_set,
+                correlation_factors,
+            )
+            d_true = {
+                (int(entry.i), int(entry.j), int(entry.q)): float(entry.d_eff)
+                for entry in deflection_entries
+            }
+            D_q_star = np.zeros(self.Q, dtype=np.float64)
+            for transmitter, receiver, target in p0_solution.selected_set:
+                D_q_star[int(target)] += d_true.get(
+                    (int(transmitter), int(receiver), int(target)), 0.0)
+            self._last_deflection_entries = deflection_entries
+        # Do not add no-op fields to the historical independent mode: formal
+        # characterization fingerprints intentionally bind the complete info
+        # payload, so a disabled research feature must be byte-transparent.
+        if self._fusion_correlation_mode == 'otfs_gram_lower_bound':
+            self._last_isac_metrics.update({
+                'fusion_correlation_mode': self._fusion_correlation_mode,
+                'fusion_correlation_factor_q': correlation_factors.copy(),
+                'fusion_correlation_factor_mean': float(np.mean(
+                    correlation_factors)),
+                'fusion_correlation_factor_max': float(np.max(
+                    correlation_factors)),
+            })
 
         # 5. Resolve the evidence boundary before computing any detector,
         #    reward, constraint, or tracking statistic. P0 remains a scheduler;

@@ -452,6 +452,93 @@ Formal gate 重算 CSV/JSON 中的 episode 数组，不信任预先写好的 sum
 Markov/KNN、fixed-lag residual、Predictive-GNN 与 temporal-unroll 已降为低优先级 shadow：除非
 上述主线出现明确瓶颈且支线先通过独立 falsification，否则不占用正式种子或主报告结论。
 
+### 2026-09-11：A2 OTFS Gram 相关下界接线诊断
+
+- 新 profile：`config/exp_strict_distributed_k16q16_correlation_calibrated.yaml`；只改变多边证据
+  covariance 语义，结构、通信、移动和随机种子均继承 K16/Q16 严格基线。
+- 软件门禁：相关矩阵 Hermitian/PSD、同模板极限 `c_q=n`、整数 DD-bin 正交极限 `c_q=1`、零增益
+  边和重复边处理均有单元测试；全仓回归为 `1773 passed, 6 skipped`。
+- seed 7、8 帧、tail 5 的同种子诊断：相关 profile 的 `c_q` 帧均值 `1.2921`、全程最大
+  `1.9328`；独立/相关两组的 bits/frame 均为 `2536`、平均 coverage 均为 `0.875`，因而短程
+  差异不是免费增加通信或结构覆盖造成的。
+- 同一诊断中 steady/weak3/worst `P_D` 从独立模型的 `0.97/0.93/0.92` 降为
+  `0.90/0.72/0.65`（四舍五入）。这只说明独立相加在该解析 Gram 模型下明显乐观，不是新算法
+  性能提升，也不是统计结论；正式比较仍需 waveform/ROC calibration 与 paired blind gate。
+- 两组均未出现 RF 预算违反或通信 deadline 违反；相关组最小 swept UAV 距离为 `94.55 m`。
+
+### 2026-09-11：B1 相关感知对偶交换内核
+
+- 新增 `correlation_aware_dual_pruned_exact_exchange`：复用既有 N5/N6 有界邻域，结构候选逐一
+  重算 OTFS Gram 因子；incumbent LP 对偶价格只负责排序，弱对偶上界只负责可证明剪枝，Top-M
+  最终由精确 fixed-structure LP 验证。
+- 构造门禁将 target 0 的 incumbent 设置为两条完全重合的高增益模板，并提供一组稍低原始增益、
+  但相差一个整数 delay bin 的正交替换。内核接受 N6 交换，相关因子由 `[2,1]` 降至 `[1,1]`，
+  且校准后的精确 worst Deflection 严格提高；无候选版本返回显式 no-op。
+- 本阶段只证明研究内核的数学接线和单步不降，不代表 K16/Q16 在线收益。下一 gate 是随机小规模
+  exhaustive N5/N6 oracle：报告 Top-M recall、邻域最优性 gap、LP 次数和 Gram 计算时间；通过后
+  才设计 packet-reconstructed atomic commit 接入，禁止直接从集中式张量执行候选。
+- 30 个固定随机 K6/Q4 case（每例 32 个 eligible candidates）的首次 falsification 显示，旧的
+  incumbent-power replay 排序在 Top-8 只有 `73.3%` exact recall。改用
+  `U_lambda(E')-eta*` 主排序、replay sensitivity 次排序后，Top-4/8/12 recall 分别为
+  `73.3%/96.7%/100%`；平均邻域最优值比例为 `98.10%/99.86%/100%`，最差比例为
+  `82.09%/95.86%/100%`。Top-12 平均验证 11.0 个 LP，而安全剪枝后的 exhaustive 平均为
+  22.3 个；因此后续协议原型暂定 Top-12，Top-8 仍不满足零漏检门禁。该结论仅限当前 30 个
+  synthetic case，复现脚本为 `tools/audit_correlation_aware_exchange.py`。
+
+### 2026-09-11：B2 reconstruct-then-hash 候选证书
+
+- 新增相关候选规范记录，绑定 generation、完整依赖版本向量、结构/角色/owner、OTFS numerology、
+  Gram 因子、校准增益、预算/reserve、精确 LP 功率/Deflection 以及 primal-dual 证书；规范编码使用
+  固定大端整数、IEEE-754 binary64 和固定 bit order，不依赖 JSON/repr。
+- 所有依赖闭包节点必须从已送达数据独立重建，并同时满足 SHA-256 identity 与规范记录逐字节
+  相等。构造测试中，单个节点一个 ULP 的因子差异会拒绝；即使测试注入恒定 256-bit hash 来
+  模拟碰撞，不同完整记录仍然拒绝；预算单纯形或 Deflection 恒等式破坏也 fail closed。
+- 证书复用既有 prepare/vote/decision 物理传输检查，但把 digest 扩为 256 bit、generation 扩为
+  32 bit。相对旧布局每个实际发送包增加 208 bit，闭包大小为 `m` 时额外空口量为
+  `208(m+1)` bit；稠密 gain/power 不上空口，而由节点从已计费依赖本地重建。
+- 针对相关校准、结构交换、依赖提交和新证书的联合测试为 `23 passed`。本阶段仍未将研究候选
+  接入在线 pending/active epoch；因此只证明协议语义和物理提交条件闭合，不声称在线收益。
+
+### 2026-09-11：B3 atomic shadow、物理反例与闭包预筛
+
+- 相关 profile 新增默认关闭的 atomic-epoch shadow；只在实际控制载波帧计算，且没有结构状态写
+  句柄。K16/Q16 seed 7 的首次版本误在无载波帧尝试提交，零通信功率导致时延发散并 fail closed；
+  调度修正后不再假设免费控制信道。
+- 30 个固定 K6/Q4 通信压力 case 中，“感知 Top-12 后做物理 gate”被 falsify：Top-4/8/12 对
+  通信可行 exhaustive 的 recall 为 `36.67%/56.67%/80%`，最差最优值比例分别为
+  `40.31%/40.31%/61.41%`。原因是高收益、无控制 reserve 的 receiver 候选挤占验证预算。
+- 修正采用维度分离的 feasibility-first 逻辑：先按 dependency closure 检查 SNR、deadline 和共享
+  RF 单纯形，再对通过者计算 Gram/LP，精确解后复核同一物理约束。相同 cases 平均预筛 22/32
+  个候选、post-LP 拒绝 0；Top-4/8/12 recall 为 `93.33%/100%/100%`，Top-12 平均验证 9 个 LP。
+  失败/修正 artifacts 分别为 `correlation_exchange_topm_physical.json` 和
+  `correlation_exchange_topm_physical_prefilter.json`。
+- K16/Q16 seeds `7/19/43`、每 seed 12 帧的 shadow artifact 为
+  `pilot-d01e584c83f9401b0f53`。每 seed 尝试 3 次，exact accept 与 would-commit 都为
+  `2/3、3/3、3/3`；接受候选副本一致率和 active 不变率均为 1。平均提交量约
+  `4350/3587/3450 bit`，协议时延 `1.583/1.426/1.407 ms`。
+- 计算门禁未通过：三组 Gram 时间均值约 `124.7/168.0/169.9 ms`，LP 另需
+  `15.8/22.2/21.2 ms`，超过 100 ms frame。且 shadow 输入仍标记为
+  `centralized_physical_diagnostic`，不能把同源副本一致率写成真实 packet-local 共识。
+
+### 2026-09-11：B4 精确增量 Gram 与两级对偶剪枝
+
+- 对每个 target 的 selected-edge mask 建立帧内精确 Gram-factor cache，并由候选与 incumbent 的
+  XOR 只重算 1--2 个改变目标；未变目标继承同一个 binary64 因子，不近似特征值。
+- 新增 raw-gain optimistic dual gate。由 `c_q>=1` 得 `g_corr<=g_raw`，所以 raw gain 在同一
+  simplex 价格下的对偶值是相关候选的合法上界；上界不超过 incumbent 时可在 Gram 前删除。
+  Top-M 内再按下一候选上界 branch-and-bound，达到上界即提前停止。
+- 30-case communication-feasible oracle 中，Top-12 仍为 100% recall；branch-and-bound 将平均候选
+  LP 从 9.0 降到 6.03，修正版 artifact 为
+  `artifacts/diagnostic/correlation_exchange_topm_physical_prefilter_bnb.json`。
+- K16/Q16 `7/19/43`、12-frame 重跑 artifact 为 `pilot-02eb8976d69006c2b891`。与 B3 相比，
+  exact accept/commit 和 active-unchanged 均不变；Gram 时间降至 `6.71/8.41/8.29 ms`，LP 为
+  `14.43/20.36/19.89 ms`，单节点重建 critical path 为 `3.19/3.42/2.97 ms`。短程计算门禁由
+  明确失败改善为约 `24--32 ms`，但输入仍是 centralized diagnostic，尚未晋级在线。
+- 为避免继续用 test-bank 风格种子调优，另以独立诊断种子 `20001--20005` 各跑 12 帧，artifact
+  为 `pilot-97900bc33756661c2f80`。15 次 shadow 尝试全部 exact accept、物理 would-commit，active
+  不变率为 1；各 seed 的 Gram/LP/单节点重建/协议时延合计约 `25.8--38.9 ms`。这加强了短程
+  运行时可行性证据，但仍不是 packet-local 或正式统计门禁。
+
 ## 12. 结果解释与禁止表述
 
 允许表述：

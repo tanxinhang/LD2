@@ -68,6 +68,9 @@ detection:
   # 1[g_dd >= g_min] gate.  The manifest pins dd_gain_mode: continuous; this
   # file keeps binary so pre-G2 certified runs stay reproducible.
   dd_gain_mode: binary
+  # Experimental conservative multi-edge fusion. The frozen baseline keeps
+  # independent evidence; research profiles may enable otfs_gram_lower_bound.
+  fusion_correlation_mode: independent
   K_q_max: 3                   # max reporting sources per target
   B_q: 64                      # soft info bits per report
   P_D_min: 0.2                 # fairness floor (D4); 0.8 was unreachable -> Lagrangian blowup.
@@ -218,6 +221,11 @@ marl:
   hyperedge_assignment_hold_frames: 1
   hyperedge_min_target_coverage: 1.0
   hyperedge_safety_fallback_enabled: true
+  # Counterfactual only: evaluates/certifies but never stages or executes.
+  correlation_exchange_shadow_enabled: false
+  correlation_exchange_shadow_period_frames: 3
+  correlation_exchange_shadow_top_m: 12
+  correlation_exchange_shadow_weak_target_count: 2
   p0_maxmin_pairing_enabled: false
   p0_maxmin_bypass_commitment_filter: false
   p0_maxmin_pairing_hold_frames: 1

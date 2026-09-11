@@ -346,6 +346,26 @@ def _episode(
         "distributed_replicated_power_worker_warmup_time_s", 0.0))
     detection: list[np.ndarray] = []
     detection_deflection: list[np.ndarray] = []
+    fusion_correlation_factor_mean: list[float] = []
+    fusion_correlation_factor_max: list[float] = []
+    fusion_correlation_factor_trace: list[np.ndarray] = []
+    correlation_shadow_attempted: list[float] = []
+    correlation_shadow_exact_accepted: list[float] = []
+    correlation_shadow_would_commit: list[float] = []
+    correlation_shadow_replica_agreement: list[float] = []
+    correlation_shadow_active_unchanged: list[float] = []
+    correlation_shadow_improvement: list[float] = []
+    correlation_shadow_protocol_bits: list[float] = []
+    correlation_shadow_protocol_latency_ms: list[float] = []
+    correlation_shadow_gram_time_ms: list[float] = []
+    correlation_shadow_lp_time_ms: list[float] = []
+    correlation_shadow_cache_hits: list[float] = []
+    correlation_shadow_cache_misses: list[float] = []
+    correlation_shadow_dual_early_stop: list[float] = []
+    correlation_shadow_rebuild_critical_ms: list[float] = []
+    correlation_shadow_record_bytes: list[float] = []
+    correlation_shadow_failure_reasons: list[str] = []
+    correlation_shadow_input_scopes: list[str] = []
     bits: list[float] = []
     active_senders: list[float] = []
     delivery: list[float] = []
@@ -508,7 +528,57 @@ def _episode(
             detection.append(np.asarray(info["P_D_q"], dtype=np.float64))
             detection_deflection.append(np.asarray(
                 info["detection_deflection_q"], dtype=np.float64))
+            fusion_correlation_factor_mean.append(float(info.get(
+                "fusion_correlation_factor_mean", 1.0)))
+            fusion_correlation_factor_max.append(float(info.get(
+                "fusion_correlation_factor_max", 1.0)))
+            correlation_shadow_attempted.append(float(info.get(
+                "correlation_exchange_shadow_attempted", 0.0)))
+            correlation_shadow_exact_accepted.append(float(info.get(
+                "correlation_exchange_shadow_exact_accepted", 0.0)))
+            correlation_shadow_would_commit.append(float(info.get(
+                "correlation_exchange_shadow_would_commit", 0.0)))
+            correlation_shadow_replica_agreement.append(float(info.get(
+                "correlation_exchange_shadow_replica_agreement", 0.0)))
+            correlation_shadow_active_unchanged.append(float(info.get(
+                "correlation_exchange_shadow_active_unchanged", 1.0)))
+            correlation_shadow_improvement.append(float(info.get(
+                "correlation_exchange_shadow_improvement", 0.0)))
+            correlation_shadow_protocol_bits.append(float(info.get(
+                "correlation_exchange_shadow_protocol_bits", 0.0)))
+            correlation_shadow_protocol_latency_ms.append(1000.0 * float(
+                info.get("correlation_exchange_shadow_protocol_latency_s", 0.0)))
+            correlation_shadow_gram_time_ms.append(1000.0 * float(info.get(
+                "correlation_exchange_shadow_gram_time_s", 0.0)))
+            correlation_shadow_lp_time_ms.append(1000.0 * float(info.get(
+                "correlation_exchange_shadow_lp_time_s", 0.0)))
+            correlation_shadow_cache_hits.append(float(info.get(
+                "correlation_exchange_shadow_factor_cache_hits", 0.0)))
+            correlation_shadow_cache_misses.append(float(info.get(
+                "correlation_exchange_shadow_factor_cache_misses", 0.0)))
+            correlation_shadow_dual_early_stop.append(float(info.get(
+                "correlation_exchange_shadow_dual_early_stop", 0.0)))
+            correlation_shadow_rebuild_critical_ms.append(1000.0 * float(
+                info.get(
+                    "correlation_exchange_shadow_rebuild_critical_path_s", 0.0)))
+            correlation_shadow_record_bytes.append(float(info.get(
+                "correlation_exchange_shadow_record_bytes", 0.0)))
+            shadow_failure = str(info.get(
+                "correlation_exchange_shadow_failure_reason", ""))
+            if shadow_failure:
+                correlation_shadow_failure_reasons.append(shadow_failure)
+            shadow_scope = str(info.get(
+                "correlation_exchange_shadow_input_scope", ""))
+            if shadow_scope:
+                correlation_shadow_input_scopes.append(shadow_scope)
             if include_trace:
+                fusion_correlation_factor_trace.append(np.asarray(
+                    info.get(
+                        "fusion_correlation_factor_q",
+                        np.ones(int(cfg.scenario.Q), dtype=np.float64),
+                    ),
+                    dtype=np.float64,
+                ).copy())
                 uav_position_trace.append(np.asarray(
                     info["uav_positions"], dtype=np.float64).copy())
                 sensing_power_trace.append(np.asarray(
@@ -879,6 +949,62 @@ def _episode(
             bistatic_information_gain)),
         "bistatic_tracker_full_rank_target_fraction": float(np.mean(
             bistatic_full_rank_fraction)),
+        "fusion_correlation_mode": str(
+            cfg.detection.fusion_correlation_mode),
+        "fusion_correlation_factor_mean": float(np.mean(
+            fusion_correlation_factor_mean)),
+        "fusion_correlation_factor_max": float(np.max(
+            fusion_correlation_factor_max)),
+        "correlation_exchange_shadow_enabled": bool(getattr(
+            cfg.marl, "correlation_exchange_shadow_enabled", False)),
+        "correlation_exchange_shadow_attempt_rate": float(np.mean(
+            correlation_shadow_attempted)),
+        "correlation_exchange_shadow_exact_accept_rate_per_attempt": float(
+            np.sum(correlation_shadow_exact_accepted)
+            / max(np.sum(correlation_shadow_attempted), 1.0)),
+        "correlation_exchange_shadow_would_commit_rate_per_attempt": float(
+            np.sum(correlation_shadow_would_commit)
+            / max(np.sum(correlation_shadow_attempted), 1.0)),
+        "correlation_exchange_shadow_replica_agreement_rate_per_accept": float(
+            np.sum(correlation_shadow_replica_agreement)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_active_unchanged_fraction": float(
+            np.mean(correlation_shadow_active_unchanged)),
+        "correlation_exchange_shadow_improvement_mean_accepted": float(
+            np.sum(correlation_shadow_improvement)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_protocol_bits_mean_accepted": float(
+            np.sum(correlation_shadow_protocol_bits)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_protocol_latency_ms_mean_accepted": float(
+            np.sum(correlation_shadow_protocol_latency_ms)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_gram_time_ms_mean_attempt": float(
+            np.sum(correlation_shadow_gram_time_ms)
+            / max(np.sum(correlation_shadow_attempted), 1.0)),
+        "correlation_exchange_shadow_lp_time_ms_mean_attempt": float(
+            np.sum(correlation_shadow_lp_time_ms)
+            / max(np.sum(correlation_shadow_attempted), 1.0)),
+        "correlation_exchange_shadow_factor_cache_hit_rate": float(
+            np.sum(correlation_shadow_cache_hits)
+            / max(
+                np.sum(correlation_shadow_cache_hits)
+                + np.sum(correlation_shadow_cache_misses),
+                1.0,
+            )),
+        "correlation_exchange_shadow_dual_early_stop_rate_per_attempt": float(
+            np.sum(correlation_shadow_dual_early_stop)
+            / max(np.sum(correlation_shadow_attempted), 1.0)),
+        "correlation_exchange_shadow_rebuild_critical_ms_mean_accepted": float(
+            np.sum(correlation_shadow_rebuild_critical_ms)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_record_bytes_mean_accepted": float(
+            np.sum(correlation_shadow_record_bytes)
+            / max(np.sum(correlation_shadow_exact_accepted), 1.0)),
+        "correlation_exchange_shadow_failure_reasons": sorted(set(
+            correlation_shadow_failure_reasons)),
+        "correlation_exchange_shadow_input_scopes": sorted(set(
+            correlation_shadow_input_scopes)),
         "hyperedge_acceleration_backend": (
             hyperedge_acceleration_backend[-1]
             if hyperedge_acceleration_backend else "unknown"),
@@ -919,6 +1045,10 @@ def _episode(
         result["trace"] = {
             "detection": values.tolist(),
             "detection_deflection": deflection_values.tolist(),
+            "fusion_correlation_factor_q": np.asarray(
+                fusion_correlation_factor_trace,
+                dtype=np.float64,
+            ).tolist(),
             "belief_rmse_m": list(belief_rmse),
             "uav_positions": np.asarray(
                 uav_position_trace, dtype=np.float64).tolist(),

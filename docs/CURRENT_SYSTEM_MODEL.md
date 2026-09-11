@@ -1,6 +1,6 @@
 # UAV-ISAC 最新系统总报告：系统模型、理论与算法
 
-更新时间：2026-09-10
+更新时间：2026-09-11
 系统身份：K16/Q16、U2U-only、严格分布式、解析控制基线
 正式状态：`algorithm_research`；当前提交尚无新的 blind-100 正式证据
 
@@ -278,6 +278,32 @@ D_min(p) = max(Q^-1(P_FA) - Q^-1(p), 0)^2
 该映射单调，但效用 `-log(1-P_D)` 对 `D` 并非全局凹函数。因此旧 P0 greedy 不能声称
 `(1-1/e)` 子模近似保证；当前文档将其严格标记为启发式，只把固定结构功率 LP 称为精确解。
 
+### 6.5 实验性相关校准下界
+
+`exp_strict_distributed_k16q16_correlation_calibrated.yaml` 不再把同一目标的多条选中边默认视为
+独立证据。令归一化匹配滤波统计的均值为 `mu_q`、协方差为 `R_q`，联合 Deflection 为：
+
+```text
+D_joint,q = mu_q^H R_q^-1 mu_q
+```
+
+对正定 `R_q`，Rayleigh 商给出：
+
+```text
+D_joint,q >= ||mu_q||_2^2 / lambda_max(R_q)
+          = sum_e a_eq p_eq / c_q,    c_q=lambda_max(R_q)>=1
+```
+
+实现用有限 `M×N` delay–Doppler steering atom 的归一化 Gram 矩阵构造 `R_q`。二维 atom 的
+内积等于 delay 和 Doppler 两个有限 Dirichlet 内积之积，因此矩阵按构造为 Hermitian PSD；
+完全重合的 `n` 个模板给出 `c_q=n`，相差整数 DD bin 的模板给出 `c_q=1`。奇异极限按加入任意
+小独立噪声后取极限理解。该下界把每个目标的单位功率系数统一替换为 `a_eq/c_q`，所以固定结构
+下仍是线性 LP；功率求解和最终检测使用同一个 `c_q`，不会出现优化证书与执行记分不一致。
+
+这一模式目前只覆盖 selected-only receiver evidence。passive multireceiver 会改变协方差维度，
+配置组合被显式拒绝，不能把 selected-edge 的因子冒充其证书。该 profile 仍是诊断候选，不改变
+冻结基线；在 waveform/ROC 校准和 paired blind gate 通过前，不声称它是真实接收机的精确相关矩阵。
+
 ## 7. 联合功率约束与精确 max–min LP
 
 ### 7.1 可用感知预算
@@ -303,9 +329,103 @@ subject to  sum_i g_iq p_iq >= eta,               for every q
             p_iq >= 0
 ```
 
+相关校准 profile 使用 `g_iq/c_q` 替换 `g_iq`；`c_q` 在结构冻结后与功率无关，因此不改变
+上述问题的线性、凸性或 HiGHS primal/dual 证书语义。
+
 若给定 QoS reserve `r_q`，先附加 `sum_i g_iq p_iq>=r_q`，再最大化最弱目标。这避免只推高
 最差目标时暗中破坏已经达到的任务门槛。实现使用 HiGHS dual simplex，并对极小/极大物理
 系数进行尺度保护；解后检查非负性、预算和 reserve 可达性。
+
+### 7.2.1 相关感知的精确局部交换研究内核
+
+`coordination/correlation_aware_exchange.py` 实现了当前结构周围的一步 N5/N6 交换门禁。对每个
+候选结构 `E'`，先重算其 Gram 因子和校准增益 `g'(E')`，再用 incumbent 精确 LP 的目标价格
+计算候选的对偶机会值，并以 incumbent 功率重放的一阶变化作为次级排序键：
+
+```text
+S(E') = U_lambda*(E') - eta*
+r(E') = lambda*^T [D(E',p*) - D(E,p*)]
+```
+
+该分数不构成接受证书。任意 simplex 价格给出的
+
+```text
+U_lambda(E') = sum_i b_i max_q lambda_q g'_iq
+```
+
+是候选精确 max-min 值的弱对偶上界；仅当 `U_lambda(E')` 不可能超过 incumbent 时才安全剪枝。
+其余候选按分数选 Top-M，并逐个执行精确 fixed-structure LP。no-op 始终隐含在候选集中，只有
+精确目标严格改善超过容差的交换才能返回，因此该研究内核在自身模型内具有单步不降性质。
+
+目前它尚未获得在线执行权。下一小节的证书层已经闭合“候选是什么意思、各节点是否重建出同一
+候选、空口是否足以完成原子提交”，但尚未把该研究内核接入主线环境状态机。因此它仍只允许用于
+小规模结构最优性和 Top-M recall 审计，不能把集中式研究内核称为在线分布式算法。
+
+### 7.2.2 相关候选的 reconstruct-then-hash 原子证书
+
+`coordination/correlation_candidate_commit.py` 定义了候选的完整规范记录。SHA-256 的域分离输入
+同时覆盖 generation、每个依赖的版本向量、完整结构/角色/owner、OTFS numerology、Gram 相关
+因子、校准增益、UAV 感知预算、QoS reserve、精确功率解、逐目标 Deflection、最差目标值、LP
+目标对偶价格与对偶上界。整数使用固定大端宽度，浮点使用规范化的 IEEE-754 binary64，布尔结构
+按确定 bit order 打包；不使用 `repr` 或 JSON 浮点文本。
+
+每个参与节点必须从已经物理送达的依赖包独立调用同一重建过程，再执行以下闭合检查：
+
+```text
+D_q = sum_i g_iq p_iq
+eta = min_q D_q
+sum_q p_iq <= b_i
+lambda >= 0, sum_q lambda_q = 1
+U(lambda) = sum_i b_i max_q(lambda_q g_iq) >= eta
+```
+
+协议采用“摘要上空口、完整记录本地重建”：prepare/vote/decision 携带完整 256-bit digest 和
+32-bit generation，稀疏结构变更仍由原有布局计费；不重复发送两个稠密 `K×Q` 表。相对原
+64-bit digest/16-bit epoch，每个实际发送包增加 208 bit。若依赖闭包含 `m` 个参与者，三轮协议
+的额外 over-air bits 为 `208(m+1)`。这不是免费通信假设：本地重建所需端点/owner posterior
+必须此前已经通过物理信道送达且代次匹配，原子协议本身仍逐链路检查 SNR、serialization latency、
+端到端 deadline、RF 能量和通信—感知共享功率单纯形。
+
+SHA-256 相等只是快速身份检查，不单独产生执行权；ACK 前仍要求参与者的规范记录逐字节相等。
+因此即使抽象地假设哈希碰撞，不同物理模型或功率方案也会 fail closed。当前模块只是可执行前的
+协议证书内核，尚未接入 `environment_core` 的 pending/active epoch，故不改变当前在线结果。
+
+### 7.2.3 Atomic-epoch shadow 与通信闭包预筛
+
+实验性相关 profile 现每 3 帧、且仅在真实控制载波存在时运行一次 counterfactual shadow。它读取
+当前 active epoch，枚举相关感知 N5/N6 候选，执行证书重建并报告改善、摘要大小、空口 bits、
+物理时延、Gram/LP 时间和副本一致性；函数没有 pending/active epoch 写句柄，并逐帧核验 active
+structure 未改变。无载波帧不会假设零成本控制信道。
+
+首次“先按感知排序 Top-12、再检查通信”的 30-case K6/Q4 压力测试被反例推翻：一个无控制
+功率的 receiver 产生高感知收益候选并占据前排，使 Top-12 对通信可行邻域最优的 recall 只有
+`80%`，最差值比为 `61.41%`。修正版不把 bit、W、s 与 Deflection 混为人为加权和，而先验证
+候选 dependency closure 的原生 SNR、逐包/端到端时延和联合 RF 单纯形。固定行预算下，该物理
+可行性与 target-wise 功率分配无关，故可在 Gram/LP 前安全预筛；精确功率解后仍重复同一检查。
+修正版在相同 30 cases 上预筛平均 22/32 个物理不可行候选，post-LP 物理拒绝为 0；Top-4/8/12
+recall 为 `93.33%/100%/100%`，Top-12 平均只解 9 个候选 LP，和通信可行 exhaustive 相同。
+
+K16/Q16 的 3-seed、12-frame shadow 中，每 seed 尝试 3 次；exact accept/physical commit 比例依次
+为 `2/3、3/3、3/3`，所有被接受候选的副本一致率和 active-structure 不变率均为 1。平均候选
+提交空口量约为 `3.45--4.35 kbit`，独立三轮协议时延约 `1.41--1.58 ms`。但 Gram 枚举平均耗时
+约 `125--170 ms`，已经超过 100 ms 控制帧，LP 另需约 `16--22 ms`；因此当前实现明确不能晋级
+在线执行。该 shadow 的输入范围标记为 `centralized_physical_diagnostic`：当前副本由同一已构造
+物理张量重建，一致率只验证证书/状态机接线，尚不能替代 packet-local 全候选张量重建证据。
+
+随后加入两层不改变目标值的精确计算优化。第一层按 `(target, selected-edge mask)` 缓存相关因子，
+并由 `E' xor E` 只访问 N5/N6 实际改变的 1--2 个目标；未变目标直接继承 incumbent 因子。第二层
+利用 `c_q>=1` 推出 `g_corr(E')<=g_raw(E')`，先计算廉价上界：
+
+```text
+eta_corr*(E') <= U_lambda*(g_corr(E')) <= U_lambda*(g_raw(E'))
+```
+
+若最右项不超过 incumbent 即可在构造 Gram 前安全剪枝。对已排序候选还执行 branch-and-bound：
+当前最好精确值达到下一候选的对偶上界时，所有余项都不可能更优，可提前终止。K16/Q16 同一
+`7/19/43` 三种子 shadow 的 accept/commit 决策保持不变，Gram 时间降至约 `6.7--8.4 ms`，LP
+约 `14.4--20.4 ms`，单节点证书重建约 `3.0--3.4 ms`。三项之和约 `24--32 ms`，在这组短程
+诊断上低于预留的 45 ms 非无线预算；但仍需更多种子、packet-local 输入和与运动/安全阶段的联合
+critical-path 门禁，不能据此启用在线结构写入。
 
 ### 7.3 对偶解释
 
@@ -629,7 +749,7 @@ forecast 改善均值为 0.00233，95% CI 为 `[-0.01120,0.01560]`。因此保�
 
 ### 14.4 软件验证
 
-本轮全量回归为 `1768 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
+本轮全量回归为 `1784 passed, 6 skipped, 7 warnings`。Architecture V2 检查现在还覆盖
 source-root、唯一归属、相对导入和依赖环。strict
 identity 的系统字段全部一致；clean-Git 项失败。formal gate 仍拒绝旧 blind-100，因为它绑定的
 执行源码不是当前工作树。

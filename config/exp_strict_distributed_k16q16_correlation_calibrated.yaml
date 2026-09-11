@@ -1,0 +1,13 @@
+# Experimental A2 profile: finite-OTFS-template correlation lower bound.
+# It differs from the frozen K16/Q16 baseline only in the evidence fusion
+# covariance model, so paired-seed evaluation isolates this physical change.
+extends: exp_strict_distributed_k16q16.yaml
+
+detection:
+  fusion_correlation_mode: otfs_gram_lower_bound
+
+marl:
+  correlation_exchange_shadow_enabled: true
+  correlation_exchange_shadow_period_frames: 3
+  correlation_exchange_shadow_top_m: 12
+  correlation_exchange_shadow_weak_target_count: 2
