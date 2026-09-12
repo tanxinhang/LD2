@@ -134,6 +134,42 @@ def conditional_deflection_gain(
     return float(innovation * innovation / conditional_variance)
 
 
+def conditional_deflection_gradient(
+    mean_shift: np.ndarray,
+    covariance: np.ndarray,
+    mean_derivatives: np.ndarray,
+    covariance_derivatives: np.ndarray,
+    selected: Sequence[int],
+    candidate: int,
+) -> tuple[float, np.ndarray]:
+    """Exact local derivative of the Schur increment for real SPD evidence.
+
+    Derivatives have shape (coordinates,n) and (coordinates,n,n). For any
+    fixed set A, d D(A) = 2 (d mu_A)^T w_A - w_A^T (d Sigma_A) w_A.
+    Subtracting the selected-set derivative gives d Delta D. This is a
+    screening gradient, not an improvement certificate for a finite move.
+    Inputs must describe receiver-available model parameters. Mean/covariance
+    derivatives must include geometry effects; the covariance term cannot be
+    dropped just because the current covariance was calibrated once.
+    """
+    delta, sigma = _validated_model(mean_shift, covariance)
+    dm = np.asarray(mean_derivatives, dtype=float)
+    ds = np.asarray(covariance_derivatives, dtype=float)
+    if dm.ndim != 2 or dm.shape[1] != len(delta) or ds.shape != (len(dm),len(delta),len(delta)):
+        raise ValueError('derivative dimensions do not match evidence model')
+    if np.any(~np.isfinite(dm)) or np.any(~np.isfinite(ds)):
+        raise ValueError('finite derivatives required')
+    if not np.allclose(ds,ds.transpose(0,2,1),rtol=1e-12,atol=1e-12):
+        raise ValueError('covariance derivatives must be symmetric')
+    gain = conditional_deflection_gain(delta,sigma,selected,candidate)
+    chosen = _normalized_indices(selected,len(delta))
+    _, before = optimal_linear_soft_fusion(delta,sigma,chosen)
+    _, after = optimal_linear_soft_fusion(delta,sigma,chosen+(int(candidate),))
+    def derivative(weights):
+        return 2*dm@weights-np.einsum('i,dij,j->d',weights,ds,weights)
+    return gain,derivative(after)-derivative(before)
+
+
 def _validated_transport(
     size: int,
     bits: np.ndarray,

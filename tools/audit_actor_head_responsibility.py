@@ -23,6 +23,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.params import load_config
+from scripts.run_mappo import _import_torch_with_single_windows_openmp
+
+# This executable is also launched in a fresh subprocess by pytest, where
+# the parent conftest bootstrap has not run.
+_TORCH, _OPENMP_RUNTIME_HANDLE = _import_torch_with_single_windows_openmp()
 from uav_isac.environment.env_wrapper import UAVISACEnv
 
 

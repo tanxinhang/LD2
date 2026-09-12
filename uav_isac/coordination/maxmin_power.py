@@ -1968,16 +1968,21 @@ def _central_dual_price(
     f_value = _maxmin_dual_value(gain, budget, prices)
     if f_value > certified_cap:
         low, high = 0.0, 1.0
+        feasible_prices, feasible_value = lp.copy(), lp_value
         for _ in range(64):
             middle = 0.5 * (low + high)
             mixed = (1.0 - middle) * lp + middle * prices
-            if _maxmin_dual_value(gain, budget, mixed) <= certified_cap:
+            mixed /= float(np.sum(mixed))
+            mixed_value = _maxmin_dual_value(gain, budget, mixed)
+            if mixed_value <= certified_cap:
                 low = middle
+                feasible_prices, feasible_value = mixed, mixed_value
             else:
                 high = middle
-        prices = (1.0 - low) * lp + low * prices
-        prices /= float(np.sum(prices))
-        f_value = _maxmin_dual_value(gain, budget, prices)
+        # Retain the normalized point actually checked. Reconstructing and
+        # renormalizing after bisection can cross the cap by an ulp and trigger
+        # an unnecessary LP fallback, breaking central-path continuity.
+        prices, f_value = feasible_prices, feasible_value
     feasible = bool(
         np.all(prices >= 0.0)
         and abs(float(np.sum(prices)) - 1.0) <= 1.0e-9
